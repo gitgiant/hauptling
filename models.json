@@ -1,0 +1,133 @@
+{
+  "_doc": "Shipped default. Override any part in ~/.hauptling/models.json (deep-merged). tier: 1 cheap, 2 mid, 3 top. Prices are USD per million tokens; null means unknown (cost shows as unknown). Codex keeps its workspace-write sandbox (network on so it reaches the broker); it cannot write .git, so hauptling commits for it on report/test request.",
+  "rules": {
+    "easy": 1,
+    "normal": 2,
+    "hard": 3
+  },
+  "order": [
+    "claude",
+    "codex",
+    "agy"
+  ],
+  "vendors": {
+    "claude": {
+      "enabled": true,
+      "launch": [
+        "claude",
+        "--model",
+        "{model}",
+        "--permission-mode",
+        "auto",
+        "{prompt}"
+      ],
+      "models": [
+        {
+          "id": "haiku-5-5",
+          "model": "claude-haiku-5-5",
+          "tier": 1,
+          "usd_in": null,
+          "usd_out": null
+        },
+        {
+          "id": "sonnet-5-5",
+          "model": "claude-sonnet-5-5",
+          "tier": 2,
+          "usd_in": null,
+          "usd_out": null
+        },
+        {
+          "id": "opus-5-5",
+          "model": "claude-opus-5-5",
+          "tier": 3,
+          "usd_in": null,
+          "usd_out": null
+        },
+        {
+          "id": "fable-5-2",
+          "model": "claude-fable-5-2",
+          "tier": 3,
+          "usd_in": null,
+          "usd_out": null
+        }
+      ]
+    },
+    "codex": {
+      "enabled": true,
+      "launch": [
+        "codex",
+        "--model",
+        "{model}",
+        "--sandbox",
+        "workspace-write",
+        "-c",
+        "sandbox_workspace_write.network_access=true",
+        "--ask-for-approval",
+        "never",
+        "--dangerously-bypass-hook-trust",
+        "{prompt}"
+      ],
+      "models": [
+        {
+          "id": "gpt-6-luna",
+          "model": "gpt-6-luna",
+          "tier": 1,
+          "usd_in": null,
+          "usd_out": null,
+          "notes": "fast, easier tasks"
+        },
+        {
+          "id": "gpt-6.2-sol",
+          "model": "gpt-6.2-sol",
+          "tier": 2,
+          "usd_in": null,
+          "usd_out": null,
+          "notes": "go-to for coding"
+        },
+        {
+          "id": "gpt-6.2-astra",
+          "model": "gpt-6.2-astra",
+          "tier": 3,
+          "usd_in": null,
+          "usd_out": null,
+          "notes": "most capable"
+        }
+      ]
+    },
+    "agy": {
+      "enabled": true,
+      "launch": [
+        "agy",
+        "--model",
+        "{model}",
+        "--mode",
+        "auto",
+        "-i",
+        "{prompt}"
+      ],
+      "models": [
+        {
+          "id": "gemini-3.8-flash-medium",
+          "model": "gemini-3.8-flash-medium",
+          "tier": 1,
+          "usd_in": null,
+          "usd_out": null
+        },
+        {
+          "id": "gemini-4-neon-medium",
+          "model": "gemini-4-neon-medium",
+          "tier": 2,
+          "usd_in": null,
+          "usd_out": null
+        },
+        {
+          "id": "gemini-4-neon-high",
+          "model": "gemini-4-neon-high",
+          "tier": 3,
+          "usd_in": null,
+          "usd_out": null
+        }
+      ]
+    }
+  }
+}

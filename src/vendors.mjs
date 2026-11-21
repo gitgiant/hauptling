@@ -1,0 +1,97 @@
+import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { homedir } from 'node:os';
+
+/*
+ * Worker-side vendor setup, run as the slot user right before its TUI starts
+ * (`hauptling prepare <vendor> <dir>`). User-level only: target repos are never touched.
+ * Hook formats: Claude ~/.claude/settings.json, Codex ~/.codex/hooks.json,
+ * agy ~/.gemini/config/hooks.json (agy has no UserPromptSubmit; PreInvocation runs before each model call).
+ */
+
+export const HOOK_EVENTS = {
+  claude: ['SessionStart', 'UserPromptSubmit', 'PostToolUse', 'Stop'],
+  codex: ['SessionStart', 'UserPromptSubmit', 'PostToolUse', 'Stop'],
+  agy: ['SessionStart', 'PreInvocation', 'PostToolUse', 'Stop'],
+};
+
+const readJson = (p, d = {}) => (existsSync(p) ? JSON.parse(readFileSync(p, 'utf8') || '{}') : d);
+const writeJson = (p, v) => { mkdirSync(dirname(p), { recursive: true }); writeFileSync(p, JSON.stringify(v, null, 2) + '\n'); };
+const cmd = (vendor, event) => `hauptling hook ${vendor} ${event}`;
+const ours = (h) => JSON.stringify(h).includes('hauptling hook');
+
+export function prepare(vendor, dir, home = homedir()) {
+  if (vendor === 'claude') {
+    const settingsPath = join(home, '.claude', 'settings.json');
+    const s = readJson(settingsPath);
+    s.hooks ||= {};
+    for (const e of HOOK_EVENTS.claude) {
+      s.hooks[e] = (s.hooks[e] || []).filter(h => !ours(h));
+      s.hooks[e].push({ hooks: [{ type: 'command', command: cmd('claude', e), timeout: 10 }] });
+    }
+    writeJson(settingsPath, s);
+    // Skip the first-run folder trust dialog for this clone.
+    const statePath = join(home, '.claude.json');
+    const st = readJson(statePath);
+    st.projects ||= {};
+    st.projects[dir] = { ...st.projects[dir], hasTrustDialogAccepted: true };
+    writeJson(statePath, st);
+  } else if (vendor === 'codex') {
+    const hooksPath = join(home, '.codex', 'hooks.json');
+    const h = readJson(hooksPath);
+    h.hooks ||= {};
+    for (const e of HOOK_EVENTS.codex) {
+      h.hooks[e] = (h.hooks[e] || []).filter(x => !ours(x));
+      h.hooks[e].push({ hooks: [{ type: 'command', command: cmd('codex', e), timeout: 10 }] });
+    }
+    writeJson(hooksPath, h);
+    const configPath = join(home, '.codex', 'config.toml');
+    const header = `[projects."${dir}"]`;
+    const config = existsSync(configPath) ? readFileSync(configPath, 'utf8') : '';
+    if (!config.includes(header)) appendFileSync(configPath, `\n${header}\ntrust_level = "trusted"\n`);
+  } else if (vendor === 'agy') {
+    const hooksPath = join(home, '.gemini', 'config', 'hooks.json');
+    const h = readJson(hooksPath);
+    for (const e of HOOK_EVENTS.agy) {
+      const handler = { type: 'command', command: cmd('agy', e), timeout: 10 };
+      h[`hauptling-${e}`] = { [e]: e === 'PostToolUse' ? [{ matcher: '.*', hooks: [handler] }] : [handler] };
+    }
+    writeJson(hooksPath, h);
+    const settingsPath = join(home, '.gemini', 'antigravity-cli', 'settings.json');
+    const s = readJson(settingsPath);
+    s.trustedWorkspaces = [...new Set([...(s.trustedWorkspaces || []), dir])];
+    // Unattended workers must be able to report and request tests; nothing else is pre-approved.
+    s.permissions ||= {};
+    s.permissions.allow = [...new Set([...(s.permissions.allow || []), 'command(hauptling)'])];
+    writeJson(settingsPath, s);
+  } else throw new Error(`Unknown vendor ${vendor}`);
+}
+
+/** Normalizes a vendor's hook stdin. */
+export function hookInput(vendor, raw) {
+  if (vendor === 'agy') return { sessionId: raw.conversationId, model: raw.modelName, cwd: raw.workspacePaths?.[0], subagent: false };
+  return { sessionId: raw.session_id, model: raw.model, cwd: raw.cwd, subagent: Boolean(raw.agent_id || raw.subagent) };
+}
+
+/** Vendor-specific hook stdout for injected context (while working) or a stop block (mail arrived at Stop). */
+export function hookOutput(vendor, event, { context, block }) {
+  if (block) {
+    if (event !== 'Stop') return hookOutput(vendor, event, { context: block });
+    return vendor === 'agy' ? { decision: 'continue', reason: block } : { decision: 'block', reason: block };
+  }
+  if (!context) return null;
+  if (vendor === 'agy') {
+    if (event === 'SessionStart') return { injectSteps: [{ systemMessage: { systemMessage: context } }] };
+    if (event === 'PreInvocation') return { injectSteps: [{ ephemeralMessage: context }] };
+    return null;
+  }
+  if (event === 'Stop') return null;
+  return { hookSpecificOutput: { hookEventName: event, additionalContext: context } };
+}
+
+/** Events at which a vendor can receive injected text (mail is only claimed there). */
+export function canInject(vendor, event) {
+  if (event === 'Stop') return true;
+  if (vendor === 'agy') return event === 'SessionStart' || event === 'PreInvocation';
+  return true;
+}
