@@ -181,6 +181,32 @@ test('watch: stuck on a permission prompt → blocked + notified once; activity 
   assert.equal((await core.call('wait', { timeout: 1 })).events.at(-1).kind, 'exited');
 });
 
+test('watch: idle without reporting → blocked + notified once; under threshold or already reported → untouched', async () => {
+  const { db, core, host, toasts } = setup();
+  await core.call('delegator.start', { repo: 'x/y' });
+  const a = (await core.call('spawn', { brief: 'task', vendor: 'agy', mode: 'cheapest' })).id;
+  const b = (await core.call('spawn', { brief: 'task', vendor: 'agy', mode: 'cheapest' })).id;
+  const c = (await core.call('spawn', { brief: 'task', vendor: 'agy', mode: 'cheapest' })).id;
+  await settle();
+  const ago = m => new Date(Date.now() - m * 60e3).toISOString();
+  const seen = db.prepare('UPDATE identities SET seen_at = ? WHERE identity = ?');
+  db.prepare('UPDATE agents SET idle = 1 WHERE id IN (?, ?, ?)').run(a, b, c);
+  seen.run(ago(16), a); seen.run(ago(5), b); seen.run(ago(16), c);
+  db.prepare("UPDATE agents SET state = 'done' WHERE id = ?").run(c);
+  host.screen = 'line zero\nline one\n\nI am stuck, which file?\n\n  \nplease advise\n';
+  await core.watch();
+  await core.watch();
+  const st = id => db.prepare('SELECT state FROM agents WHERE id = ?').get(id).state;
+  assert.equal(st(a), 'blocked');
+  assert.equal(st(b), 'working');
+  assert.equal(st(c), 'done');
+  assert.equal(toasts.length, 1);
+  assert.match(toasts[0].body, /I am stuck, which file\? \| please advise/);
+  assert.doesNotMatch(toasts[0].body, /line zero/);
+  assert.match(toasts[0].body, new RegExp(`hauptling attach ${a}`));
+  assert.deepEqual(toasts[0].choices, []);
+});
+
 test('pushToMain: no PR; passing gate test rebases and pushes to base', async () => {
   const { db, core, host, gh } = setup();
   await core.call('delegator.start', { repo: 'gitgiant/demo' });

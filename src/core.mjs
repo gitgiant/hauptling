@@ -19,7 +19,7 @@ const ENDED = ['merged', 'killed', 'closed', 'handed-off'];
 const AGENT_CALLS = new Set(['hook', 'report', 'ask', 'mail.send', 'mail.check', 'mail.status', 'mail.peers', 'test.request', 'test.wait', 'test.get', 'whoami']);
 const RUNNER_CALLS = new Set(['test.claim', 'test.report', 'test.heartbeat']);
 
-export function createCore({ db, host, github, notify = () => false, models = loadModels, workerUrl, publicUrl = workerUrl, runnerToken, log = () => {}, stallMinutes = Number(process.env.HAUPTLING_STALL_MINUTES || 10) }) {
+export function createCore({ db, host, github, notify = () => false, models = loadModels, workerUrl, publicUrl = workerUrl, runnerToken, log = () => {}, stallMinutes = Number(process.env.HAUPTLING_STALL_MINUTES || 10), idleMinutes = Number(process.env.HAUPTLING_IDLE_MINUTES || 15) }) {
   const bus = new EventEmitter();
   bus.setMaxListeners(0);
   const agentRow = (id) => db.prepare('SELECT * FROM agents WHERE id = ?').get(id);
@@ -513,6 +513,19 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
           mail.setStatus(db, a.id, `exited: ${a.title}`.slice(0, STATUS_MAX));
           emit(a.delegator, a.id, 'exited', `${a.id} TUI exited${tail ? `: ${tail}` : ''}. \`hauptling attach ${a.id}\` to look, \`hauptling kill ${a.id}\` to free its slot.`);
           await startQueued(a.delegator);
+          continue;
+        }
+        if (a.state === 'working' && a.idle) {
+          // Ended its turn without `hauptling report` (e.g. asked a question in plain text).
+          if (at - Date.parse(a.seen_at) < idleMinutes * 60e3) continue;
+          if (kvGet(db, `stall:${a.id}`) === a.seen_at) continue; // already notified this idle period
+          kvSet(db, `stall:${a.id}`, a.seen_at);
+          const screen = await host.tmuxCapture?.(a.slot, a.id, 25).catch(() => '') || '';
+          const tail = screen.split('\n').map(l => l.trim()).filter(Boolean).slice(-3).join(' | ');
+          update(a.id, { state: 'blocked' });
+          mail.setStatus(db, a.id, 'blocked: idle without report');
+          notify({ title: `${a.id} is idle without reporting`, body: `${tail ? `${tail}\n` : ''}Run: hauptling attach ${a.id}`, choices: [], links: null });
+          log(`idle ${a.id}`);
           continue;
         }
         if (a.state !== 'working' || a.idle || at - Date.parse(a.seen_at) < stallMinutes * 60e3) continue;
