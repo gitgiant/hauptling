@@ -77,12 +77,16 @@ test('detect + fill + junit', () => {
   assert.equal(j.failures[0].loc, 'a.js:3');
 });
 
-test('vendors: hook output shapes and prepare is idempotent', () => {
+test('vendors: hook output shapes and prepare is idempotent', (t) => {
   assert.deepEqual(hookOutput('claude', 'Stop', { block: 'mail' }), { decision: 'block', reason: 'mail' });
   assert.deepEqual(hookOutput('agy', 'Stop', { block: 'mail' }), { decision: 'continue', reason: 'mail' });
   assert.deepEqual(hookOutput('agy', 'PreInvocation', { context: 'x' }), { injectSteps: [{ ephemeralMessage: 'x' }] });
   assert.equal(hookOutput('agy', 'PostToolUse', { context: 'x' }), null);
   assert.equal(hookOutput('codex', 'PostToolUse', { context: 'x' }).hookSpecificOutput.additionalContext, 'x');
+  // prepare() honours these (set inside worker containers); keep the test hermetic.
+  const saved = { CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR, CODEX_HOME: process.env.CODEX_HOME };
+  delete process.env.CLAUDE_CONFIG_DIR; delete process.env.CODEX_HOME;
+  t.after(() => { for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k]; else process.env[k] = v; });
   const home = mkdtempSync(join(tmpdir(), 'hlh-'));
   mkdirSync(join(home, '.claude'));
   writeFileSync(join(home, '.claude', 'settings.json'), JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'mine' }] }] } }));
