@@ -145,7 +145,11 @@ export async function doctor({ slots, vendors = VENDORS } = {}) {
   check(true, `Node ${process.versions.node}`);
   for (const bin of ['git', 'gh', 'docker', 'hauptling', ...vendors]) check(have(bin), `has ${bin}`, `${bin} not on PATH: rerun setup`);
   check(gitGet('git', 'user.name') && gitGet('git', 'user.email'), `git identity ${gitGet('git', 'user.name')}`, 'git has no user.name/user.email: rerun setup or `git config --global`');
-  try { execFileSync('gh', ['auth', 'status'], { stdio: 'ignore' }); ok('gh signed in (PRs, merges)'); }
+  try {
+    execFileSync('gh', ['auth', 'status'], { stdio: 'ignore' });
+    execFileSync('gh', ['auth', 'setup-git'], { stdio: 'ignore' }); // git push uses the gh login too
+    ok('gh signed in (PRs, merges, git push)');
+  }
   catch { bad('gh not signed in: run `gh auth login` (needed for GitHub repos)'); all = false; }
   const dv = await dockerReady();
   check(dv, `Docker ${dv}`, 'Docker not reachable: start it (`sudo service docker start`) or open a new terminal after setup added you to the docker group');
