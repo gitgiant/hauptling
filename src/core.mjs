@@ -134,7 +134,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
         const slot = slots().find(s => !used.has(s));
         const a = db.prepare("SELECT * FROM agents WHERE delegator = ? AND state = 'queued' ORDER BY created_at LIMIT 1").get(d);
         if (!slot || !a) return null;
-        const dir = `/home/${slot}/work/${a.id}`;
+        const dir = `${host.workRoot}/${a.id}`;
         db.prepare("UPDATE agents SET state = 'spawning', slot = ?, dir = ?, updated_at = ? WHERE id = ?").run(slot, dir, now(), a.id);
         return { ...a, slot, dir, state: 'spawning' };
       });
@@ -152,7 +152,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     const cfg = models();
     const entry = findModel(cfg, a.vendor, a.model);
     await host.run(a.slot, ['rm', '-rf', a.dir]);
-    await host.run(a.slot, ['mkdir', '-p', `/home/${a.slot}/work`]);
+    await host.run(a.slot, ['mkdir', '-p', host.workRoot]);
     await host.run(a.slot, ['git', 'clone', '--quiet', cloneUrl(a), a.dir], { env: await authEnv(a) });
     let base = a.base;
     if (!base) base = await git(a, ['rev-parse', '--abbrev-ref', 'HEAD']);
@@ -161,18 +161,16 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     const briefPath = `${a.dir}/.hauptling/brief.md`;
     const withBase = { ...a, base };
     await host.run(a.slot, ['sh', '-c', 'mkdir -p "$(dirname "$0")" && cat > "$0" && echo .hauptling/ >> "$1/.git/info/exclude"', briefPath, a.dir], { input: briefText(withBase) });
-    await host.run(a.slot, ['hauptling', 'prepare', a.vendor, a.dir]);
     const prompt = 'Read your brief at .hauptling/brief.md and carry it out.';
-    await host.tmuxNew(a.slot, a.id, a.dir, launchArgv(cfg, a.vendor, entry, prompt), {
-      HAUPTLING_AGENT: a.id, HAUPTLING_TOKEN: a.token, HAUPTLING_BROKER: workerUrl,
-    });
+    await host.startWorker({ slot: a.slot, id: a.id, dir: a.dir, vendor: a.vendor, argv: launchArgv(cfg, a.vendor, entry, prompt),
+      env: { HAUPTLING_AGENT: a.id, HAUPTLING_TOKEN: a.token, HAUPTLING_BROKER: workerUrl } });
     update(a.id, { state: 'working', base, idle: 0 });
     mail.setStatus(db, a.id, `working: ${a.title}`.slice(0, STATUS_MAX));
   }
 
   async function cleanup(a, state) {
     if (a.slot) {
-      await host.tmuxKill(a.slot, a.id);
+      await host.stopWorker(a.slot, a.id);
       await host.run(a.slot, ['rm', '-rf', a.dir]).catch(() => {});
     }
     update(a.id, { state, idle: 0 });
@@ -342,17 +340,29 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
       postAsk(a, q, ['Keep going', 'Stop and report what you have']);
     }
     bus.emit('tests');
-    ensureRunner();
+    pump().catch(e => log(`test pump: ${e.message}`));
     return { id, round };
   }
 
-  function ensureRunner() {
-    const seen = Number(kvGet(db, 'runner_seen') || 0);
-    if (Date.now() - seen < 90e3 || !host.spawnDetached) return;
-    kvSet(db, 'runner_seen', Date.now());
-    github.gitAuthEnv().catch(() => ({})).then(env => {
-      host.spawnDetached('hl-test', ['hauptling', 'test-runner'], { HAUPTLING_BROKER: workerUrl, HAUPTLING_TOKEN: runnerToken, ...env });
-    });
+  /** Runs queued (non-GPU) test jobs one at a time, each in a fresh container. External runners (GPU, phase 3) use test.claim. */
+  let pumping = false;
+  async function pump() {
+    if (pumping || !host.runTestJob) return;
+    pumping = true;
+    try {
+      for (;;) {
+        const { job } = await claim({ wait: 0 });
+        if (!job) break;
+        let report;
+        try {
+          const env = job.url.startsWith('https://github.com/') ? await github.gitAuthEnv() : {};
+          report = await host.runTestJob(job, { env });
+        } catch (e) {
+          report = { id: job.id, sha: job.sha, status: 'error', passed: 0, failed: 0, skipped: 0, failures: [], duration_s: 0, notes: e.message.slice(0, 300) };
+        }
+        await testReport({ id: job.id, report }).catch(e => log(`test report ${job.id}: ${e.message}`));
+      }
+    } finally { pumping = false; }
   }
 
   async function agentTestRequest(who, args) {
@@ -604,5 +614,5 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     return null;
   }
 
-  return { call, authenticate, poll, watch, startQueued, bus, askForPage, answer };
+  return { call, authenticate, poll, watch, startQueued, bus, askForPage, answer, pump };
 }

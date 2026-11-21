@@ -6,6 +6,8 @@ import { brokerFile, readBrokerFile } from './brokerfile.mjs';
 import { openDb } from './db.mjs';
 import { createCore } from './core.mjs';
 import { platform } from './platform/index.mjs';
+import { dockerHost, WORKER_BROKER_URL } from './docker.mjs';
+import { networkInterfaces } from 'node:os';
 import * as github from './github.mjs';
 import { BROKER_PORT, home, token } from './util.mjs';
 
@@ -57,11 +59,11 @@ export async function runBroker({ port = BROKER_PORT } = {}) {
   const log = (m) => appendFileSync(logPath, `${new Date().toISOString()} ${m}\n`);
   const db = openDb(join(home(), 'hauptling.db'));
   const plat = await platform();
-  const host = { ...plat.workerHost(), hostGit };
+  const host = { ...dockerHost({ log }), hostGit };
   const base = `http://127.0.0.1:${port}`;
-  const core = createCore({ db, host, github, notify: plat.notify, workerUrl: base, publicUrl: base, runnerToken, log });
+  const core = createCore({ db, host, github, notify: plat.notify, workerUrl: WORKER_BROKER_URL, publicUrl: base, runnerToken, log });
 
-  const server = createServer(async (req, res) => {
+  const handler = async (req, res) => {
     const send = (code, body) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); };
     try {
       const url = new URL(req.url, 'http://x');
@@ -80,13 +82,21 @@ export async function runBroker({ port = BROKER_PORT } = {}) {
       log(`error ${req.url}: ${e.message}`);
       send(400, { error: e.message });
     }
-  });
-  server.requestTimeout = 0;
-  server.headersTimeout = 30e3;
-  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', resolve); });
+  };
+  // 127.0.0.1 for you; the docker0 bridge address for the egress proxy's relay (containers never reach it directly).
+  const docker0 = networkInterfaces().docker0?.find(a => a.family === 'IPv4')?.address;
+  const servers = [];
+  for (const addr of ['127.0.0.1', ...(docker0 ? [docker0] : [])]) {
+    const server = createServer(handler);
+    server.requestTimeout = 0;
+    server.headersTimeout = 30e3;
+    await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, addr, resolve); });
+    servers.push(server);
+  }
   writeFileSync(brokerFile(), JSON.stringify({ port, pid: process.pid, adminToken, runnerToken, startedAt: new Date().toISOString() }, null, 2), { mode: 0o600 });
   chmodSync(brokerFile(), 0o600);
-  log(`broker ${process.pid} listening on ${base}`);
+  log(`broker ${process.pid} listening on 127.0.0.1${docker0 ? ` and ${docker0}` : ''}:${port}`);
   setInterval(() => core.poll().catch(e => log(`poll: ${e.message}`)), 60e3).unref();
-  return { core, server, db };
+  core.pump().catch(e => log(`test pump: ${e.message}`));
+  return { core, servers, db };
 }

@@ -3,9 +3,9 @@ import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 
 /*
- * Worker-side vendor setup, run as the slot user right before its TUI starts
- * (`hauptling prepare <vendor> <dir>`). User-level only: target repos are never touched.
- * Hook formats: Claude ~/.claude/settings.json, Codex ~/.codex/hooks.json,
+ * Worker-side vendor setup, run inside the task container right before its TUI starts
+ * (`hauptling prepare <vendor> /work`). User-level only: target repos are never touched.
+ * Hook formats: Claude $CLAUDE_CONFIG_DIR/settings.json, Codex $CODEX_HOME/hooks.json,
  * agy ~/.gemini/config/hooks.json (agy has no UserPromptSubmit; PreInvocation runs before each model call).
  */
 
@@ -22,7 +22,9 @@ const ours = (h) => JSON.stringify(h).includes('hauptling hook');
 
 export function prepare(vendor, dir, home = homedir()) {
   if (vendor === 'claude') {
-    const settingsPath = join(home, '.claude', 'settings.json');
+    // Containers set CLAUDE_CONFIG_DIR (the slot's credentials dir); .claude.json then lives inside it.
+    const configDir = process.env.CLAUDE_CONFIG_DIR || join(home, '.claude');
+    const settingsPath = join(configDir, 'settings.json');
     const s = readJson(settingsPath);
     s.hooks ||= {};
     for (const e of HOOK_EVENTS.claude) {
@@ -31,13 +33,14 @@ export function prepare(vendor, dir, home = homedir()) {
     }
     writeJson(settingsPath, s);
     // Skip the first-run folder trust dialog for this clone.
-    const statePath = join(home, '.claude.json');
+    const statePath = process.env.CLAUDE_CONFIG_DIR ? join(configDir, '.claude.json') : join(home, '.claude.json');
     const st = readJson(statePath);
     st.projects ||= {};
     st.projects[dir] = { ...st.projects[dir], hasTrustDialogAccepted: true };
     writeJson(statePath, st);
   } else if (vendor === 'codex') {
-    const hooksPath = join(home, '.codex', 'hooks.json');
+    const codexHome = process.env.CODEX_HOME || join(home, '.codex');
+    const hooksPath = join(codexHome, 'hooks.json');
     const h = readJson(hooksPath);
     h.hooks ||= {};
     for (const e of HOOK_EVENTS.codex) {
@@ -45,7 +48,7 @@ export function prepare(vendor, dir, home = homedir()) {
       h.hooks[e].push({ hooks: [{ type: 'command', command: cmd('codex', e), timeout: 10 }] });
     }
     writeJson(hooksPath, h);
-    const configPath = join(home, '.codex', 'config.toml');
+    const configPath = join(codexHome, 'config.toml');
     const header = `[projects."${dir}"]`;
     const config = existsSync(configPath) ? readFileSync(configPath, 'utf8') : '';
     if (!config.includes(header)) appendFileSync(configPath, `\n${header}\ntrust_level = "trusted"\n`);

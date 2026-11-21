@@ -14,12 +14,16 @@ export async function ensureBroker() {
   let info = readBrokerFile();
   if (info && await healthy(info.port)) return info;
   if (process.env.HAUPTLING_AGENT) throw new Error('Broker unreachable; workers do not start it (ask the user to check `hauptling broker status`)');
-  const child = spawn(process.execPath, [BIN, 'broker', 'run'], { detached: true, stdio: 'ignore' });
+  // Right after setup adds you to the docker group, this shell doesn't have it yet: start the broker via `sg docker`.
+  const { hasDockerGroup } = await import('./docker.mjs');
+  const argv = hasDockerGroup() ? [process.execPath, BIN, 'broker', 'run'] : ['sg', 'docker', '-c', `'${process.execPath}' '${BIN}' broker run`];
+  const child = spawn(argv[0], argv.slice(1), { detached: true, stdio: 'ignore' });
   child.unref();
+  const t0 = Date.now() - 1000;
   for (let i = 0; i < 50; i++) {
     await new Promise(r => setTimeout(r, 200));
     info = readBrokerFile();
-    if (info && info.pid === child.pid && await healthy(info.port)) return info;
+    if (info && info.startedAt && Date.parse(info.startedAt) > t0 && await healthy(info.port)) return info;
   }
   throw new Error('Broker did not start; see ~/.hauptling/broker.log');
 }

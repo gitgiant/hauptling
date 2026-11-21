@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# Host provisioning for `hauptling setup` (Ubuntu, or WSL on Windows). Run via sudo:
+#   setup-host.sh <hauptling checkout> <user who runs hauptling> <hauptling home>
+# Installs git, gh and Docker Engine, starts Docker at boot, puts hauptling on PATH, and migrates
+# phase 1 worker users (hl-w*, hl-test) into per-slot credential dirs. Idempotent.
+set -euo pipefail
+SRC="$(cd "${1:?hauptling checkout}" && pwd)"
+OWNER="${2:?user}"
+HL_HOME="${3:?hauptling home}"
+export DEBIAN_FRONTEND=noninteractive
+. /etc/os-release
+arch=$(dpkg --print-architecture)
+
+apt-get update -qq
+apt-get install -y -qq ca-certificates curl gnupg git >/dev/null
+install -d -m 0755 /etc/apt/keyrings
+
+if ! command -v gh >/dev/null; then
+  echo "installing gh"
+  curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /etc/apt/keyrings/githubcli-archive-keyring.gpg
+  chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+  echo "deb [arch=$arch signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list
+  apt-get update -qq && apt-get install -y -qq gh >/dev/null
+fi
+
+if ! command -v dockerd >/dev/null; then
+  echo "installing Docker Engine"
+  curl -fsSL "https://download.docker.com/linux/$ID/gpg" -o /etc/apt/keyrings/docker.asc
+  chmod a+r /etc/apt/keyrings/docker.asc
+  echo "deb [arch=$arch signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/$ID $VERSION_CODENAME stable" > /etc/apt/sources.list.d/docker.list
+  apt-get update -qq && apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin >/dev/null
+fi
+usermod -aG docker "$OWNER"
+
+# Start Docker at boot. WSL without systemd: /etc/wsl.conf [boot] command. Otherwise systemd.
+if grep -qi microsoft /proc/version && [ "$(ps -p 1 -o comm=)" != systemd ]; then
+  touch /etc/wsl.conf
+  if ! grep -q 'service docker start' /etc/wsl.conf; then
+    if grep -q '^\[boot\]' /etc/wsl.conf; then sed -i '/^\[boot\]/a command = service docker start' /etc/wsl.conf
+    else printf '\n[boot]\ncommand = service docker start\n' >> /etc/wsl.conf; fi
+  fi
+  service docker status >/dev/null 2>&1 || service docker start >/dev/null
+else
+  systemctl enable --now docker >/dev/null
+fi
+
+# hauptling on PATH: a link to this checkout, so edits apply at once (containers get their own copy in the image).
+rm -rf /opt/hauptling && ln -sfn "$SRC" /opt/hauptling
+chmod 0755 "$SRC/bin/hauptling.mjs" 2>/dev/null || true
+ln -sf /opt/hauptling/bin/hauptling.mjs /usr/local/bin/hauptling
+
+# Phase 1 → 2: move each worker user's sign-ins into ~/.hauptling/slots/<slot>/, then remove the users.
+for home in /home/hl-w* ; do
+  [ -d "$home" ] || continue
+  slot=$(basename "$home"); dest="$HL_HOME/slots/$slot"
+  mkdir -p "$dest"
+  [ -d "$home/.claude" ] && [ ! -e "$dest/claude" ] && cp -a "$home/.claude" "$dest/claude"
+  [ -f "$home/.claude.json" ] && [ ! -e "$dest/claude/.claude.json" ] && mkdir -p "$dest/claude" && cp -a "$home/.claude.json" "$dest/claude/.claude.json"
+  [ -d "$home/.codex" ] && [ ! -e "$dest/codex" ] && cp -a "$home/.codex" "$dest/codex"
+  [ -d "$home/.gemini" ] && [ ! -e "$dest/gemini" ] && cp -a "$home/.gemini" "$dest/gemini"
+  chown -R "$OWNER:$OWNER" "$dest"
+  echo "migrated $slot sign-ins to $dest"
+done
+for u in $(getent passwd | cut -d: -f1 | grep -E '^hl-(w[0-9]+|test|relay)$' || true); do
+  pkill -u "$u" 2>/dev/null || true
+  userdel -r "$u" 2>/dev/null || userdel "$u" || true
+  echo "removed user $u"
+done
+rm -f /etc/sudoers.d/hauptling /etc/ssh/sshd_config.d/hauptling.conf
+echo "host ready: $(docker --version), $(gh --version | head -1)"

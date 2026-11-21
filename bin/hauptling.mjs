@@ -24,20 +24,21 @@ Mailbox (any session):
   mail send <you> <to|family> <text> | mail check <you> | mail status <you> <text>
   mail peers [--all] | mail need <you> <to> <path> [why] | mail give <you> <to> <path> | mail prune [hours] [--force]
 Setup:
-  setup [--slots 3] [--vendors claude,codex,agy] [--no-workers] [--no-login]
-                                           everything: skill, worker users + tools, broker, sign-ins, doctor
-  doctor                                   check tools, broker, worker users and sign-ins
+  setup [--slots 3] [--vendors claude,codex,agy] [--no-host] [--no-login]
+                                           everything: skill, Docker, worker image, egress proxy, broker, sign-ins, doctor
+  doctor                                   check tools, Docker, image, egress, broker and sign-ins
+  image                                    build the worker image if hauptling changed
   login SLOT VENDOR                        sign one slot in to claude|codex|agy
   init [DIR]                               write the detected hauptling.json
   broker start|stop|status|run
-Internal: hook VENDOR EVENT, prepare VENDOR DIR, test-runner`;
+Internal: hook VENDOR EVENT, prepare VENDOR DIR, egress, test-exec`;
 
 const out = (v) => console.log(typeof v === 'string' ? v : JSON.stringify(v, null, 2));
 const [cmd, ...rest] = process.argv.slice(2);
 
 async function main() {
   const { call } = await import('../src/client.mjs');
-  const args = parseArgs(rest, { repeat: ['choice', 'artifacts'], bool: ['test-writer', 'all', 'gpu', 'force', 'no-workers', 'no-login'] });
+  const args = parseArgs(rest, { repeat: ['choice', 'artifacts'], bool: ['test-writer', 'all', 'gpu', 'force', 'no-host', 'no-login'] });
   const text = () => args._.join(' ');
   switch (cmd) {
     case undefined: case 'help': case '--help': case '-h': return out(USAGE);
@@ -150,7 +151,18 @@ async function main() {
     // ----- internal / setup -----
     case 'hook': return hook(args._[0], args._[1], call);
     case 'prepare': { const { prepare } = await import('../src/vendors.mjs'); prepare(args._[0], args._[1]); return; }
-    case 'test-runner': { const { runnerLoop } = await import('../src/runner.mjs'); return runnerLoop(); }
+    case 'egress': { const { runEgress } = await import('../src/egress.mjs'); runEgress({ allow: args.allow, log: args.log, relay: args.relay }); return new Promise(() => {}); }
+    case 'test-exec': {
+      // Inside a test container: /work is the checkout, /artifacts receives log, artifacts and report.json.
+      const { execTests } = await import('../src/runner.mjs');
+      const report = await execTests('/work', { selector: args.selector || '', timeout_s: Number(args.timeout || 1800), artifacts: JSON.parse(args.artifacts || '[]') }, '/artifacts');
+      writeFileSync('/artifacts/report.json', JSON.stringify(report));
+      return;
+    }
+    case 'image': {
+      const { ensureBaseImage } = await import('../src/docker.mjs');
+      return out(await ensureBaseImage({ log: out, stdio: ['ignore', 'inherit', 'inherit'] }));
+    }
     case 'init': {
       const { detect } = await import('../src/detect.mjs');
       const dir = resolve(args._[0] || '.');
@@ -162,7 +174,7 @@ async function main() {
     }
     case 'setup': {
       const { setup } = await import('../src/setup.mjs');
-      const good = await setup({ slots: Number(args.slots || 3), vendors: args.vendors ? args.vendors.split(',') : undefined, workers: !args.noWorkers, login: !args.noLogin });
+      const good = await setup({ slots: Number(args.slots || 3), vendors: args.vendors ? args.vendors.split(',') : undefined, host: !args.noHost, login: !args.noLogin });
       if (!good) process.exitCode = 1;
       return;
     }

@@ -115,3 +115,14 @@ test('artifacts: globs relative to the checkout, no escaping it', () => {
   const got = collectArtifacts(dir, ['out/*.png', '../*', '/etc/passwd'], dest);
   assert.deepEqual(got, [join(dest, 'out', 'a.png')]);
 });
+
+test('egress allowlist: exact hosts, *.subdomains, comments', async () => {
+  const { allowed, parseAllow } = await import('../src/egress.mjs');
+  const rules = parseAllow('# c\nGitHub.com\n*.anthropic.com  # api\n\n');
+  assert.equal(allowed(rules, 'github.com'), true);
+  assert.equal(allowed(rules, 'api.github.com'), false);
+  assert.equal(allowed(rules, 'api.anthropic.com'), true);
+  assert.equal(allowed(rules, 'anthropic.com'), false);
+  assert.equal(allowed(rules, 'evilanthropic.com'), false);
+  assert.equal(allowed(rules, 'example.com'), false);
+});

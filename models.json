@@ -1,5 +1,5 @@
 {
-  "_doc": "Shipped default. Override any part in ~/.hauptling/models.json (deep-merged). tier: 1 cheap, 2 mid, 3 top. Prices are USD per million tokens; null means unknown (cost shows as unknown). Codex keeps its workspace-write sandbox (network on so it reaches the broker); it cannot write .git, so hauptling commits for it on report/test request.",
+  "_doc": "Shipped default. Override any part in ~/.hauptling/models.json (deep-merged). tier: 1 cheap, 2 mid, 3 top. Prices are USD per million tokens; null means unknown (cost shows as unknown). Codex keeps its workspace-write sandbox (network on so it reaches the broker); it cannot write .git, so hauptling commits for it on report/test request. Workers run in disposable containers with an egress allowlist; the container is the sandbox (Codex's own bubblewrap sandbox cannot run inside Docker, so Codex uses danger-full-access there, chosen 2026-11-21).",
   "rules": {
     "easy": 1,
     "normal": 2,
@@ -59,9 +59,7 @@
         "--model",
         "{model}",
         "--sandbox",
-        "workspace-write",
-        "-c",
-        "sandbox_workspace_write.network_access=true",
+        "danger-full-access",
         "--ask-for-approval",
         "never",
         "--dangerously-bypass-hook-trust",

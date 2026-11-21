@@ -14,12 +14,24 @@ git clone https://github.com/gitgiant/hauptling && cd hauptling
 `install.sh` installs Node 22 if needed and runs `hauptling setup`, which does everything and is safe to rerun:
 
 1. `/delegator` skill for Claude, Codex and agy; your git identity (copied from Windows git on WSL if missing).
-2. Workers (asks for sudo once): git, tmux, gh, vendor CLIs, hauptling on PATH, users `hl-w1…` and `hl-test`, a sudoers rule letting you act as them.
-3. Broker restart.
-4. Sign-in: asks, slot by slot, for every vendor without credentials.
-5. `hauptling doctor`.
+2. Host (asks for sudo once): git, gh, Docker Engine (started at WSL boot / by systemd), hauptling on PATH.
+3. Worker image `hauptling-worker` (first build takes a few minutes), internal network `hauptling-int`, egress proxy `hauptling-egress`.
+4. Broker restart.
+5. Sign-in: asks, slot by slot, for every vendor without credentials (stored in `~/.hauptling/slots/<slot>/`, kept across containers).
+6. `hauptling doctor`.
 
-Options: `--slots N`, `--vendors claude,codex`, `--no-login`, `--no-workers`. Also `gh auth login` once for GitHub repos.
+Options: `--slots N`, `--vendors claude,codex`, `--no-login`, `--no-host`. Also `gh auth login` once for GitHub repos.
+
+Workers run in a fresh container per task. Extra toolchains for a repo: add `hauptling.Dockerfile` at its root:
+
+```dockerfile
+ARG BASE=hauptling-worker
+FROM ${BASE}
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends cargo
+```
+
+Containers reach only hosts in `~/.hauptling/egress/allow.txt` (blocked attempts: `~/.hauptling/egress/egress.log`). After updating hauptling, restart the broker (`hauptling broker stop`; the next command starts it) and rebuild the image (`hauptling image`, also done by setup).
 
 Then start Claude, Codex or agy in that Linux shell and run `/delegator`.
 
@@ -27,10 +39,12 @@ Then start Claude, Codex or agy in that Linux shell and run `/delegator`.
 
 - `bin/hauptling.mjs` — CLI (`hauptling help`).
 - `src/server.mjs`, `src/core.mjs` — broker: sole owner of `~/.hauptling/hauptling.db`, HTTP on 127.0.0.1, per-agent tokens, answer page for questions.
-- `src/platform/` — host seam; `linux.mjs` runs workers as local users via sudo + tmux and sends notifications. Phase 2 adds the VM.
+- `src/docker.mjs` — worker containers: image build, per-slot credentials, internal network, tmux inside, test-job containers.
+- `src/egress.mjs` — egress proxy (allowlist) and broker relay, run in the `hauptling-egress` container.
+- `src/platform/` — host seam (notifications).
 - `src/mail.mjs` — machine-wide mailbox (ported from nullpunkt).
 - `src/vendors.mjs` — user-level hooks and trust for each vendor, hook I/O formats.
-- `src/runner.mjs`, `src/detect.mjs`, `src/junit.mjs` — deterministic test jobs as `hl-test`.
+- `src/runner.mjs`, `src/detect.mjs`, `src/junit.mjs` — deterministic test jobs (inside a test container).
 - `src/github.mjs` — PRs and merges via the host `gh` login.
 - `models.json` — shipped defaults; override in `~/.hauptling/models.json`.
 

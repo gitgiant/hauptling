@@ -23,9 +23,10 @@ function fakeHost() {
       if (argv[0] === 'cat' && argv[1].endsWith('hauptling.json')) { if (!state.config) throw new Error('no file'); return { stdout: JSON.stringify(state.config) }; }
       return { stdout: '' };
     },
-    async tmuxNew(user, session, dir, argv, env) { calls.push(['tmux', user, session, dir, argv, env]); },
+    workRoot: '/hl/work',
+    async startWorker({ slot, id, dir, argv, env }) { calls.push(['tmux', slot, id, dir, argv, env]); },
     async tmuxType(user, session, text) { typed.push([session, text]); },
-    async tmuxKill(user, session) { calls.push(['kill', session]); },
+    async stopWorker(user, session) { calls.push(['kill', session]); },
     alive: true, screen: '',
     async tmuxAlive() { return this.alive; },
     async tmuxCapture() { return this.screen; },
