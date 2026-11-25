@@ -27,13 +27,15 @@ const NO_SESSION = [...ENDED, 'failed', 'queued', 'waiting'];
  * One plain sentence for the human watching the board: what the agent is doing or waiting on now.
  * `a` is a board row (agent columns plus `status`, `test` and `ask` as the snapshot builds them).
  */
+const cap = (s) => s[0].toUpperCase() + s.slice(1);
+const ordinal = (n) => `${n}${n % 100 >= 11 && n % 100 <= 13 ? 'th' : ['th', 'st', 'nd', 'rd'][n % 10] || 'th'}`;
 export function headline(a) {
   const t = a.test;
   const pr = a.pr_number ? `PR #${a.pr_number}` : null;
   const total = (t?.passed ?? 0) + (t?.failed ?? 0);
   const score = t?.status && total ? ` (${t.passed ?? 0}/${total})` : '';
   const kind = t ? `${t.gpu ? 'GPU ' : ''}${t.purpose === 'gate' ? 'merge gate' : 'tests'}` : 'tests';
-  const pending = t && !t.status ? (t.state === 'running' ? `Running ${kind}` : `Waiting to run ${kind}`) : null;
+  const pending = t && !t.status ? (t.state === 'running' ? `Running ${kind}` : t.position ? `${cap(kind)} queued, ${ordinal(t.position)} in line` : `Waiting to run ${kind}`) : null;
   const why = (a.status || '').replace(/^[a-z-]+:\s*/, '');
   switch (a.state) {
     case 'blocked': return a.ask ? `Needs your answer: ${a.ask.question}` : `Stuck${why ? `: ${why}` : ''}; attach or message it`;
@@ -67,7 +69,7 @@ export function headline(a) {
   }
 }
 
-const ACTIONS = new Set(['answer', 'reply', 'kill', 'merge', 'gpu.pause', 'gpu.resume']);
+const ACTIONS = new Set(['answer', 'reply', 'kill', 'merge', 'gpu.pause', 'gpu.resume', 'test.run']);
 const COOKIE = 'hl_dash';
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml' };
 const ANSI = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(\x07|\x1b\\)|\x1b[@-Z\\-_]/g;
@@ -146,7 +148,16 @@ export function createDashboard({ db, dbPath, core, host, log = () => {}, slotDi
     sample().catch(() => {});
   }
 
+  /** CPU test queue for the header: running jobs and queued ids in line order (GPU jobs are in gpu.status). */
+  function testQueue() {
+    const running = db.prepare("SELECT t.id, t.agent, t.repo, t.purpose, t.claimed_at FROM tests t WHERE state = 'running' AND gpu = 0 ORDER BY claimed_at").all();
+    const queued = db.prepare("SELECT id FROM tests WHERE state = 'queued' AND gpu = 0 ORDER BY created_at, rowid").all().map(r => r.id);
+    return { running, queued: queued.length, limit: Math.max(1, Number(host.testConcurrency?.() ?? 2) || 2), line: queued };
+  }
+
   async function snapshot() {
+    const tq = testQueue();
+    const gpuLine = db.prepare("SELECT id FROM tests WHERE state = 'queued' AND gpu = 1 ORDER BY created_at, rowid").all().map(r => r.id);
     const since = new Date(Date.now() - 24 * 3600e3).toISOString();
     const rows = db.prepare(`SELECT * FROM agents WHERE state NOT IN (${ENDED.map(s => `'${s}'`).join(',')}) OR updated_at >= ? ORDER BY created_at`).all(since);
     const agents = rows.map(a => {
@@ -158,12 +169,14 @@ export function createDashboard({ db, dbPath, core, host, log = () => {}, slotDi
         ended: ENDED.includes(a.state),
         usage: a.usage ? JSON.parse(a.usage) : null,
         status: db.prepare('SELECT text FROM status WHERE identity = ?').get(a.id)?.text || null,
-        test: t ? { id: t.id, state: t.state, gpu: Boolean(t.gpu), purpose: t.purpose, status: r?.status || null, passed: r?.passed ?? null, failed: r?.failed ?? null, at: t.done_at || t.created_at } : null,
+        test: t ? { id: t.id, state: t.state, gpu: Boolean(t.gpu), purpose: t.purpose, status: r?.status || null, passed: r?.passed ?? null, failed: r?.failed ?? null, at: t.done_at || t.created_at,
+          position: t.state === 'queued' ? ((t.gpu ? gpuLine : tq.line).indexOf(t.id) + 1 || null) : null } : null,
         ask: ask ? { id: ask.id, question: ask.question, choices: JSON.parse(ask.choices), at: ask.at } : null,
       };
     }).map(a => ({ ...a, headline: headline(a) }));
     const delegators = db.prepare('SELECT id, cli, repo, active, created_at FROM delegators ORDER BY created_at').all();
-    return { agents, delegators, gpu: await gpu(), blocked: agents.filter(a => a.state === 'blocked').length };
+    const { line: _l, ...tests } = tq;
+    return { agents, delegators, gpu: await gpu(), tests, blocked: agents.filter(a => a.state === 'blocked').length };
   }
 
   // One ticker for all open streams; it only runs while someone is watching.

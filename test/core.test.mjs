@@ -468,3 +468,66 @@ test('resume --repo continues only that repo\'s delegator; another repo\'s sessi
   await core.call('delegator.end', { delegator: hl });
   assert.equal((await core.call('resume', { repo: ['gitgiant/hauptling'] })).delegator, null, 'ended delegators are not resumed');
 });
+
+/** Jobs block until the test finishes them; killTestJob ends a run like `docker rm -f` would. */
+function blockingRunner(host) {
+  const runs = [];
+  const killed = [];
+  host.runTestJob = (job) => new Promise(resolve => runs.push({ job, done: (status = 'pass') => resolve({ id: job.id, sha: job.sha, status, passed: 1, failed: 0, skipped: 0, failures: [], duration_s: 1 }) }));
+  host.killTestJob = async (id) => { killed.push(id); runs.find(r => r.job.id === id)?.done('error'); };
+  return { runs, killed };
+}
+
+test('kill cancels the agent\'s queued and running test jobs; cancelled gates emit nothing', async () => {
+  const { db, core, host, gh } = setup();
+  host.testConcurrency = () => 1;
+  const r = blockingRunner(host);
+  await core.call('delegator.start', { repo: 'gitgiant/demo' });
+  const a = (await core.call('spawn', { brief: 'task a', vendor: 'claude', mode: 'cheapest' })).id;
+  const b = (await core.call('spawn', { brief: 'task b', vendor: 'claude', mode: 'cheapest' })).id;
+  await settle();
+  const who = (id) => core.authenticate(db.prepare('SELECT token FROM agents WHERE id = ?').get(id).token, 'ADMIN');
+  await core.call('report', { text: 'a done' }, who(a)); await settle();
+  await core.call('report', { text: 'b done' }, who(b)); await settle();
+  const gate = (id) => db.prepare("SELECT id, state, report FROM tests WHERE agent = ? AND purpose = 'gate'").get(id);
+  assert.equal(gate(a).state, 'running');
+  assert.equal(gate(b).state, 'queued');
+  await db.prepare('DELETE FROM events').run();
+
+  // Queued: cancelled, never runs.
+  await core.call('kill', { agent: b }); await settle();
+  assert.equal(gate(b).state, 'done');
+  assert.equal(JSON.parse(gate(b).report).status, 'cancelled');
+  // Running: container stopped, its late result discarded.
+  await core.call('kill', { agent: a }); await settle();
+  assert.deepEqual(r.killed, [gate(a).id]);
+  assert.equal(JSON.parse(gate(a).report).status, 'cancelled');
+  assert.equal(r.runs.length, 1, 'b\'s gate never started');
+  assert.deepEqual(db.prepare("SELECT kind FROM events WHERE kind LIKE 'gate-%'").all(), []);
+  assert.equal(gh.log.filter(l => l[0] === 'merge').length, 0);
+  assert.equal(db.prepare("SELECT COUNT(*) n FROM tests WHERE state != 'done'").get().n, 0);
+});
+
+test('CPU jobs: up to testConcurrency at once, one per repo, FIFO; Run now starts one past the limit', async () => {
+  const { db, core, host } = setup();
+  host.testConcurrency = () => 2;
+  const r = blockingRunner(host);
+  const req = (repo) => core.call('test.request', { repo, sha: `sha-${repo}` }).then(x => x.id);
+  const x1 = await req('gitgiant/a');
+  const x2 = await req('gitgiant/a');
+  const y1 = await req('gitgiant/b');
+  const z1 = await req('gitgiant/c');
+  await settle();
+  const st = (id) => db.prepare('SELECT state FROM tests WHERE id = ?').get(id).state;
+  assert.deepEqual([x1, x2, y1, z1].map(st), ['running', 'queued', 'running', 'queued'], 'two repos run together; a\'s second job waits');
+  r.runs.find(x => x.job.id === x1).done(); await settle();
+  assert.deepEqual([x1, x2, y1, z1].map(st), ['done', 'running', 'running', 'queued'], 'a\'s jobs run in order, ahead of c');
+  await assert.rejects(core.call('test.run', { id: x1 }), /not queued/);
+  assert.deepEqual(await core.call('test.run', { id: z1 }), { started: z1 });
+  await settle();
+  assert.equal(st(z1), 'running');
+  assert.equal(r.runs.length, 4, 'three running, past the limit of 2');
+  for (const run of r.runs.slice(1)) run.done();
+  await settle();
+  assert.deepEqual([x2, y1, z1].map(st), ['done', 'done', 'done']);
+});

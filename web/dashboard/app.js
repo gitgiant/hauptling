@@ -239,7 +239,7 @@ function connect() {
 function render() {
   const b = state.board;
   document.title = b.blocked ? `(${b.blocked}) Hauptling` : 'Hauptling';
-  renderGpu(b.gpu);
+  renderGpu(b.gpu, b.tests);
   renderSys();
   renderBoard(b);
   if (state.selected) {
@@ -278,12 +278,30 @@ function renderSys() {
   if (g) put(g, metric('', l.gpu, l.hist.gpu, 'GPU utilization'));
 }
 
-function renderGpu(g) {
+/** CPU test jobs: what runs now (agent, repo, elapsed) and how many wait. */
+function cpuTests(q) {
+  if (!q) return null;
+  const tip = q.running.map(r => `${r.id} ${r.purpose}${r.agent ? ` · ${r.agent}` : ''} · ${r.repo} · ${ago(r.claimed_at)}`).join('\n');
+  return h('span', { class: 'cputests', title: `CPU test jobs, up to ${q.limit} at once, one per repo${tip ? `\n${tip}` : ''}` },
+    'Tests ', h('b', { text: `${q.running.length}/${q.limit}` }),
+    q.running.map(r => h('span', { class: 'mono', text: `▶ ${r.agent || r.id} ${r.repo.split('/').pop()} ${ago(r.claimed_at)}` })),
+    q.queued ? h('span', { text: `· ${q.queued} queued` }) : null);
+}
+
+/** "Run now" for a queued CPU test job: starts it past the concurrency limit. */
+function runNow(t) {
+  if (t?.state !== 'queued' || t.gpu) return null;
+  return h('button', { title: `Start ${t.id} now, past the test concurrency limit`, onclick: (e) => { e.stopPropagation(); act('test.run', { id: t.id }, `${t.id} started`); } }, 'Run now');
+}
+
+function renderGpu(g, tq) {
   const el = $('#gpu');
-  if (!g) { put(el, h('span', { text: 'GPU: ?' })); return; }
-  if (!g.available) { put(el, h('span', { text: 'GPU: none' })); return; }
+  const cpu = cpuTests(tq);
+  if (!g) { put(el, cpu, h('span', { text: 'GPU: ?' })); return; }
+  if (!g.available) { put(el, cpu, h('span', { text: 'GPU: none' })); return; }
   const running = g.running[0];
-  put(el, 
+  put(el, cpu,
+
     h('span', {}, 'GPU ', h('b', { text: g.paused ? 'paused' : running ? 'busy' : 'idle' })),
     h('span', { class: 'gpu-util' }),
     h('span', { title: 'Free VRAM / what a job waits for', text: `${g.freeMB ?? '?'} MiB free` }),
@@ -303,6 +321,7 @@ function card(a) {
     a.gate ? h('span', { text: `gate: ${a.gate}` }) : null,
     a.ci_note ? h('span', { class: 'chip fail', text: `CI failed ${a.ci_note.slice(0, 7)}` }) : null,
     testChip(a.test),
+    a.ended ? null : runNow(a.test),
     usageChips(a.usage),
   ];
   const el = h('div', { class: `card ${a.state}${state.selected === a.id ? ' selected' : ''}`, role: 'button', tabindex: '0', onclick: () => select(a.id), onkeydown: (e) => e.key === 'Enter' && select(a.id) },
@@ -413,6 +432,7 @@ function renderDetailHead(a, el) {
     a.ended ? null : reply,
     a.ended ? null : h('div', { class: 'actions' },
       canMerge ? h('button', { class: 'primary', onclick: () => act('merge', { agent: a.id }, `${a.id} merged into ${a.base}`) }, `Merge into ${a.base}`) : null,
+      runNow(a.test),
       h('button', { class: 'danger', onclick: () => confirm(`Kill ${a.id}? Its container and clone are removed.`) && act('kill', { agent: a.id }, `${a.id} killed`) }, 'Kill'),
       h('span', { class: 'mono empty', text: `hauptling attach ${a.id}` })),
   );

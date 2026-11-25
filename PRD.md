@@ -51,6 +51,13 @@ Hauptling delegates coding tasks to Claude, Codex and agy (Antigravity CLI) agen
 - Reports for a different sha are rejected. Round 4 sets the agent to `blocked`.
 - **GPU tests run deterministically, no LLM**, in a fresh `--gpus all` test container, one at a time on their own queue (phase 3; an earlier design used a host worktree).
 
+### Merge gate / test jobs (2026-11-25)
+
+- **CPU jobs run in parallel**: up to `testConcurrency` at once (host `config.json`, default 2), at most one per repo, FIFO otherwise (a repo whose job is running is skipped, not blocking the line). External runners (`test.claim`) follow the same one-per-repo rule. GPU jobs keep their single queue.
+- **An agent that ends gives up its tests**: kill, PR closed, failed, merged or handed off cancels all its queued and running test jobs (gate and agent requests, CPU and GPU). Running ones get their `hauptling-test-<id>` container stopped. Same path as a newer report superseding older gates: the job is marked done with status `cancelled`, never reaches the gate logic, emits no gate event; a late result is discarded. An `exited` agent keeps its jobs (its gate result is still shown).
+- **Dashboard**: the header's GPU area shows CPU tests (running/limit, each running job's agent, repo and elapsed time, number queued). A queued job's headline gives its place in its queue ("Merge gate queued, 2nd in line"); "Running merge gate" once it runs.
+- **Run now**: a queued CPU job shows a "Run now" button (card and detail); it starts the job at once, past the concurrency limit and the one-per-repo rule. POST-only dashboard action (`test.run`, like kill), admin only, queued jobs only. Not for GPU jobs: those share one GPU and use the GPU queue controls.
+
 ## Git
 
 - **Default: own branch, PR, auto-merge when checks pass.** Push to main is a per-repo opt-in.

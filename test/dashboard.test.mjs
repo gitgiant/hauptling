@@ -219,6 +219,10 @@ test('headline: one sentence per situation, for the human watching', () => {
     [{ state: 'working', ci_note: 'abc', pr_number: 7 }, 'Fixing a CI failure on PR #7'],
     [{ state: 'done', gate: 'ci', pr_number: 7 }, 'PR #7 open, waiting for CI to merge'],
     [{ state: 'done', gate: 'tests', test: gateTest({ state: 'queued', status: null }) }, 'Waiting to run merge gate'],
+    [{ state: 'done', gate: 'tests', test: gateTest({ state: 'queued', status: null, position: 2 }) }, 'Merge gate queued, 2nd in line'],
+    [{ state: 'done', gate: 'tests', test: gateTest({ state: 'running', status: null }) }, 'Running merge gate'],
+    [{ state: 'working', test: { purpose: 'agent', state: 'queued', position: 11 } }, 'Tests queued, 11th in line'],
+    [{ state: 'working', test: { purpose: 'agent', gpu: true, state: 'queued', position: 1 } }, 'GPU tests queued, 1st in line'],
     [{ state: 'done', gate: 'tests', test: gateTest() }, 'Ready to merge into main'],
     [{ state: 'done', gate: 'tests', test: gateTest({ status: 'fail', passed: 8, failed: 1 }) }, 'Merge gate fail (8/9); the delegator decides'],
     [{ state: 'done', gate: 'none' }, 'Done: report sent to the delegator'],
@@ -228,4 +232,28 @@ test('headline: one sentence per situation, for the human watching', () => {
     [{ state: 'failed', report: 'spawn failed: no slot' }, 'Failed: spawn failed: no slot'],
   ];
   for (const [a, want] of cases) assert.equal(headline({ ...base, ...a }), want);
+});
+
+test('dashboard: CPU test queue in the header, queue position in the headline, Run now', async () => {
+  const s = await setup();
+  const ahead = (await s.core.call('test.request', { repo: 'gitgiant/other', sha: 'o1' })).id;
+  const gate = (await s.core.call('test.request', { agent: s.id, sha: 'abc', purpose: 'gate' })).id;
+  let b = (await s.req('/dash/board')).json;
+  assert.deepEqual(b.tests, { running: [], queued: 2, limit: 2 });
+  let a = b.agents.find(x => x.id === s.id);
+  assert.equal(a.test.position, 2);
+  assert.match(a.headline, /queued, 2nd in line/);
+  // Run now (POST action like kill): the agent's job starts ahead of the older one.
+  s.host.runTestJob = () => new Promise(() => {});
+  const r = await s.req('/dash/do/test.run', { method: 'POST', headers: { 'x-hauptling': '1' }, body: { id: gate } });
+  assert.deepEqual(r.json.result, { started: gate });
+  b = (await s.req('/dash/board')).json;
+  assert.deepEqual(b.tests.running.map(t => [t.id, t.agent, t.repo]), [[gate, s.id, 'gitgiant/demo']]);
+  assert.equal(b.tests.queued, 1);
+  a = b.agents.find(x => x.id === s.id);
+  assert.equal(a.test.position, null);
+  assert.match(a.headline, /^Running /);
+  assert.equal((await s.req('/dash/do/test.run', { method: 'POST', headers: { 'x-hauptling': '1' }, body: { id: gate } })).code, 400, 'queued jobs only');
+  assert.equal(s.db.prepare('SELECT state FROM tests WHERE id = ?').get(ahead).state, 'queued');
+  s.done();
 });

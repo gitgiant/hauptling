@@ -100,6 +100,8 @@ body.resizing { user-select: none; }
 .dhead .prompt { margin: 0 0 .3rem; color: var(--muted); font-size: 13px; }
 .card .meta { grid-column: 2 / 4; min-width: 0; color: var(--muted); font-size: 12.5px; display: flex; flex-wrap: wrap; gap: .25rem .75rem; }
 .card .meta > * { min-width: 0; overflow-wrap: anywhere; }
+.card .meta button { padding: 0 .4rem; font-size: 12px; }
+.cputests { display: flex; align-items: center; gap: .4rem; margin-right: .5rem; }
 .card .usagechips { flex-wrap: wrap; gap: .1rem .5rem; }
 .card .elapsed { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 .card.blocked { border-color: var(--warn); animation: blink 1.2s ease-in-out infinite; }
