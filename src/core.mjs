@@ -22,7 +22,8 @@ import * as keyStore from './keys.mjs';
 const ACTIVE = ['spawning', 'working', 'blocked', 'done'];
 const ENDED = ['merged', 'killed', 'closed', 'handed-off'];
 /** Paths added to every clone's .git/info/exclude: Hauptling's own files and caches tools write into the clone. */
-export const CLONE_EXCLUDES = ['.hauptling/', '.pnpm-store/'];
+// node_modules/: prepare installs dependencies into the clone (vendors.mjs installDeps); a repo that doesn't ignore it must not get it committed.
+export const CLONE_EXCLUDES = ['.hauptling/', '.pnpm-store/', 'node_modules/'];
 const AGENT_CALLS = new Set(['hook', 'report', 'ask', 'mail.send', 'mail.check', 'mail.status', 'mail.peers', 'test.request', 'test.wait', 'test.get', 'whoami', 'usage.report']);
 const RUNNER_CALLS = new Set(['test.claim', 'test.report', 'test.heartbeat']);
 

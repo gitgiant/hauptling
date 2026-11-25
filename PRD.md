@@ -159,10 +159,13 @@ Phases 2–4 get their own grill at phase start.
 - **Isolation: Docker containers, not VirtualBox.** Hyper-V is on here (VirtualBox would run slowly), RAM is 16 GB, and containers run natively on Ubuntu/WSL (Docker Desktop or colima on macOS later).
 - **Runtime**: Docker Engine installed by setup; started at WSL boot via `/etc/wsl.conf` (no systemd needed), `systemctl` on Ubuntu hosts. You join the `docker` group.
 - **Lifecycle**: fresh container per task (`--init`, `sleep infinity`, tmux inside), removed at cleanup. Limits default to 2.5 GB RAM and 3 CPUs (`~/.hauptling/config.json`).
-- **Image**: `hauptling-worker` (Ubuntu 24.04, Node 22 + pnpm, git, tmux, python3, build-essential, the three vendor CLIs, hauptling), tagged by content hash. A repo may add `hauptling.Dockerfile` (`FROM hauptling-worker`), built and cached by hash. Test jobs run in the same image.
+- **Image**: `hauptling-worker` (Ubuntu 24.04, Node 22 + pnpm and yarn via corepack, git, tmux, python3, build-essential, the three vendor CLIs, hauptling), tagged by content hash. A repo may add `hauptling.Dockerfile` (`FROM hauptling-worker`), built and cached by hash. Test jobs run in the same image.
 - **Workdir**: the broker clones each task on the host into `~/.hauptling/work/<agent>` and bind-mounts it at `/work`; commits, pushes and PRs stay host-side. Containers run as your uid.
 - **Slots**: a slot is a credentials directory plus the concurrency limit; the phase 1 host users (`hl-w1…`, `hl-test`) and sudoers rule are removed, their sign-ins migrated.
 - **Network**: internal Docker network `hauptling-int`; the `hauptling-egress` container is the only exit (HTTPS CONNECT + plain HTTP, allowlist) and relays the broker port to the host.
+- **Node behind the proxy**: containers have no DNS, and Node's built-in `fetch` (undici; corepack's first-use download and other Node tools) ignores `HTTPS_PROXY`. Every container on the internal network (workers, test jobs, sign-ins, doctor probes) gets `NODE_USE_ENV_PROXY=1` with the proxy variables (`proxyEnv()` in `src/docker.mjs`). `hauptling doctor` checks that Node `fetch('https://registry.npmjs.org/')` works from a container.
+- **Package managers pre-provisioned**: the image runs `corepack enable` and prepares `pnpm@latest` and `yarn@stable` into `COREPACK_HOME=/opt/corepack` (world-writable, so a repo's pinned `packageManager` version still downloads into it, through the proxy), with `COREPACK_ENABLE_DOWNLOAD_PROMPT=0`.
+- **Dependencies installed at prepare**: `hauptling prepare` (in the container, before the CLI starts) runs the clone's `install` command (`hauptling.json` or `detect.mjs`) with a 900 s timeout, logging to `.hauptling/install.log`. A failure never blocks the worker: a line at the top of its brief names the error and the command to run itself. `node_modules/` joins `.hauptling/` and `.pnpm-store/` in the clone's `.git/info/exclude` so it is never committed.
 
 ### Phase 1 decisions
 

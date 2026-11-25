@@ -7,7 +7,14 @@ RUN apt-get update \
  && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
  && apt-get install -y --no-install-recommends nodejs \
  && rm -rf /var/lib/apt/lists/*
+# Package managers pre-provisioned (no download at first use): corepack's pnpm and yarn, cached in a
+# COREPACK_HOME every worker uid can read and extend (a repo's pinned `packageManager` version downloads into it).
+ENV COREPACK_HOME=/opt/corepack COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 RUN corepack enable \
+ && corepack prepare pnpm@latest --activate \
+ && corepack prepare yarn@stable --activate \
+ && pnpm --version && yarn --version \
+ && chmod -R a+rwX /opt/corepack \
  && npm install -g --no-audit --no-fund @anthropic-ai/claude-code @openai/codex @colbymchenry/codegraph \
  && npm cache clean --force
 COPY --chmod=0755 agy /usr/local/bin/agy

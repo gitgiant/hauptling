@@ -494,13 +494,13 @@ test('several delegators: no --delegator is refused when ambiguous; each session
   assert.equal((await core.call('agents', {})).length, 2, 'one active again: no flag needed');
 });
 
-test('clones exclude the brief and pnpm\'s store from git, so `hauptling report` never commits them', async () => {
+test('clones exclude the brief, pnpm\'s store and node_modules from git, so `hauptling report` never commits them', async () => {
   const { host, core } = setup();
   await core.call('delegator.start', { repo: 'gitgiant/demo' });
   await core.call('spawn', { brief: 'task', vendor: 'claude', mode: 'cheapest' });
   await settle();
   const sh = host.calls.find(c => c[1] === 'sh' && String(c[3]).includes('info/exclude'));
-  assert.match(sh[3], /printf '%s\\n' \.hauptling\/ \.pnpm-store\/ >> "\$1\/\.git\/info\/exclude"/);
+  assert.match(sh[3], /printf '%s\\n' \.hauptling\/ \.pnpm-store\/ node_modules\/ >> "\$1\/\.git\/info\/exclude"/);
 });
 
 test('resume --repo continues only that repo\'s delegator; another repo\'s session gets none', async () => {

@@ -6,6 +6,7 @@ import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { BROKER_PORT, home, shellLine } from './util.mjs';
 import { workerKeyEnv } from './keys.mjs';
+import { INSTALL_TIMEOUT_S } from './vendors.mjs';
 import * as codegraph from './codegraph.mjs';
 
 /*
@@ -233,8 +234,13 @@ async function ensureNetworkOnce({ log = () => {}, force = false, dk = docker, b
   return { proxy: 'started' };
 }
 
-const proxyEnv = () => ['HTTPS_PROXY', 'HTTP_PROXY', 'https_proxy', 'http_proxy'].flatMap(k => ['-e', `${k}=${PROXY_URL}`])
-  .concat(['-e', `NO_PROXY=${PROXY},localhost,127.0.0.1`, '-e', `no_proxy=${PROXY},localhost,127.0.0.1`]);
+/**
+ * `docker run` env for every container on the internal network (workers, test jobs, sign-ins, doctor probes).
+ * NODE_USE_ENV_PROXY: Node's built-in fetch (undici: corepack's first-use download, other Node tools) ignores
+ * HTTPS_PROXY without it, and containers have no DNS.
+ */
+export const proxyEnv = () => ['HTTPS_PROXY', 'HTTP_PROXY', 'https_proxy', 'http_proxy'].flatMap(k => ['-e', `${k}=${PROXY_URL}`])
+  .concat(['-e', `NO_PROXY=${PROXY},localhost,127.0.0.1`, '-e', `no_proxy=${PROXY},localhost,127.0.0.1`, '-e', 'NODE_USE_ENV_PROXY=1']);
 
 /** Last `token_count` payload of the newest rollout log under these session roots written since `since` (ISO), or null. */
 async function codexRollout(roots, since) {
@@ -308,7 +314,8 @@ export function dockerHost({ log = () => {} } = {}) {
         '-v', `${dir}:/work`, '-v', `${slotDir(slot)}:/home/worker/.vendor`, '-v', `${mcpFile}:/etc/claude-code/managed-mcp.json:ro`, ...proxyEnv(),
         ...Object.entries({ ...env, ...(apiKey ? workerKeyEnv(vendor) : {}), GIT_AUTHOR_NAME: `hauptling ${slot}`, GIT_AUTHOR_EMAIL: `${slot}@hauptling.local`, GIT_COMMITTER_NAME: `hauptling ${slot}`, GIT_COMMITTER_EMAIL: `${slot}@hauptling.local` }).flatMap(([k, v]) => ['-e', `${k}=${v}`]),
         image, 'sleep', 'infinity']);
-      await exec(id, ['hauptling', 'prepare', vendor, '/work']);
+      // Also installs the repo's dependencies (through the proxy; a failure is noted in the brief, never fatal).
+      await exec(id, ['hauptling', 'prepare', vendor, '/work'], { timeout: (INSTALL_TIMEOUT_S + 120) * 1000 });
       if (codegraphCache) {
         // Before the agent starts, so the saved index is the base commit's. A failure only costs the index.
         const t0 = Date.now();

@@ -212,7 +212,7 @@ async function main() {
 
     // ----- internal / setup -----
     case 'hook': return hook(args._[0], args._[1], call);
-    case 'prepare': { const { prepare } = await import('../src/vendors.mjs'); prepare(args._[0], args._[1]); return; }
+    case 'prepare': { const { prepare, installDeps } = await import('../src/vendors.mjs'); prepare(args._[0], args._[1]); installDeps(args._[1]); return; }
     case 'egress': { const { runEgress } = await import('../src/egress.mjs'); runEgress({ allow: args.allow, log: args.log, relay: args.relay }); return new Promise(() => {}); }
     case 'test-exec': {
       // Inside a test container: /work is the checkout, /artifacts receives log, artifacts and report.json.

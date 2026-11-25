@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync } fr
 import { spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
+import { detect } from './detect.mjs';
 
 /*
  * Worker-side vendor setup, run inside the task container right before its TUI starts
@@ -108,6 +109,39 @@ export function prepare(vendor, dir, home = homedir(), { env = process.env, run 
     s.statusLine = { type: 'command', command: 'hauptling usage agy' };
     writeJson(settingsPath, s);
   } else throw new Error(`Unknown vendor ${vendor}`);
+}
+
+/** Seconds a clone's dependency install may take before it is killed. */
+export const INSTALL_TIMEOUT_S = 900;
+
+/**
+ * Installs the clone's dependencies (hauptling.json / detect.mjs "install") before the CLI starts, inside the
+ * worker container, so through the egress proxy. Output goes to <dir>/.hauptling/install.log (excluded from git).
+ * Never throws: a failure is put at the top of the brief so the worker knows to retry it itself.
+ * @returns {{ status: 'none' | 'ok' | 'failed', cmd?: string }}
+ */
+export function installDeps(dir, { env = process.env, run = spawnSync, timeoutS = INSTALL_TIMEOUT_S } = {}) {
+  let argv;
+  try { argv = detect(dir).install; } catch (e) { note(dir, `Dependency detection failed (${e.message}); install dependencies yourself.`); return { status: 'failed' }; }
+  if (!Array.isArray(argv) || !argv.length) return { status: 'none' };
+  const cmd = argv.join(' ');
+  const logPath = join(dir, '.hauptling', 'install.log');
+  mkdirSync(dirname(logPath), { recursive: true });
+  const r = run(argv[0], argv.slice(1), { cwd: dir, env: { ...env, CI: '1' }, encoding: 'utf8', timeout: timeoutS * 1000, killSignal: 'SIGKILL', maxBuffer: 64 << 20 });
+  const out = `${r.stdout || ''}${r.stderr || ''}${r.error ? `\n${r.error.message}` : ''}`;
+  writeFileSync(logPath, `$ ${cmd}\n${out}\n[exit ${r.status ?? r.signal}]\n`);
+  if (r.status === 0) return { status: 'ok', cmd };
+  const why = r.error?.code === 'ETIMEDOUT' || (r.signal && r.status === null) ? `timed out after ${timeoutS} s` : `exit ${r.status ?? r.signal}`;
+  const tail = out.trim().split('\n').slice(-5).join(' | ').slice(-600);
+  note(dir, `Dependency install failed (${why}): ${tail || 'no output'}. Run \`${cmd}\` yourself (full log: .hauptling/install.log).`);
+  return { status: 'failed', cmd };
+}
+
+/** Puts a line at the top of the clone's brief (written by the broker before the container starts). */
+function note(dir, line) {
+  const p = join(dir, '.hauptling', 'brief.md');
+  const brief = existsSync(p) ? readFileSync(p, 'utf8') : '';
+  writeFileSync(p, `> **${line}**\n\n${brief}`);
 }
 
 /** Normalizes a vendor's hook stdin. */

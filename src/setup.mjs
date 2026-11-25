@@ -9,7 +9,7 @@ import { call, ensureBroker } from './client.mjs';
 import { readBrokerFile } from './brokerfile.mjs';
 import { platform } from './platform/index.mjs';
 import { getBudget, keyHints } from './keys.mjs';
-import { NET, PROXY, PROXY_URL, WORKER_BROKER_URL, baseImageTag, docker, dockerReady, ensureBaseImage, ensureNetwork, slotDir, config, hasGpu, gpuAvailable } from './docker.mjs';
+import { NET, PROXY, WORKER_BROKER_URL, baseImageTag, docker, proxyEnv, dockerReady, ensureBaseImage, ensureNetwork, slotDir, config, hasGpu, gpuAvailable } from './docker.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const step = (m) => console.log(`\n▶ ${m}`);
@@ -146,7 +146,7 @@ function runLogin(slot, vendor) {
 }
 
 /** Runs a shell snippet in a throwaway worker container on the internal network. */
-const probe = (script) => docker(['run', '--rm', '--network', NET, '-e', `HTTPS_PROXY=${PROXY_URL}`, '-e', `https_proxy=${PROXY_URL}`, baseImageTag(), 'sh', '-c', script], { timeout: 60e3 })
+const probe = (script) => docker(['run', '--rm', '--network', NET, ...proxyEnv(), baseImageTag(), 'sh', '-c', script], { timeout: 60e3 })
   .then(r => r.stdout.trim(), e => `ERR ${e.message}`);
 
 /** Checks everything a worker needs; prints a report, returns true when all pass. */
@@ -182,9 +182,11 @@ export async function doctor({ slots, vendors = VENDORS } = {}) {
   } catch (e) { bad(`broker: ${e.message}`); return report(false); }
   if (hasImage && proxyUp) {
     const out = await probe(`node -e "fetch('${WORKER_BROKER_URL}/health').then(r=>console.log('broker', r.status),()=>console.log('broker fail'))"; `
+      + `node -e "fetch('https://registry.npmjs.org/').then(r=>console.log('npmfetch', r.status),e=>console.log('npmfetch fail', e.cause?.code || e.message))"; `
       + `curl -s -o /dev/null -w 'allowed %{http_code}\\n' https://api.anthropic.com/ ; curl -s -o /dev/null -w 'blocked %{http_code}\\n' https://example.com/ ; true`);
     check(/broker 200/.test(out), 'containers reach the broker (via egress relay)', `containers cannot reach the broker: ${out.split('\n')[0]}`);
     check(/allowed [1-5]\d\d/.test(out), 'egress allows vendor APIs', `egress to api.anthropic.com failed: ${out}`);
+    check(/npmfetch [1-5]\d\d/.test(out), "Node fetch reaches registry.npmjs.org through the proxy (corepack, pnpm)", `Node fetch to registry.npmjs.org failed (${(out.match(/npmfetch.*/) || ['no output'])[0]}): is NODE_USE_ENV_PROXY=1 set and the registry allowed?`);
     check(/blocked 000/.test(out) || /blocked 403/.test(out), 'egress blocks other hosts', `example.com was reachable: ${out}`);
   }
   if (config().gpu === false) ok('GPU: disabled in ~/.hauptling/config.json');
