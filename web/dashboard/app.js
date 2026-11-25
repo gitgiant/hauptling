@@ -367,7 +367,8 @@ function toggleGroup(key) {
 }
 const ORDER = { blocked: 0, exited: 1, failed: 1, working: 2, spawning: 3, waiting: 4, queued: 5, done: 6 };
 function renderBoard(b) {
-  const live = b.agents.filter(a => !a.ended);
+  const active = new Map(b.delegators.map(d => [d.id, d]));
+  const live = b.agents.filter(a => !a.ended && active.has(a.delegator));
   const recent = b.agents.filter(a => a.ended).sort((x, y) => (x.updated_at < y.updated_at ? 1 : -1));
   const groups = new Map();
   for (const a of live) {
@@ -375,18 +376,29 @@ function renderBoard(b) {
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(a);
   }
+  const withAgents = new Set(live.map(a => a.delegator));
+  for (const d of active.values()) {
+    if (!withAgents.has(d.id)) groups.set(`${d.id}|${d.repo ?? ''}`, []);
+  }
   const out = [];
-  if (!live.length) out.push(h('p', { class: 'empty', text: 'No active agents. Start Claude, Codex or agy and run /delegator.' }));
+  if (!groups.size) out.push(h('p', { class: 'empty', text: 'No active delegators. Start Claude, Codex or agy and run /delegator.' }));
   for (const [key, list] of groups) {
     const d = key.slice(0, key.indexOf('|')), repo = key.slice(key.indexOf('|') + 1);
+    const idle = list.length === 0;
+    const delegator = active.get(d);
     list.sort((x, y) => (ORDER[x.state] ?? 9) - (ORDER[y.state] ?? 9) || (x.created_at < y.created_at ? -1 : 1));
     const shut = shutGroups.has(key);
+    const toggleTitle = idle
+      ? (shut ? 'Show delegator status' : 'Hide delegator status')
+      : (shut ? 'Show the cards' : 'Hide the cards (keep the status dots)');
     out.push(h('div', { class: `group${shut ? ' shut' : ''}`, 'data-key': key },
-      h('h2', {}, h('button', { class: 'gtoggle', type: 'button', 'aria-expanded': String(!shut), title: shut ? 'Show the cards' : 'Hide the cards (keep the status dots)', onclick: () => toggleGroup(key) },
-        h('span', { class: 'caret', 'aria-hidden': 'true', text: '▾' }), h('span', { class: 'mono', text: repo }), ' · ', h('span', { class: 'mono', text: d }), shut ? h('span', { class: 'count', text: ` (${list.length})` }) : null)),
-      shut
-        ? h('div', { class: 'dots' }, list.map(a => h('button', { type: 'button', class: `dotbtn${state.selected === a.id ? ' selected' : ''}`, title: `${a.id} · ${a.state}`, 'aria-label': `${a.id}, ${a.state}`, onclick: () => select(a.id) }, h('span', { class: `dot ${a.state}` }))))
-        : h('div', { class: 'cards' }, list.map(card))));
+      h('h2', {}, h('button', { class: 'gtoggle', type: 'button', 'aria-expanded': String(!shut), title: toggleTitle, onclick: () => toggleGroup(key) },
+        h('span', { class: 'caret', 'aria-hidden': 'true', text: '▾' }), h('span', { class: 'mono', text: repo || 'No repo' }), ' · ', h('span', { class: 'mono', text: d }), shut && !idle ? h('span', { class: 'count', text: ` (${list.length})` }) : null)),
+      idle
+        ? (shut ? null : h('p', { class: 'empty', text: `No agents running · started ${ago(delegator.created_at)} ago${delegator.handoff_waiting ? ' · handoff waiting' : ''}` }))
+        : shut
+          ? h('div', { class: 'dots' }, list.map(a => h('button', { type: 'button', class: `dotbtn${state.selected === a.id ? ' selected' : ''}`, title: `${a.id} · ${a.state}`, 'aria-label': `${a.id}, ${a.state}`, onclick: () => select(a.id) }, h('span', { class: `dot ${a.state}` }))))
+          : h('div', { class: 'cards' }, list.map(card))));
   }
   if (recent.length) {
     const det = h('details', { class: 'recent', open: localStorage.getItem('hl-recent') === '1' }, h('summary', { text: `Recent, last 24 h (${recent.length})` }), h('div', { class: 'cards' }, recent.map(card)));

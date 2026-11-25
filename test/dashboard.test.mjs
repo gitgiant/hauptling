@@ -116,6 +116,25 @@ test('dashboard board, detail and actions', async () => {
   s.done();
 });
 
+test('dashboard board includes idle active delegators and drops them when ended', async (t) => {
+  const s = await setup();
+  t.after(s.done);
+  const { id } = await s.core.call('delegator.start', { repo: 'gitgiant/docs', cli: 'codex' });
+  const { created_at } = s.db.prepare('SELECT created_at FROM delegators WHERE id = ?').get(id);
+  const board = async () => (await s.req('/dash/board')).json;
+  const initial = await board();
+  assert.ok(!initial.agents.some(a => a.delegator === id));
+  const idle = { id, repo: 'gitgiant/docs', cli: 'codex', created_at, handoff_waiting: false };
+  assert.deepEqual(initial.delegators.find(d => d.id === id), idle);
+
+  await s.core.call('handoff', { delegator: id, text: 'Work can resume later.' });
+  assert.deepEqual((await board()).delegators.find(d => d.id === id), { ...idle, handoff_waiting: true });
+
+  await s.core.call('delegator.end', { delegator: id });
+  const after = await board();
+  assert.deepEqual(after.delegators, initial.delegators.filter(d => d.id !== id));
+});
+
 test('SQLite explorer: browse + read-only SQL, secrets masked even under an alias', async () => {
   const s = await setup();
   const agentTok = s.db.prepare('SELECT token FROM agents WHERE id = ?').get(s.id).token;

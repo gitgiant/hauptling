@@ -174,7 +174,10 @@ export function createDashboard({ db, dbPath, core, host, log = () => {}, slotDi
         ask: ask ? { id: ask.id, question: ask.question, choices: JSON.parse(ask.choices), at: ask.at } : null,
       };
     }).map(a => ({ ...a, headline: headline(a) }));
-    const delegators = db.prepare('SELECT id, cli, repo, active, created_at FROM delegators ORDER BY created_at').all();
+    const delegators = db.prepare(`
+      SELECT id, repo, cli, created_at, handoff IS NOT NULL AS handoff_waiting
+      FROM delegators WHERE active = 1 ORDER BY created_at
+    `).all().map(d => ({ ...d, handoff_waiting: Boolean(d.handoff_waiting) }));
     const { line: _l, ...tests } = tq;
     return { agents, delegators, gpu: await gpu(), tests, blocked: agents.filter(a => a.state === 'blocked').length };
   }
