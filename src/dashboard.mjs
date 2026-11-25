@@ -7,6 +7,7 @@ import { kvGet, kvSet } from './db.mjs';
 import { readOnlyQuery } from './dbquery.mjs';
 import { createTerminals } from './terminal.mjs';
 import { token as newToken } from './util.mjs';
+import { buildBody, brokerFacts, fileIssue, issueRepo, originUrl, scrubText } from './report.mjs';
 
 /*
  * Dashboard (phase 4a), served by the broker:
@@ -16,6 +17,7 @@ import { token as newToken } from './util.mjs';
  *   GET  /dash/agent/<id>/diff|events, /dash/history, /dash/db/tables, /dash/db/table
  *   POST /dash/db/query     ad-hoc read-only SQL
  *   POST /dash/do/<call>    actions (answer, reply, kill, merge, gpu.*), need `X-Hauptling: 1`
+ *   POST /dash/report/preview|send   F2 "Report an issue": the scrubbed body, and filing it with `gh issue create`
  * Only requests to 127.0.0.1 are served (containers reach the broker on docker0 through the
  * egress relay and get 403). Token and nonce values are masked in everything the explorer shows.
  */
@@ -104,10 +106,25 @@ export function masker(db) {
   };
 }
 
-export function createDashboard({ db, dbPath, core, host, log = () => {}, slotDir = () => { throw new Error('no slots'); }, logins = () => [] }) {
+export function createDashboard({ db, dbPath, core, host, log = () => {}, slotDir = () => { throw new Error('no slots'); }, logins = () => [], report = {} }) {
   const terms = createTerminals({ db, host, slotDir, log });
   const json = (res, code, body) => { res.writeHead(code, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(body)); };
   const agentRow = (id) => db.prepare('SELECT * FROM agents WHERE id = ?').get(id);
+  /** Scrubbed title and body for "Report an issue"; preview and send both come through here, so the preview is exactly what is sent. */
+  async function reportBody(b) {
+    const secrets = [...(report.secrets?.() || []), ...db.prepare('SELECT token FROM agents').all().map(r => r.token),
+      ...db.prepare('SELECT nonce FROM asks WHERE nonce IS NOT NULL').all().map(r => r.nonce), kvGet(db, 'dash:token')];
+    const include = b.include !== false;
+    const facts = include ? await (report.facts || brokerFacts)(report.logPath) : {};
+    const clean = (t) => scrubText(t, secrets);
+    const client = b.client && typeof b.client === 'object' ? b.client : {};
+    const repo = issueRepo(report.config?.(), await (report.origin || originUrl)());
+    return {
+      repo,
+      title: clean(String(b.title || '').slice(0, 256)),
+      body: clean(buildBody({ description: String(b.description || '').slice(0, 20000), include, client, facts })),
+    };
+  }
   const pub = ({ token: _t, brief: _b, ...a }) => a;
 
   // ---------- board snapshot ----------
@@ -422,6 +439,14 @@ export function createDashboard({ db, dbPath, core, host, log = () => {}, slotDi
           const [, sid, what] = tp;
           const r = what === 'input' ? terms.input(sid, Boolean(body.on)) : what === 'keys' ? await terms.keys(sid, body.keys) : await terms.stopLogin(sid);
           json(res, 200, r ?? { ok: true });
+          return true;
+        }
+        if (p === '/dash/report/preview' || p === '/dash/report/send') {
+          const b = await reportBody(body);
+          if (p.endsWith('preview')) { json(res, 200, b); return true; }
+          if (!String(body.title || '').trim()) throw new Error('Title is required');
+          const url = await fileIssue({ gh: report.gh, repo: b.repo, title: b.title, body: b.body });
+          json(res, 200, { ok: true, url });
           return true;
         }
         const m = /^\/dash\/do\/([\w.]+)$/.exec(p);

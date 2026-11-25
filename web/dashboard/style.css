@@ -244,3 +244,15 @@ table.grid td.num, table.grid th.num { text-align: right; font-variant-numeric: 
 .term { white-space: pre-wrap; overflow-wrap: anywhere; }
 .term.nowrap { white-space: pre; overflow-wrap: normal; }
 .prefer { display: block; margin: 0 0 12px; }
+
+/* Report an issue (F2) */
+.rp-back { position: fixed; inset: 0; z-index: 6; background: rgba(0,0,0,.5); display: grid; place-items: center; padding: 1rem; }
+.rp-box { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 1rem; width: min(42rem, 100%); max-height: 100%; overflow: auto; display: flex; flex-direction: column; gap: .4rem; }
+.rp-box h2 { margin: 0 0 .3rem; font-size: 1.05rem; }
+.rp-box input[type=text] { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: .4rem .6rem; }
+.rp-preview { margin: 0; max-height: 14rem; overflow: auto; white-space: pre-wrap; word-break: break-word; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: .5rem; font-size: 12px; }
+.rp-err { color: var(--bad); margin: 0; min-height: 1.2em; }
+.rp-actions { display: flex; gap: .5rem; align-items: center; justify-content: flex-end; }
+.rp-actions .empty { margin-right: auto; }
+.toast a { color: inherit; }
+.report-btn { padding: .05rem .5rem; font-size: 12px; white-space: nowrap; }

@@ -4,12 +4,13 @@ import { execFile } from 'node:child_process';
 
 const ghBin = () => process.env.HAUPTLING_GH || 'gh';
 
-export function gh(args, { timeout = 60e3 } = {}) {
+export function gh(args, { timeout = 60e3, input } = {}) {
   return new Promise((resolve, reject) => {
-    execFile(ghBin(), args, { timeout, maxBuffer: 8 << 20 }, (err, stdout, stderr) => {
+    const child = execFile(ghBin(), args, { timeout, maxBuffer: 8 << 20 }, (err, stdout, stderr) => {
       if (err) { err.message = `gh ${args.slice(0, 2).join(' ')}: ${(stderr || err.message).trim().slice(-500)}`; err.stderr = stderr; reject(err); }
       else resolve(stdout.trim());
     });
+    if (input !== undefined) child.stdin.end(input);
   });
 }
 
