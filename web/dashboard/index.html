@@ -8,21 +8,22 @@
 <script type="module" src="/web/app.js"></script>
 </head>
 <body>
-<header class="top">
+<header class="top" id="top">
   <h1>Hauptling</h1>
   <nav class="tabs" role="tablist">
     <button role="tab" data-view="board" aria-selected="true">Board</button>
     <button role="tab" data-view="history">History</button>
     <button role="tab" data-view="db">Database</button>
   </nav>
-  <button id="usagebar" class="usagebar" type="button" aria-label="Usage and spend: open the usage page" aria-pressed="false">Usage</button>
-  <section id="sys" class="gpu sys" aria-label="Host load"></section>
-  <section id="gpu" class="gpu" aria-label="GPU queue"></section>
-  <span id="conn" class="conn" title="Live updates">connecting…</span>
+  <div class="strip">
+    <button id="usagebar" class="usagebar" type="button" aria-label="Usage and spend: open the usage page" aria-pressed="false">Usage</button>
+    <section id="sys" class="gpu sys" aria-label="Host load"></section>
+    <section id="gpu" class="gpu" aria-label="GPU queue"></section>
+  </div>
+  <span id="conn" class="conn" title="Live updates"><span class="long">connecting…</span></span>
   <button id="theme" class="theme" type="button"></button>
-  <button id="hide-top" class="hide-top" type="button" title="Hide the header (or drag it up)" aria-label="Hide the header">⌃</button>
 </header>
-<button id="top-tab" class="top-tab" type="button" title="Show the header (click or drag down)" aria-label="Show the header" hidden><span></span></button>
+<div id="top-handle" class="splitter top-handle" role="separator" tabindex="0" aria-controls="top" aria-orientation="horizontal" aria-valuemin="0" aria-valuemax="100"></div>
 
 <main id="view-board" class="split">
   <section id="board" class="board" aria-label="Agents"></section>

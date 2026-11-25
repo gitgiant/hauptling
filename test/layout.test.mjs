@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { clampRatio, parseRatio, defaultRatio, splitKey, keyRatio, collapseAfterDrag } from '../web/dashboard/layout.js';
+import { clampRatio, parseRatio, defaultRatio, splitKey, keyRatio, collapseAfterDrag, HEADER_STEPS, stepClasses, pickStep, handleKey } from '../web/dashboard/layout.js';
 
 test('clampRatio keeps both panes at their minimum', () => {
   assert.equal(clampRatio(0.4, 1000, 200, 300), 0.4);
@@ -62,4 +62,43 @@ test('collapseAfterDrag: the tab expands on a click, a drag down or a flick down
   assert.equal(shut(10, 0.8), false, 'flick down');
   assert.equal(shut(10), true, 'short slow drag stays collapsed');
   assert.equal(shut(-20), true, 'dragging up keeps it collapsed');
+});
+
+test('stepClasses: each header step keeps the degrades before it', () => {
+  assert.deepEqual(stepClasses(0), []);
+  assert.deepEqual(stepClasses(1), ['h-no-spark']);
+  assert.deepEqual(stepClasses(3), ['h-no-spark', 'h-short', 'h-brief']);
+  assert.deepEqual(stepClasses(HEADER_STEPS.length - 1), ['h-no-spark', 'h-short', 'h-brief', 'h-phone']);
+});
+
+test('pickStep: the least degraded step whose row fits at a given width', () => {
+  const needs = [1700, 1450, 1250, 700]; // row width at full, no sparklines, short labels, brief GPU
+  const at = (width, current = 0) => pickStep((s) => width - needs[s], current);
+  assert.equal(at(3440), 0, 'ultrawide: everything');
+  assert.equal(at(1920), 0, '1920: everything on one row');
+  assert.equal(at(1600), 1, 'drop the sparklines first');
+  assert.equal(at(1366), 2, 'then shorten labels');
+  assert.equal(at(1000), 3, 'then hide GPU details');
+  assert.equal(at(768), 3);
+  assert.equal(at(390), 4, 'phone: two rows');
+});
+
+test('pickStep: going back needs a margin, so a ticking number cannot flip the step', () => {
+  const needs = [1000, 900, 800, 700];
+  const at = (width, current) => pickStep((s) => width - needs[s], current);
+  assert.equal(at(1005, 1), 1, 'fits by 5 px: stay degraded');
+  assert.equal(at(1012, 1), 0, 'fits by the margin: go back');
+  assert.equal(at(995, 0), 1, 'overflowing: degrade at once');
+  assert.equal(at(1000, 0), 0, 'exact fit with no step change');
+});
+
+test('handleKey: Enter/Space toggle, Up collapses, Down expands', () => {
+  assert.equal(handleKey('Enter', false), true);
+  assert.equal(handleKey(' ', true), false);
+  assert.equal(handleKey('ArrowUp', false), true);
+  assert.equal(handleKey('Home', true), true);
+  assert.equal(handleKey('ArrowDown', true), false);
+  assert.equal(handleKey('End', false), false);
+  assert.equal(handleKey('a', false), null);
+  assert.equal(handleKey('ArrowLeft', false), null);
 });
