@@ -191,8 +191,12 @@ function report(all) {
 }
 
 /** Signs one slot in to one vendor, in this terminal. */
-export async function login(slot, vendor) {
+export async function login(slot, vendor, { force = false } = {}) {
   if (!/^hl-w\d+$/.test(slot || '') || !LOGIN[vendor]) throw new Error('login <hl-wN> <claude|codex|agy>');
+  // Refresh tokens rotate: signing in while a worker of this vendor runs on the slot can sign that worker out.
+  const busy = force ? null : (await call('agents', { all: true }).catch(() => []))
+    .find(a => a.slot === slot && a.vendor === vendor && ['spawning', 'working', 'blocked', 'done'].includes(a.state));
+  if (busy) throw new Error(`${busy.id} is running on ${slot} with this ${vendor} sign-in; signing in again now could sign it out mid-task. Wait until it ends (or kill it), or pass --force.`);
   runLogin(slot, vendor);
 }
 export { BROKER_PORT };

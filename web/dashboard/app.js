@@ -384,7 +384,8 @@ async function loadUsage() {
           v.limits.sort((a, b) => (a.window === '5h' ? -1 : 1)).map(meter),
           v.signed_in && !v.limits.length ? h('span', { class: 'resets', text: 'no usage reported yet' }) : null,
           h('div', { class: 'who' },
-            h('button', { onclick: () => startLogin(s.slot, v.vendor) }, v.signed_in ? 'Sign in again' : 'Sign in'),
+            h('button', { disabled: Boolean(v.busy), title: v.busy ? `${v.busy} is using this sign-in` : null, onclick: () => startLogin(s.slot, v.vendor) }, v.signed_in ? 'Sign in again' : 'Sign in'),
+            v.busy ? h('span', { class: 'resets', text: `Locked while ${v.busy} runs: refresh tokens rotate, so a second sign-in could sign it out mid-task.` }) : null,
             h('code', { class: 'resets', title: 'Or run this in a terminal', text: v.login }))))))))));
     renderSpend(u.spend);
   } catch (e) { toast(e.message, true); }

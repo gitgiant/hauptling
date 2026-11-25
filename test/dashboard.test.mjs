@@ -147,6 +147,8 @@ test('web terminal: frames from the agent pane; input off until switched on, gat
   assert.equal(terms.inputState(s.id).input, false, 'off after 10 min without typing');
   assert.throws(() => terms.resolve('../../etc'), /No live session/);
   await assert.rejects(terms.startLogin('hl-w1; rm', 'claude'), /slot and vendor/);
+  await assert.rejects(terms.startLogin('hl-w1', 'claude'), /is running on hl-w1 with this claude sign-in/, 'no second sign-in while its worker runs');
+  assert.equal(terms.runningOn('hl-w1', 'codex'), null, 'other vendors on the same slot are not locked');
   // Over HTTP: input + keys need the X-Hauptling header like every action.
   const on = await s.req(`/dash/term/${s.id}/input`, { method: 'POST', headers: { 'x-hauptling': '1' }, body: { on: true } });
   assert.equal(on.json.input, true);
@@ -163,6 +165,8 @@ test('usage panel and spend: slot × vendor limits, sign-in state, totals of fin
   assert.equal(w1.agent, s.id);
   assert.deepEqual(w1.vendors.find(v => v.vendor === 'claude').limits.map(l => [l.window, l.used_pct]), [['5h', 42]]);
   assert.equal(w1.vendors[0].login, 'hauptling login hl-w1 claude');
+  assert.equal(w1.vendors.find(v => v.vendor === 'claude').busy, s.id, 'Sign in locked for the running worker\'s vendor');
+  assert.equal(w1.vendors.find(v => v.vendor === 'codex').busy, null);
   assert.equal(u.spend.total.cost_usd, 1.5);
   assert.equal(u.spend.byVendor[0].key, 'claude');
   assert.equal((await s.req('/dash/board')).json.agents[0].usage.cost_usd, 1.5);

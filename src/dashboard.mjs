@@ -174,6 +174,7 @@ export function createDashboard({ db, dbPath, core, host, log = () => {}, slotDi
         vendor,
         signed_in: Boolean(signedIn.get(`${slot}:${vendor}`)),
         login: `hauptling login ${slot} ${vendor}`,
+        busy: busy.get(slot)?.vendor === vendor ? busy.get(slot).id : null,
         limits: rows.filter(r => r.slot === slot && r.vendor === vendor).map(r => ({ window: r.window, used_pct: r.used_pct, resets_at: r.resets_at, at: r.at })),
       })),
     }));

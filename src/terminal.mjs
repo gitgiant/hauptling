@@ -80,8 +80,14 @@ export function createTerminals({ db, host, slotDir, log = () => {}, now = () =>
   }
 
   /** Starts a vendor sign-in on the host in tmux, input on. Same env as `hauptling login`. */
+  /** A worker of this vendor running on the slot: it refreshes the same credential file. */
+  const runningOn = (slot, vendor) => db.prepare("SELECT id FROM agents WHERE slot = ? AND vendor = ? AND state IN ('spawning','working','blocked','done')").get(slot, vendor)?.id || null;
+
   async function startLogin(slot, vendor) {
     if (!/^hl-[\w-]+$/.test(slot) || !LOGIN[vendor]) throw new Error('slot and vendor (claude, codex, agy) are required');
+    // Refresh tokens rotate (Claude, Codex; agy's MCP tokens): a second process refreshing the same file signs the other out.
+    const busy = runningOn(slot, vendor);
+    if (busy) throw new Error(`${busy} is running on ${slot} with this ${vendor} sign-in; signing in again now could sign it out mid-task. Wait until it ends (or kill it), then sign in.`);
     const sid = `login-${slot}-${vendor}`;
     await tmux(['kill-session', '-t', sid]).catch(() => {});
     const dir = slotDir(slot);
@@ -106,5 +112,5 @@ export function createTerminals({ db, host, slotDir, log = () => {}, now = () =>
     await tmux(['kill-session', '-t', sid]).catch(() => {});
   }
 
-  return { resolve, screen, input, inputState, keys, startLogin, stopLogin };
+  return { resolve, screen, input, inputState, keys, startLogin, stopLogin, runningOn };
 }

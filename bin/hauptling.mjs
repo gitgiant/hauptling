@@ -30,7 +30,7 @@ Setup:
                                            everything: skill, Docker, worker image, egress proxy, broker, sign-ins, doctor
   doctor                                   check tools, Docker, image, egress, broker and sign-ins
   image                                    build the worker image if hauptling changed
-  login SLOT VENDOR                        sign one slot in to claude|codex|agy
+  login SLOT VENDOR [--force]              sign one slot in to claude|codex|agy (refused while a worker of that vendor runs on the slot)
   init [DIR]                               write the detected hauptling.json
   broker start|stop|status|run
 Internal: hook VENDOR EVENT, prepare VENDOR DIR, usage VENDOR (status line), egress, test-exec`;
@@ -213,7 +213,7 @@ async function main() {
       return;
     }
     case 'doctor': { const { doctor } = await import('../src/setup.mjs'); if (!await doctor({ vendors: args.vendors ? args.vendors.split(',') : undefined })) process.exitCode = 1; return; }
-    case 'login': { const { login } = await import('../src/setup.mjs'); return login(args._[0], args._[1]); }
+    case 'login': { const { login } = await import('../src/setup.mjs'); return login(args._[0], args._[1], { force: Boolean(args.force) }); }
     default: throw new Error(`Unknown command ${cmd}\n\n${USAGE}`);
   }
 }
