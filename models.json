@@ -1,5 +1,11 @@
 {
-  "_doc": "Shipped default. Override any part in ~/.hauptling/models.json (deep-merged). tier: 1 cheap, 2 mid, 3 top. Prices are USD per million tokens; null means unknown (cost shows as unknown). Codex keeps its workspace-write sandbox (network on so it reaches the broker); it cannot write .git, so hauptling commits for it on report/test request. Workers run in disposable containers with an egress allowlist; the container is the sandbox (Codex's own bubblewrap sandbox cannot run inside Docker, so Codex uses danger-full-access there, chosen 2026-11-21).",
+  "_doc": "Shipped default. prefer (cheap|balanced|best) caps the tier workers may use (1|2|3; spawn --allow-tier overrides). effort: default reasoning effort per tier, passed via each vendor's effortArgs (a model entry's own effort wins; spawn --effort overrides; agy has none: its model ids carry the effort). Workers load no user MCP servers (Claude: the per-agent managed-mcp.json, see src/codegraph.mjs; Codex -c mcp_servers={}). Override any part in ~/.hauptling/models.json (deep-merged). tier: 1 cheap, 2 mid, 3 top. Prices are USD per million tokens; null means unknown (cost shows as unknown). Codex keeps its workspace-write sandbox (network on so it reaches the broker); it cannot write .git, so hauptling commits for it on report/test request. Workers run in disposable containers with an egress allowlist; the container is the sandbox (Codex's own bubblewrap sandbox cannot run inside Docker, so Codex uses danger-full-access there, chosen 2026-11-21).",
+  "prefer": "best",
+  "effort": {
+    "1": "low",
+    "2": "medium",
+    "3": "high"
+  },
   "rules": {
     "easy": 1,
     "normal": 2,
@@ -20,6 +26,10 @@
         "--permission-mode",
         "auto",
         "{prompt}"
+      ],
+      "effortArgs": [
+        "--effort",
+        "{effort}"
       ],
       "models": [
         {
@@ -62,7 +72,13 @@
         "danger-full-access",
         "--ask-for-approval",
         "never",
+        "-c",
+        "mcp_servers={}",
         "{prompt}"
+      ],
+      "effortArgs": [
+        "-c",
+        "model_reasoning_effort=\"{effort}\""
       ],
       "models": [
         {

@@ -1,22 +1,30 @@
 # Handoff — 2026-11-25
 
-All four PRD phases, the sign-in lock, API keys, per-vendor usage and the egress-proxy race fix are on `main`. Branch `codegraph` (on top of `usage-header`, neither merged): header usage chips replace the Usage tab; CodeGraph in workers (PRD "CodeGraph in workers"). `npm test` (44) passes. Worker image rebuilt with CodeGraph.
+All four PRD phases, the sign-in lock, API keys, per-vendor usage, the egress-proxy race fix, CodeGraph in workers and token economy stages 1–2 are on `main`. `npm test` passes.
 
 ## Needs a real run to confirm
 
 - Broker not restarted since `cli-fixes`: header CPU/Mem/GPU graphs, card headlines, usage chips and the CodeGraph launch path go live after `hauptling broker stop` (a test job was running, so it was left up).
 - CodeGraph with a real task: whether agents (and their subagents) actually use it; first-index time on a large repo (nullpunkt). The container path itself is verified (index 3 s / 1 s from cache on this repo, no MCP prompt, repo `.mcp.json` ignored).
-- "Sign in" on the usage page (vendor login in host tmux).
+- Token economy changed worker code (`src/vendors.mjs` turns Claude plugins off in the slot): run `hauptling image`, then `hauptling broker stop`.
+- Claude workers start with `--effort <tier default>` and Codex with `-c model_reasoning_effort="…"`; confirm both TUIs accept them. Codex's `-c mcp_servers={}` actually drops servers from the slot's `config.toml` (may merge instead of replace).
+- Claude workers with plugins off still get CodeGraph from `managed-mcp.json` (the token-economy branch's `--strict-mcp-config` was dropped in the merge).
+- Re-run `hauptling setup` to install the host status lines (`hauptling usage <vendor> --host`, chaining your old one); check the host Claude status line still shows your old output and `host_usage` fills.
+- A Claude delegator running `hauptling wait --delegator <id> --until-event` in the background wakes on events.
+- The `spent:` line on a real `[report]` (window deltas need status-line readings at launch and at report).
+- Usage tab "Model preference" select writes `prefer` to `~/.hauptling/models.json`.
+- "Sign in" on the Usage tab (vendor login in host tmux).
 - The Terminal tab live in a browser (parts tested; headless screenshots fire before data arrives).
 - A worker on an API key: Claude's TUI should show API billing; for agy, whether `GEMINI_API_KEY` or its OAuth sign-in wins is unknown.
 - API budget (branch `api-budget`, on `codegraph`; PRD "API keys"): claude key has a $100/month budget set. Unit-tested only; needs a broker restart, then a real spawn should say `, api`, and the header an "API $x/$100" chip. Whether Claude's reported `total_cost_usd` matches the console bill is unchecked.
-- Superseded gate kill (`killTestJob` on a running gate) and the dashboard's dead-container screen answer: unit-tested only; code is baked into nothing (broker-side) but needs `hauptling broker stop` to go live.
+- Superseded gate kill (`killTestJob` on a running gate): unit-tested only; code is baked into nothing (broker-side) but needs `hauptling broker stop` to go live.
 - GPU `pause --now`, the VRAM wait and `gateGpu` on the real GPU (unit-tested only).
 
 ## Open
 
 - nullpunkt: commit `b9a0f6e8` (drops the coagent mailbox for `hauptling mail`) sits in `nullpunkt/.worktrees/claude_opus-5-5_d72c0`, unpushed. Before `node scripts/worktree.mjs sync claude_opus-5-5_d72c0`, discard the main checkout's local edits to `.mcp.json` and `.codex/hooks.json` (the commit replaces both). Sync restarts the user's game.
-- Codex/agy: can either exclude a repo's own MCP servers? (CodeGraph reaches them via the CLI only.)
+- Codex/agy: can either exclude a repo's own MCP servers? (CodeGraph reaches them via the CLI only.) agy's bare config (MCP off) is unknown.
+- Token economy stage 3 (headroom routing at 80%): not started.
 - Codex prices in `models.json` are `null`, so Codex cost shows "unknown".
 - agy's own sign-in token rotation is unconfirmed (PRD "Open").
 - macOS / Ubuntu install untested; only WSL so far.

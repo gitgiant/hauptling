@@ -136,7 +136,6 @@ details.recent > summary { cursor: pointer; color: var(--muted); font-size: 12px
 .reply input { flex: 1; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: .35rem .6rem; }
 .report { background: var(--bg); border-radius: 6px; padding: .5rem .7rem; margin-bottom: .75rem; font-size: 13px; }
 .subtabs { display: flex; gap: .25rem; border-bottom: 1px solid var(--line); margin-bottom: .5rem; }
-pre.screen { margin: 0; padding: .7rem; background: #111; color: #ddd; border-radius: 6px; overflow: auto; max-height: 60vh; max-height: 60dvh; white-space: pre; }
 pre.patch { margin: 0 0 .75rem; padding: .5rem; background: var(--bg); border-radius: 6px; overflow: auto; max-height: 50vh; max-height: 50dvh; }
 pre.patch .add { color: var(--ok); } pre.patch .del { color: var(--bad); } pre.patch .hunk { color: var(--accent); }
 details.file > summary { cursor: pointer; font-family: var(--mono); font-size: 12.5px; padding: .2rem 0; }
@@ -226,3 +225,4 @@ table.grid td.num, table.grid th.num { text-align: right; font-variant-numeric: 
 .card .aid .mono { overflow-wrap: anywhere; }
 .term { white-space: pre-wrap; overflow-wrap: anywhere; }
 .term.nowrap { white-space: pre; overflow-wrap: normal; }
+.prefer { display: block; margin: 0 0 12px; }

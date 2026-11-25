@@ -174,3 +174,52 @@ test('billing without a budget: a key covers every spawn, no key means the plan'
   assert.equal(setup().core.billingFor('claude'), 'plan');
   assert.equal(setup().core.budgetState('claude'), null);
 });
+
+test('handoff-due: once per window at 85%, only to delegators running on that vendor\'s CLI', async () => {
+  const { db, core } = setup();
+  const { id: dc } = await core.call('delegator.start', { repo: 'gitgiant/demo', cli: 'claude' });
+  const { id } = await core.call('spawn', { delegator: dc, brief: 'task', vendor: 'claude', mode: 'cheapest' });
+  const { id: dx } = await core.call('delegator.start', { repo: 'gitgiant/demo', cli: 'codex' });
+  await settle();
+  const who = core.authenticate(db.prepare('SELECT token FROM agents WHERE id = ?').get(id).token, 'ADMIN');
+  await core.call('usage.report', { vendor: 'claude', payload: CLAUDE }, who);
+  await core.call('usage.report', { vendor: 'claude', payload: CLAUDE }, who);
+  const due = (await core.call('wait', { delegator: dc, timeout: 0 })).events.filter(e => e.kind === 'handoff-due');
+  assert.equal(due.length, 1);
+  assert.match(due[0].text, /5h window at 92%.*hauptling handoff/);
+  assert.equal((await core.call('wait', { delegator: dx, timeout: 0 })).events.filter(e => e.kind === 'handoff-due').length, 0);
+});
+
+test('host usage: the delegator\'s own CLI drives handoff-due; once it reports, slot readings no longer do', async () => {
+  const { db, core } = setup();
+  const { id: d } = await core.call('delegator.start', { repo: 'gitgiant/demo', cli: 'claude' });
+  const low = structuredClone(CLAUDE);
+  low.rate_limits.five_hour.used_percentage = 20;
+  await core.call('usage.host', { vendor: 'claude', payload: low });
+  const { id } = await core.call('spawn', { delegator: d, brief: 'task', vendor: 'claude', mode: 'cheapest' });
+  await settle();
+  const who = core.authenticate(db.prepare('SELECT token FROM agents WHERE id = ?').get(id).token, 'ADMIN');
+  await core.call('usage.report', { vendor: 'claude', payload: CLAUDE }, who);
+  const kinds = async () => (await core.call('wait', { delegator: d, timeout: 0 })).events.filter(e => e.kind === 'handoff-due');
+  assert.equal((await kinds()).length, 0, 'the slot account at 92% is not the delegator\'s');
+  await core.call('usage.host', { vendor: 'claude', payload: CLAUDE });
+  assert.equal((await kinds()).length, 1);
+  await assert.rejects(core.call('usage.host', { vendor: 'claude', payload: CLAUDE }, who), /not allowed for workers/);
+});
+
+test('host status lines: installed idempotently; the previous command is chained with the same stdin', async () => {
+  const { installStatusLines, chained } = await import('../src/hoststatus.mjs');
+  const { mkdtempSync, mkdirSync, writeFileSync, readFileSync } = await import('node:fs');
+  const h = mkdtempSync(join(tmpdir(), 'hl-home-'));
+  process.env.HAUPTLING_HOME = join(h, '.hauptling');
+  mkdirSync(join(h, '.claude'));
+  writeFileSync(join(h, '.claude', 'settings.json'), JSON.stringify({ model: 'x', statusLine: { type: 'command', command: 'cat' } }));
+  installStatusLines(h);
+  installStatusLines(h);
+  const s = JSON.parse(readFileSync(join(h, '.claude', 'settings.json'), 'utf8'));
+  assert.equal(s.statusLine.command, 'hauptling usage claude --host');
+  assert.equal(s.model, 'x');
+  assert.equal(chained('claude', 'hello'), 'hello', 'the user\'s own line still shows');
+  assert.equal(chained('agy', '{}'), null, 'agy not installed on this host: nothing chained');
+  delete process.env.HAUPTLING_HOME;
+});
