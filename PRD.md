@@ -1,6 +1,6 @@
 # PRD: Hauptling agent delegator
 
-Status: design agreed 2026-11-20 (grill-me interview). Phases 1 and 2 done (decisions under Phases); phase 3 (GPU runner and lease) built and verified on the RTX 2070 SUPER 2026-11-24; phase 4a (dashboard) built 2026-11-24; 4b (usage, web terminal, vendors panel) not started. Living copy: https://claude.ai/artifact/YbwvdtdzM8JuvEagKG1Xh4
+Status: design agreed 2026-11-20 (grill-me interview). Phases 1 and 2 done (decisions under Phases); phase 3 (GPU runner and lease) built and verified on the RTX 2070 SUPER 2026-11-24; phase 4a (dashboard) built 2026-11-24; 4b (usage, web terminal, vendors panel) decisions settled 2026-11-24, in progress. Living copy: https://claude.ai/artifact/YbwvdtdzM8JuvEagKG1Xh4
 
 Hauptling delegates coding tasks to Claude, Codex and agy (Antigravity CLI) agents running in disposable containers, across any repo.
 
@@ -105,6 +105,16 @@ Phases 2–4 get their own grill at phase start.
 - **Board**: active agents of all delegators grouped by delegator and repo; blocked first and blinking, count in the tab title; collapsible "recent" (24 h) and a searchable history tab; GPU queue panel. Rows show branch, PR/CI, last test report, elapsed time, model.
 - **Notifications**: the answer page stays the one-click path; it and notifications gain an "Open dashboard" link. `hauptling dashboard [--print]` opens or prints the URL; `doctor` checks it's served.
 - **Layout**: board on the left, agent detail on the right; stacks on a phone.
+
+### Phase 4b decisions (2026-11-24)
+
+- **Web terminal**: watch-only by default; a per-agent "Enable input" switch turns itself off after 10 min without typing.
+- **Transport, no pty**: while someone watches, the broker polls `tmux capture-pane -e` ~5×/s and sends changed frames over SSE; the page renders the colour codes as HTML. Input goes through `tmux send-keys`. No new dependencies; ~200 ms lag.
+- **Usage collection** (no model tokens: local files and commands only): Claude and agy get the slot's status line set to `hauptling usage <vendor>`, which forwards the JSON to the broker (agy quota arrives as *remaining* and is converted to *used*; its `email` field is dropped). Codex: the broker reads the last `token_count` event of the newest `sessions/**/rollout-*.jsonl` in the slot (format not stable upstream; a change shows `unknown` plus a log line). Cost comes from the vendor where reported, else from `models.json` prices, else `unknown`.
+- **Limits** (5h and weekly belong to a slot's account): at 90% one notification plus a `usage-high` event to the delegator (slot, vendor, reset time). At 100% that slot's vendor is skipped for new spawns until the reset; spawns wait if nothing is free. Running workers are left alone.
+- **Vendors panel**: per slot × vendor: signed in, 5h/weekly used % and reset time. "Sign in" runs the login in a throwaway slot container shown in the web terminal with input on; the panel rechecks when the CLI exits. `hauptling login …` stays as the fallback hint.
+- **History**: latest usage per agent and per slot × vendor. An ended agent keeps its final tokens and cost; a Spend view totals per day, vendor and repo (API-equivalent estimates). No time series.
+- **Agent rows** gain tokens, cost and context %; agent detail gains a Terminal tab.
 
 ### Phase 3 decisions (2026-11-24)
 
