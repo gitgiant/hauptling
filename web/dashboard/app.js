@@ -64,6 +64,7 @@ function setTheme(t) {
   b.title = `Switch to ${t === 'dark' ? 'light' : 'dark'} mode`;
 }
 setTheme(localStorage.getItem('hl-theme') === 'light' ? 'light' : 'dark');
+$('#usagebar').addEventListener('click', () => show(state.view === 'usage' ? 'board' : 'usage'));
 $('#theme').addEventListener('click', () => setTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'));
 
 // ---------- state ----------
@@ -76,6 +77,7 @@ for (const b of document.querySelectorAll('.tabs button')) {
 function show(view) {
   state.view = view;
   for (const b of document.querySelectorAll('.tabs button')) b.setAttribute('aria-selected', String(b.dataset.view === view));
+  $('#usagebar').setAttribute('aria-pressed', String(view === 'usage'));
   for (const v of ['board', 'usage', 'history', 'db']) $(`#view-${v}`).hidden = v !== view;
   if (view !== 'board') closeTerm();
   if (view === 'history') loadHistory();
@@ -417,6 +419,8 @@ async function loadUsage() {
   clearTimeout(usageTimer);
   try {
     const u = await api.get('/dash/usage');
+    renderUsageBar(u);
+    if (state.view !== 'usage') return;
     put($('#vendors'), h('div', { class: 'vendors' }, u.vendors.map(v => {
       const signed = v.slots.filter(s => s.signed_in).length;
       return h('section', { class: 'vendor' },
@@ -433,8 +437,23 @@ async function loadUsage() {
             s.busy ? h('span', { class: 'resets', text: `locked: ${s.busy} running` }) : null))));
     })));
     renderSpend(u.spend);
-  } catch (e) { toast(e.message, true); }
-  if (state.view === 'usage') usageTimer = setTimeout(loadUsage, 15e3);
+  } catch (e) { if (state.view === 'usage') toast(e.message, true); }
+  finally { usageTimer = setTimeout(loadUsage, state.view === 'usage' ? 15e3 : 30e3); }
+}
+/** Header: one chip per vendor with tiny bars (5h on top, week below), plus 30-day spend. */
+function renderUsageBar(u) {
+  const level = (p) => (p >= 100 ? 'full' : p >= 90 ? 'warn' : '');
+  const chips = u.vendors.map(v => {
+    const ls = [...v.limits].sort((a) => (a.window === '5h' ? -1 : 1));
+    const tip = ls.length ? ls.map(l => `${l.window} ${Math.round(l.used_pct)}%${l.resets_at ? ` (resets ${clock(l.resets_at)})` : ''}`).join(' · ') : 'no usage reported yet';
+    return h('span', { class: `uchip ${level(Math.max(0, ...ls.map(l => l.used_pct)))}`, title: `${v.vendor}${v.key ? ' (API key)' : ''}: ${tip}` },
+      h('span', { class: 'vname', text: v.vendor }),
+      ls.length ? h('span', { class: 'minis' }, ls.map(l => h('span', { class: `mini ${level(l.used_pct)}` }, h('span', { style: `width:${Math.min(100, l.used_pct)}%` }))))
+        : h('span', { class: 'vnone', text: '–' }));
+  });
+  const t = u.spend.total;
+  chips.push(h('span', { class: 'uchip spend', title: t ? `Spend, last 30 days: ${t.agents} agents · ${kfmt(t.tokens_in)} in / ${kfmt(t.tokens_out)} out tokens` : 'No spend recorded yet', text: t ? money(t.cost_usd, t.estimated > 0) : '$0' }));
+  put($('#usagebar'), ...chips);
 }
 function spendTable(title, rows) {
   if (!rows.length) return null;
@@ -537,6 +556,7 @@ $('#db-query textarea').addEventListener('keydown', (e) => { if (e.key === 'Ente
 setInterval(() => { if (state.board && state.view === 'board') renderBoard(state.board); }, 30e3); // elapsed times
 const hash = location.hash.slice(1);
 connect();
+loadUsage();
 if (['usage', 'history', 'db'].includes(hash)) show(hash);
 else if (hash.startsWith('agent=')) {
   const [id, sub] = decodeURIComponent(hash.slice(6)).split('/');

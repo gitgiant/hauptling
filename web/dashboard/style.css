@@ -28,6 +28,16 @@ code, pre, .mono { font-family: var(--mono); font-size: 12.5px; }
 .tabs { display: flex; gap: .25rem; }
 .tabs button, .subtabs button { border: none; background: none; padding: .3rem .6rem; border-radius: 6px; color: var(--muted); }
 .tabs button[aria-selected=true], .subtabs button[aria-selected=true] { color: var(--text); background: var(--bg); font-weight: 600; }
+.usagebar { display: inline-flex; align-items: center; gap: .7rem; padding: .2rem .55rem; font-size: 12px; color: var(--muted); background: none; }
+.usagebar[aria-pressed=true] { background: var(--bg); border-color: var(--accent); }
+.uchip { display: inline-flex; align-items: center; gap: .3rem; }
+.uchip .vname { font-weight: 600; }
+.uchip.warn .vname { color: var(--warn); } .uchip.full .vname { color: var(--bad); }
+.uchip.spend { color: var(--text); font-variant-numeric: tabular-nums; }
+.minis { display: inline-flex; flex-direction: column; gap: 2px; }
+.mini { display: block; width: 28px; height: 4px; border-radius: 2px; background: color-mix(in srgb, var(--muted) 22%, transparent); overflow: hidden; }
+.mini > span { display: block; height: 100%; background: var(--accent); }
+.mini.warn > span { background: var(--warn); } .mini.full > span { background: var(--bad); }
 .gpu { margin-left: auto; display: flex; align-items: center; gap: .5rem; color: var(--muted); font-size: 13px; }
 .gpu b { color: var(--text); font-weight: 600; }
 .sys + .gpu { margin-left: 1rem; }

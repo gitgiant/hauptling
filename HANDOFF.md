@@ -1,10 +1,10 @@
 # Handoff — 2026-11-24
 
-All four PRD phases, the sign-in lock, API keys, the per-vendor Usage tab and the egress-proxy race fix are on `main`. `npm test` (39 on `cli-fixes`) and `hauptling doctor` pass.
+All four PRD phases, the sign-in lock, API keys, the per-vendor usage page and the egress-proxy race fix are on `main`. `npm test` (39 on `cli-fixes`) and `hauptling doctor` pass.
 
 ## Needs a real run to confirm
 
-- "Sign in" on the Usage tab (vendor login in host tmux).
+- "Sign in" on the usage page (header usage chips) (vendor login in host tmux).
 - Header CPU/Mem/GPU graphs and card headlines need a broker restart to go live; headlines unseen with real agents. Dark theme seen in a screenshot.
 - The Terminal tab live in a browser (parts tested; headless screenshots fire before data arrives).
 - A worker on an API key: Claude's TUI should show API billing; for agy, whether `GEMINI_API_KEY` or its OAuth sign-in wins is unknown.
