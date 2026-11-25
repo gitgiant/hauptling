@@ -172,4 +172,7 @@ macOS stays untested until a Mac is available.
 
 ## Open
 
-- Whether Claude, Codex and agy rotate refresh tokens (assumed yes).
+- Refresh token rotation (a refresh returns a new refresh token and invalidates the old one, so a second copy of a credential file gets silently signed out):
+  - **Claude: yes** (reported 2026-11-24, not yet observed on a slot). Refreshes on a 401 and proactively up to 5 min before expiry; reusing an old refresh token fails with `invalid_grant`.
+  - **Codex, agy: unknown** (assumed yes).
+  - Design consequences either way: each slot signs in on its own; credentials are never copied between slots; the slot dir is mounted, not copied, into containers so a refresh writes back to the one real file; one worker per slot at a time. Not yet guarded: a "Sign in again" on a slot whose worker is running (two processes refreshing one file).
