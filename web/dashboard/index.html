@@ -20,10 +20,13 @@
   <section id="gpu" class="gpu" aria-label="GPU queue"></section>
   <span id="conn" class="conn" title="Live updates">connecting…</span>
   <button id="theme" class="theme" type="button"></button>
+  <button id="hide-top" class="hide-top" type="button" title="Hide the header (or drag it up)" aria-label="Hide the header">⌃</button>
 </header>
+<button id="top-tab" class="top-tab" type="button" title="Show the header (click or drag down)" aria-label="Show the header" hidden><span></span></button>
 
 <main id="view-board" class="split">
   <section id="board" class="board" aria-label="Agents"></section>
+  <div class="splitter" data-split="board" aria-label="Resize the agent list and detail"></div>
   <section id="detail" class="detail" aria-label="Agent detail"><p class="empty">Pick an agent.</p></section>
 </main>
 
@@ -42,15 +45,17 @@
 </main>
 
 <main id="view-history" class="split" hidden>
-  <section class="board">
+  <section id="history-list" class="board">
     <input id="history-q" type="search" placeholder="Search ended agents: id, title, repo, branch, report">
-    <div id="history"></div>
+    <div id="history" class="cards"></div>
   </section>
+  <div class="splitter" data-split="history" aria-label="Resize the history list and detail"></div>
   <section id="history-detail" class="detail"><p class="empty">Pick an agent.</p></section>
 </main>
 
-<main id="view-db" class="db" hidden>
+<main id="view-db" class="split db" hidden>
   <aside id="db-tables" class="db-tables" aria-label="Tables"></aside>
+  <div class="splitter" data-split="db" aria-label="Resize the table list"></div>
   <section class="db-main">
     <form id="db-query" class="db-query">
       <textarea name="sql" rows="3" spellcheck="false" placeholder="SELECT agent, COUNT(*) FROM tests GROUP BY agent   (read-only · 1000 rows · 2 s)"></textarea>
