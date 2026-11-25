@@ -764,3 +764,129 @@ test('migration: a delegators table from before the merge settings gains gate an
   assert.deepEqual({ ...db.prepare('SELECT gate, automerge FROM delegators WHERE id = ?').get('d_old') }, { gate: 1, automerge: 1 });
   db.close();
 });
+
+/** Test watchdog: jobs block until finished; liveness per job is set by the test (docker and clock stubbed). */
+function watchedRunner(host, { stallSec = 300, retries = 2 } = {}) {
+  const r = blockingRunner(host);
+  const live = {};
+  host.testLiveness = async (id) => live[id] || { state: 'preparing' };
+  host.testWatchdog = () => ({ stallSec, retries });
+  return { ...r, live };
+}
+const testRow = (db, id) => db.prepare('SELECT state, attempt, retry_note, report FROM tests WHERE id = ?').get(id);
+
+test('watchdog: a vanished container is killed and requeued at the front of its repo', async () => {
+  const { db, core, host } = setup();
+  host.testConcurrency = () => 1;
+  const w = watchedRunner(host);
+  const first = (await core.call('test.request', { repo: 'gitgiant/a', sha: 's1' })).id;
+  const later = (await core.call('test.request', { repo: 'gitgiant/a', sha: 's2' })).id;
+  await settle();
+  await core.watchTests();
+  assert.equal(testRow(db, first).state, 'running', 'preparing (no container yet) is not watched');
+  w.live[first] = { state: 'gone' };
+  await core.watchTests(); await settle();
+  assert.deepEqual(w.killed, [first]);
+  const row = testRow(db, first);
+  assert.equal(row.state, 'running', 'rerun at once, ahead of the later job of its repo');
+  assert.equal(row.attempt, 2);
+  assert.match(row.retry_note, /^retrying \(2\/3\): container gone/);
+  assert.equal(testRow(db, later).state, 'queued');
+  assert.deepEqual(w.runs.map(x => [x.job.id, x.job.attempt]), [[first, 1], [first, 2]]);
+  w.live[first] = { state: 'running', activity: Date.now() };
+  await core.watchTests();
+  assert.equal(testRow(db, first).attempt, 2, 'a live container is left alone');
+  w.runs[1].done(); await settle();
+  assert.equal(JSON.parse(testRow(db, first).report).status, 'pass');
+  assert.equal(testRow(db, later).state, 'running');
+});
+
+test('watchdog: no heartbeat past testStallSec → killed and requeued; a long test with heartbeats is not', async () => {
+  const { db, core, host } = setup();
+  const w = watchedRunner(host, { stallSec: 300 });
+  const id = (await core.call('test.request', { repo: 'gitgiant/a', sha: 's1' })).id;
+  await settle();
+  const t0 = Date.now();
+  // Heartbeat every 30 s for 40 minutes (longer than timeout_s would allow a hang): never killed.
+  for (let s = 30; s <= 2400; s += 30) {
+    w.live[id] = { state: 'running', activity: t0 + s * 1000 };
+    await core.watchTests(t0 + (s + 29) * 1000);
+  }
+  assert.deepEqual(w.killed, []);
+  assert.equal(testRow(db, id).attempt, 1);
+  // Then silence: not yet at 300 s, killed past it.
+  const last = t0 + 2400e3;
+  await core.watchTests(last + 299e3);
+  assert.deepEqual(w.killed, []);
+  await core.watchTests(last + 301e3); await settle();
+  assert.deepEqual(w.killed, [id]);
+  assert.match(testRow(db, id).retry_note, /^retrying \(2\/3\): no output or heartbeat for 301s/);
+  assert.equal(w.runs.at(-1).job.attempt, 2);
+});
+
+test('watchdog: a run that comes back lost (container ended without a result) is requeued', async () => {
+  const { db, core, host } = setup();
+  watchedRunner(host);
+  const runs = [];
+  host.runTestJob = (job) => new Promise(resolve => runs.push({ job, resolve }));
+  const id = (await core.call('test.request', { repo: 'gitgiant/a', sha: 's1' })).id;
+  await settle();
+  runs[0].resolve({ id, sha: 's1', status: 'error', passed: 0, failed: 0, skipped: 0, failures: [], duration_s: 0, notes: 'test container failed', lost: 'container ended without a result: exit 137' });
+  await settle();
+  assert.equal(testRow(db, id).attempt, 2);
+  assert.equal(testRow(db, id).state, 'running');
+  runs[1].resolve({ id, sha: 's1', status: 'pass', passed: 3, failed: 0, skipped: 0, failures: [], duration_s: 1 });
+  await settle();
+  assert.equal(JSON.parse(testRow(db, id).report).status, 'pass');
+});
+
+test('watchdog: retries exhausted → the gate fails with "runner unresponsive (3 attempts)"', async () => {
+  const { db, core, host } = setup();
+  const w = watchedRunner(host);
+  await core.call('delegator.start', { repo: 'gitgiant/demo' });
+  const { id: agent } = await core.call('spawn', { brief: 'task', vendor: 'claude', mode: 'cheapest' });
+  await settle();
+  const who = core.authenticate(db.prepare('SELECT token FROM agents WHERE id = ?').get(agent).token, 'ADMIN');
+  await core.call('report', { text: 'done' }, who); await settle();
+  const gate = db.prepare("SELECT id FROM tests WHERE agent = ? AND purpose = 'gate'").get(agent).id;
+  for (let i = 0; i < 3; i++) {
+    assert.equal(testRow(db, gate).state, 'running');
+    w.live[gate] = { state: 'exited' };
+    await core.watchTests(); await settle();
+  }
+  const row = testRow(db, gate);
+  assert.equal(row.state, 'done');
+  const report = JSON.parse(row.report);
+  assert.equal(report.status, 'error');
+  assert.match(report.notes, /^runner unresponsive \(3 attempts\): container exited without a result/);
+  assert.equal(w.runs.length, 3);
+  assert.deepEqual(w.killed, [gate, gate, gate]);
+  const ev = db.prepare("SELECT kind, text FROM events WHERE kind LIKE 'gate-%'").all();
+  assert.deepEqual(ev.map(e => e.kind), ['gate-failed']);
+  assert.equal(db.prepare('SELECT state FROM agents WHERE id = ?').get(agent).state, 'working', 'sent back to the worker');
+  const t = await core.call('test.wait', { id: gate, timeout: 1 });
+  assert.equal(t.report.status, 'error');
+});
+
+test('watchdog: a hung GPU job releases the GPU queue before it is requeued', async () => {
+  const g = await gpuSetup({ gpu: ['run-gpu'] });
+  // Unlike `docker rm -f`, this kill never makes the old run return: only the watchdog's release frees the queue.
+  g.host.killTestJob = async (id) => { g.host.gpu.killed.push(id); };
+  const live = {};
+  g.host.testLiveness = async (id) => live[id] || { state: 'preparing' };
+  g.host.testWatchdog = () => ({ stallSec: 300, retries: 2 });
+  const t = await g.core.call('test.request', { gpu: true }, g.who);
+  const next = await g.core.call('test.request', { gpu: true }, g.who);
+  await settle();
+  assert.equal(g.state(t.id).state, 'running');
+  assert.equal(g.state(next.id).state, 'queued');
+  live[t.id] = { state: 'running', activity: Date.now() - 400e3 };
+  await g.core.watchTests(); await settle();
+  assert.deepEqual(g.host.gpu.killed, [t.id]);
+  assert.deepEqual(g.host.gpu.runs.map(r => [r.job.id, r.job.attempt]), [[t.id, 1], [t.id, 2]], 'requeued first in line and rerun');
+  assert.equal(g.state(next.id).state, 'queued', 'still one GPU job at a time');
+  const rerun = g.host.gpu.runs[1];
+  rerun.done(g.pass(rerun.job)); await settle();
+  assert.equal(g.state(t.id).state, 'done');
+  assert.equal(g.state(next.id).state, 'running');
+});

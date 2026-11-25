@@ -45,9 +45,28 @@ export function collectArtifacts(dir, globs, dest) {
   return out;
 }
 
-/** Runs install + tests in `dir`; writes the log and artifacts into `out`. */
-export async function execTests(dir, { selector = '', timeout_s = 1800, artifacts = [], gpu = false }, out) {
+export const HEARTBEAT_MS = 30e3;
+
+/**
+ * Touches <out>/heartbeat now and every `every` ms until the returned stop() is called: the broker's
+ * test watchdog takes a job whose log and heartbeat both stay unchanged for `testStallSec` as hung.
+ */
+export function heartbeat(out, every = HEARTBEAT_MS) {
+  const beat = () => { try { writeFileSync(join(out, 'heartbeat'), `${Date.now()}\n`); } catch {} };
+  beat();
+  const timer = setInterval(beat, every);
+  timer.unref?.();
+  return () => clearInterval(timer);
+}
+
+/** Runs install + tests in `dir`; writes the log and artifacts into `out`, with a heartbeat while it runs. */
+export async function execTests(dir, opts, out) {
   mkdirSync(out, { recursive: true });
+  const stop = heartbeat(out);
+  try { return await runTests(dir, opts, out); } finally { stop(); }
+}
+
+async function runTests(dir, { selector = '', timeout_s = 1800, artifacts = [], gpu = false }, out) {
   const log = join(out, 'test.log');
   const t0 = Date.now();
   const base = { passed: 0, failed: 0, skipped: 0, failures: [], artifacts: [], log_path: log };

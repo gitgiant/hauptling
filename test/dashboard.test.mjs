@@ -238,6 +238,8 @@ test('headline: one sentence per situation, for the human watching', () => {
     [{ state: 'done', gate: 'tests', test: gateTest({ state: 'queued', status: null, position: 2 }) }, 'Merge gate queued, 2nd in line'],
     [{ state: 'done', gate: 'tests', test: gateTest({ state: 'running', status: null }) }, 'Running merge gate'],
     [{ state: 'working', test: { purpose: 'agent', state: 'queued', position: 11 } }, 'Tests queued, 11th in line'],
+    [{ state: 'done', gate: 'tests', test: gateTest({ state: 'queued', status: null, position: 1, retry: 'retrying (2/3)' }) }, 'Merge gate retrying (2/3), 1st in line'],
+    [{ state: 'working', test: { purpose: 'agent', gpu: true, state: 'running', retry: 'retrying (3/3)' } }, 'Running GPU tests, retrying (3/3)'],
     [{ state: 'working', test: { purpose: 'agent', gpu: true, state: 'queued', position: 1 } }, 'GPU tests queued, 1st in line'],
     [{ state: 'done', gate: 'tests', test: gateTest() }, 'Ready to merge into main'],
     [{ state: 'done', gate: 'tests', test: gateTest({ status: 'fail', passed: 8, failed: 1 }) }, 'Merge gate fail (8/9); the delegator decides'],
@@ -255,7 +257,7 @@ test('dashboard: CPU test queue in the header, queue position in the headline, R
   const ahead = (await s.core.call('test.request', { repo: 'gitgiant/other', sha: 'o1' })).id;
   const gate = (await s.core.call('test.request', { agent: s.id, sha: 'abc', purpose: 'gate' })).id;
   let b = (await s.req('/dash/board')).json;
-  assert.deepEqual(b.tests, { running: [], queued: 2, limit: 2 });
+  assert.deepEqual(b.tests, { running: [], queued: 2, retrying: [], limit: 2 });
   let a = b.agents.find(x => x.id === s.id);
   assert.equal(a.test.position, 2);
   assert.match(a.headline, /queued, 2nd in line/);
@@ -271,6 +273,11 @@ test('dashboard: CPU test queue in the header, queue position in the headline, R
   assert.match(a.headline, /^Running /);
   assert.equal((await s.req('/dash/do/test.run', { method: 'POST', headers: { 'x-hauptling': '1' }, body: { id: gate } })).code, 400, 'queued jobs only');
   assert.equal(s.db.prepare('SELECT state FROM tests WHERE id = ?').get(ahead).state, 'queued');
+  // A job the watchdog requeued shows "retrying (2/3)" in the header and the headline.
+  s.db.prepare("UPDATE tests SET state = 'queued', claimed_at = NULL, attempt = 2, retry_note = 'retrying (2/3): container gone' WHERE id = ?").run(gate);
+  b = (await s.req('/dash/board')).json;
+  assert.deepEqual(b.tests.retrying.map(t => [t.id, t.retry]), [[gate, 'retrying (2/3)']]);
+  assert.match(b.agents.find(x => x.id === s.id).headline, /^Merge gate retrying \(2\/3\)/);
   s.done();
 });
 

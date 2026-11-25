@@ -70,6 +70,10 @@ export function openDb(path) {
     try { db.exec(`ALTER TABLE agents ADD COLUMN ${col}`); } catch {}
   }
   try { db.exec('ALTER TABLE asks ADD COLUMN nonce TEXT'); } catch {}
+  // Test watchdog: attempt counts reruns after a lost runner; retry_note says why ("retrying (2/3): …").
+  for (const col of ['attempt INTEGER NOT NULL DEFAULT 1', 'retry_note TEXT']) {
+    try { db.exec(`ALTER TABLE tests ADD COLUMN ${col}`); } catch {}
+  }
   // Per-delegator merge settings: gate (hauptling test job before merging), automerge (broker merges rather than stopping at [ready]).
   for (const col of ['gate INTEGER NOT NULL DEFAULT 1', 'automerge INTEGER NOT NULL DEFAULT 1']) {
     try { db.exec(`ALTER TABLE delegators ADD COLUMN ${col}`); } catch {}
