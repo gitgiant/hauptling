@@ -260,3 +260,8 @@ table.grid td.num, table.grid th.num { text-align: right; font-variant-numeric: 
 .rp-actions .empty { margin-right: auto; }
 .toast a { color: inherit; }
 .report-btn { padding: .05rem .5rem; font-size: 12px; white-space: nowrap; }
+.rp-shotbar { display: flex; gap: .5rem; align-items: center; }
+.rp-warn { margin: 0; color: var(--bad); font-weight: 600; }
+.rp-shot { display: flex; gap: .5rem; align-items: flex-start; }
+.rp-thumb { max-width: 100%; max-height: 14rem; border: 1px solid var(--line); border-radius: 6px; }
+.rp-box [hidden] { display: none !important; }

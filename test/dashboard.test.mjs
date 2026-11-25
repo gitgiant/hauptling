@@ -304,5 +304,11 @@ test('report endpoints: need the header, scrub tokens, run gh with the stubbed a
   assert.deepEqual(calls.find(c => c.args[0] === 'issue').args.slice(0, 6), ['issue', 'create', '-R', 'o/r', '--title', 't']);
   assert.ok(!calls.find(c => c.args[0] === 'issue').o.input.includes(secret));
   assert.equal((await post('/dash/report/send', { title: ' ' })).code, 400);
+  const n = calls.length;
+  const bad = await post('/dash/report/send', { title: 't', screenshot: Buffer.from('not an image').toString('base64') });
+  assert.equal(bad.code, 400);
+  assert.equal(calls.length, n, 'nothing is filed for a bad image');
+  const big = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(3e6)]).toString('base64');
+  assert.equal((await post('/dash/report/send', { title: 't', screenshot: big })).code, 200, 'a 3 MB image passes the body limit');
   s.done();
 });
