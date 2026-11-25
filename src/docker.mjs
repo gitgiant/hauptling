@@ -1,6 +1,6 @@
 import { execFile, execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync, realpathSync } from 'node:fs';
+import { closeSync, cpSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, rmSync, statSync, writeFileSync, realpathSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BROKER_PORT, home, shellLine } from './util.mjs';
@@ -286,6 +286,31 @@ export function dockerHost({ log = () => {} } = {}) {
       if (ids.length) await docker(['rm', '-f', ...ids]);
     },
     gpuAvailable, gpuFreeMB,
+    /** Last `token_count` payload of the newest Codex session log in the slot written since `since` (ISO), or null. */
+    async codexUsage(slot, since) {
+      const root = join(slotDir(slot), 'codex', 'sessions');
+      if (!existsSync(root)) return null;
+      const t0 = Date.parse(since || 0) || 0;
+      let newest = null;
+      const days = [];
+      for (const y of readdirSync(root).sort().reverse().slice(0, 2)) for (const m of readdirSync(join(root, y)).sort().reverse().slice(0, 2)) for (const d of readdirSync(join(root, y, m)).sort().reverse().slice(0, 3)) days.push(join(root, y, m, d));
+      for (const dir of days.slice(0, 3)) {
+        for (const f of readdirSync(dir)) {
+          if (!f.startsWith('rollout-') || !f.endsWith('.jsonl')) continue;
+          const st = statSync(join(dir, f));
+          if (st.mtimeMs >= t0 && (!newest || st.mtimeMs > newest.mtime)) newest = { path: join(dir, f), mtime: st.mtimeMs, size: st.size };
+        }
+      }
+      if (!newest) return null;
+      const { lastTokenCount } = await import('./usage.mjs');
+      const fd = openSync(newest.path, 'r');
+      try {
+        const len = Math.min(newest.size, 512 << 10);
+        const buf = Buffer.alloc(len);
+        readSync(fd, buf, 0, len, newest.size - len);
+        return lastTokenCount(buf.toString('utf8'));
+      } finally { closeSync(fd); }
+    },
     gpuConfig: () => { const c = config(); return { memMB: c.gpuMemMB, waitMinutes: c.gpuWaitMinutes }; },
 
     /** argv for an interactive sign-in in a throwaway container with the slot's credentials. */

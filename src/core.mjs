@@ -3,6 +3,7 @@ import { kvDel, kvGet, kvSet, tx } from './db.mjs';
 import * as mail from './mail.mjs';
 import { findModel, launchArgv, loadModels, nextVendor, pick } from './models.mjs';
 import { canInject } from './vendors.mjs';
+import { normalizeUsage, scrub, statusText } from './usage.mjs';
 import { dashToken } from './dashboard.mjs';
 import { MAIL_MAX, STATUS_MAX, bounded, githubSlug, hex, isFamily, now, sanitizeModel, token, wslPath } from './util.mjs';
 
@@ -17,7 +18,7 @@ import { MAIL_MAX, STATUS_MAX, bounded, githubSlug, hex, isFamily, now, sanitize
 
 const ACTIVE = ['spawning', 'working', 'blocked', 'done'];
 const ENDED = ['merged', 'killed', 'closed', 'handed-off'];
-const AGENT_CALLS = new Set(['hook', 'report', 'ask', 'mail.send', 'mail.check', 'mail.status', 'mail.peers', 'test.request', 'test.wait', 'test.get', 'whoami']);
+const AGENT_CALLS = new Set(['hook', 'report', 'ask', 'mail.send', 'mail.check', 'mail.status', 'mail.peers', 'test.request', 'test.wait', 'test.get', 'whoami', 'usage.report']);
 const RUNNER_CALLS = new Set(['test.claim', 'test.report', 'test.heartbeat']);
 
 export function createCore({ db, host, github, notify = () => false, models = loadModels, workerUrl, publicUrl = workerUrl, runnerToken, log = () => {}, stallMinutes = Number(process.env.HAUPTLING_STALL_MINUTES || 10), idleMinutes = Number(process.env.HAUPTLING_IDLE_MINUTES || 15) }) {
@@ -99,7 +100,12 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     if (!repo) throw new Error('--repo is required (GitHub owner/name or URL, or a local path)');
     const cfg = models();
     if (vendor && !isFamily(vendor)) throw new Error(`Vendor must be claude, codex or agy, got "${vendor}"`);
-    vendor ||= nextVendor(db, cfg);
+    if (!vendor) {
+      // Round robin, skipping vendors whose every slot is at 100% of a usage window (if all are, the spawn waits in the queue).
+      const tried = [];
+      for (let i = 0; i < 3 && !vendor; i++) { const v = nextVendor(db, cfg); tried.push(v); if (vendorUsable(v)) vendor = v; }
+      vendor ||= tried[0];
+    }
     const entry = model ? findModel(cfg, vendor, model) : pick(cfg, vendor, mode, difficulty);
     if (!brief?.trim()) throw new Error('Brief is empty');
     const id = `${vendor}_${sanitizeModel(entry.id)}_${hex(3).slice(0, 5)}`;
@@ -132,8 +138,14 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
         const active = db.prepare(`SELECT COUNT(*) n FROM agents WHERE delegator = ? AND state IN (${ACTIVE.map(() => '?').join(',')})`).get(d, ...ACTIVE).n;
         if (active >= max) return null;
         const used = new Set(db.prepare(`SELECT slot FROM agents WHERE slot IS NOT NULL AND state IN (${ACTIVE.map(() => '?').join(',')})`).all(...ACTIVE).map(r => r.slot));
-        const slot = slots().find(s => !used.has(s));
-        const a = db.prepare("SELECT * FROM agents WHERE delegator = ? AND state = 'queued' ORDER BY created_at LIMIT 1").get(d);
+        const free = slots().filter(s => !used.has(s));
+        // First queued agent with a free slot whose account isn't at 100% for its vendor; the rest wait.
+        let a = null;
+        let slot = null;
+        for (const q of db.prepare("SELECT * FROM agents WHERE delegator = ? AND state = 'queued' ORDER BY created_at").all(d)) {
+          slot = free.find(s => !exhausted(q.vendor, s));
+          if (slot) { a = q; break; }
+        }
         if (!slot || !a) return null;
         const dir = `${host.workRoot}/${a.id}`;
         db.prepare("UPDATE agents SET state = 'spawning', slot = ?, dir = ?, updated_at = ? WHERE id = ?").run(slot, dir, now(), a.id);
@@ -146,6 +158,57 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
         emit(next.delegator, next.id, 'failed', `${next.id} failed to start: ${e.message}`);
         startQueued(d).catch(() => {});
       });
+    }
+  }
+
+  // ---------- usage (phase 4b) ----------
+  const live = (at) => !at || Date.parse(at) > Date.now();
+  /** The slot's account is at 100% of some window for this vendor (until it resets). */
+  function exhausted(vendor, slot) {
+    return db.prepare('SELECT used_pct, resets_at FROM slot_usage WHERE slot = ? AND vendor = ? AND used_pct >= 100').all(slot, vendor).some(r => live(r.resets_at));
+  }
+  const vendorUsable = (vendor) => slots().some(s => !exhausted(vendor, s));
+  function priceOf(a) { try { return findModel(models(), a.vendor, a.model); } catch { return null; } }
+
+  /** Stores an agent's usage and its slot's limit windows; warns once per window at 90%. */
+  function recordUsage(a, u) {
+    update(a.id, { usage: JSON.stringify({ ...u, at: now() }) });
+    if (!a.slot) return u;
+    for (const l of u.limits) {
+      db.prepare(`INSERT INTO slot_usage (slot, vendor, window, used_pct, resets_at, at) VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT (slot, vendor, window) DO UPDATE SET used_pct = excluded.used_pct, resets_at = excluded.resets_at, at = excluded.at`).run(a.slot, a.vendor, l.window, l.used_pct, l.resets_at, now());
+      if (l.used_pct < 90) continue;
+      const key = `usage:warn:${a.slot}:${a.vendor}:${l.window}:${l.resets_at || 'unknown'}`;
+      if (kvGet(db, key)) continue;
+      kvSet(db, key, now());
+      const when = l.resets_at ? `resets ${new Date(l.resets_at).toLocaleString()}` : 'reset time unknown';
+      const full = l.used_pct >= 100;
+      const text = `${a.slot} ${a.vendor} ${l.window} window at ${Math.round(l.used_pct)}% (${when})${full ? `; new ${a.vendor} spawns skip ${a.slot} until then` : ''}`;
+      emit(a.delegator, a.id, 'usage-high', text);
+      notify({ title: `${a.vendor} usage ${Math.round(l.used_pct)}% on ${a.slot}`, body: text, choices: [], links: null, dashboard: `${publicUrl}/#usage` });
+      log(`usage-high ${text}`);
+    }
+    return u;
+  }
+
+  /** `hauptling usage <vendor>` from a worker's status line: raw vendor JSON → stored; returns the text to show. */
+  function usageReport(who, { vendor, payload }) {
+    if (who.role !== 'agent') throw new Error('usage.report comes from a worker\'s status line');
+    const a = agentRow(who.agent);
+    if (vendor !== a.vendor) throw new Error(`usage for ${vendor} from a ${a.vendor} worker`);
+    return { text: statusText(recordUsage(a, normalizeUsage(vendor, scrub(payload), priceOf(a)))) };
+  }
+
+  /** Codex has no status line hook: read its session log in the slot (throttled; poll and the dashboard call this). */
+  let codexAt = 0;
+  async function refreshUsage({ force = false } = {}) {
+    if (!host.codexUsage || (!force && Date.now() - codexAt < 10e3)) return;
+    codexAt = Date.now();
+    for (const a of db.prepare("SELECT * FROM agents WHERE vendor = 'codex' AND slot IS NOT NULL AND state IN ('working','blocked','done')").all()) {
+      try {
+        const p = await host.codexUsage(a.slot, a.created_at);
+        if (p) recordUsage(a, normalizeUsage('codex', p, priceOf(a)));
+      } catch (e) { log(`codex usage ${a.id}: ${e.message} (format changed? usage shows unknown)`); }
     }
   }
 
@@ -634,6 +697,9 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   /** Every minute: PR state for done agents (merged → free the slot; CI failure → wake the worker). */
   async function poll() {
     pump().catch(e => log(`test pump: ${e.message}`)); // also rechecks a GPU job held for VRAM
+    await refreshUsage({ force: true }).catch(e => log(`usage: ${e.message}`));
+    // A usage window may have reset: queued spawns that were waiting for it can start.
+    for (const { id } of db.prepare("SELECT DISTINCT delegator id FROM agents WHERE state = 'queued'").all()) await startQueued(id).catch(e => log(`start ${id}: ${e.message}`));
     await watch();
     for (const a of db.prepare("SELECT * FROM agents WHERE state IN ('done','working') AND pr_number IS NOT NULL").all()) {
       try {
@@ -701,6 +767,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     },
     'test.wait': testWait, 'test.get': testGet,
     'test.claim': claim, 'test.report': testReport, 'test.heartbeat': () => kvSet(db, 'runner_seen', Date.now()),
+    'usage.report': (a, who) => usageReport(who, a),
     'dashboard.token': ({ rotate = false }) => ({ token: dashToken(db, { rotate }), url: publicUrl }),
     'gpu.pause': gpuPause, 'gpu.resume': gpuResume, 'gpu.status': gpuStatus,
     'slots.get': () => slots(),
@@ -724,5 +791,5 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     return null;
   }
 
-  return { call, authenticate, poll, watch, startQueued, bus, askForPage, answer, pump, recover, gpuReady };
+  return { call, authenticate, poll, watch, startQueued, bus, askForPage, answer, pump, recover, gpuReady, refreshUsage, recordUsage };
 }

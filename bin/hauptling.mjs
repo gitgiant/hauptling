@@ -33,7 +33,7 @@ Setup:
   login SLOT VENDOR                        sign one slot in to claude|codex|agy
   init [DIR]                               write the detected hauptling.json
   broker start|stop|status|run
-Internal: hook VENDOR EVENT, prepare VENDOR DIR, egress, test-exec`;
+Internal: hook VENDOR EVENT, prepare VENDOR DIR, usage VENDOR (status line), egress, test-exec`;
 
 const out = (v) => console.log(typeof v === 'string' ? v : JSON.stringify(v, null, 2));
 const [cmd, ...rest] = process.argv.slice(2);
@@ -111,6 +111,16 @@ async function main() {
     case 'merge': return out(await call('merge', { agent: args._[0] }));
 
     // ----- worker -----
+    case 'usage': {
+      // A worker's status line command: forward the vendor's JSON, print a short line. Never blocks the TUI for long.
+      let raw = '';
+      for await (const c of process.stdin) raw += c;
+      try {
+        const { scrub } = await import('../src/usage.mjs');
+        const r = await Promise.race([call('usage.report', { vendor: args._[0], payload: scrub(JSON.parse(raw || '{}')) }), new Promise((_, no) => setTimeout(() => no(new Error('timeout')), 3000))]);
+        return out(r.text);
+      } catch { return out('hauptling'); }
+    }
     case 'report': {
       const r = await call('report', { text: text() });
       if (r.note) return out(r.note);

@@ -42,6 +42,11 @@ CREATE TABLE IF NOT EXISTS tests (
   timeout_s INTEGER NOT NULL, round INTEGER NOT NULL, purpose TEXT NOT NULL DEFAULT 'agent',
   state TEXT NOT NULL, report TEXT, created_at TEXT NOT NULL, claimed_at TEXT, done_at TEXT
 );
+-- Rate-limit windows per slot account and vendor (phase 4b); latest reading only.
+CREATE TABLE IF NOT EXISTS slot_usage (
+  slot TEXT NOT NULL, vendor TEXT NOT NULL, window TEXT NOT NULL, used_pct REAL NOT NULL,
+  resets_at TEXT, at TEXT NOT NULL, PRIMARY KEY (slot, vendor, window)
+);
 `;
 
 /** Opens (and migrates) the store. Only the broker process calls this. */
@@ -51,7 +56,8 @@ export function openDb(path) {
   db.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;');
   db.exec(SCHEMA);
   // Columns added after phase 1 shipped; ALTER fails harmlessly when they exist.
-  for (const col of ["role TEXT NOT NULL DEFAULT 'impl'", 'depends_on TEXT', 'start_from TEXT']) {
+  // usage: latest normalized usage JSON (src/usage.mjs); kept as the final total once the agent ends.
+  for (const col of ["role TEXT NOT NULL DEFAULT 'impl'", 'depends_on TEXT', 'start_from TEXT', 'usage TEXT']) {
     try { db.exec(`ALTER TABLE agents ADD COLUMN ${col}`); } catch {}
   }
   try { db.exec('ALTER TABLE asks ADD COLUMN nonce TEXT'); } catch {}

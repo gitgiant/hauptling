@@ -31,6 +31,8 @@ export function prepare(vendor, dir, home = homedir()) {
       s.hooks[e] = (s.hooks[e] || []).filter(h => !ours(h));
       s.hooks[e].push({ hooks: [{ type: 'command', command: cmd('claude', e), timeout: 10 }] });
     }
+    // Usage (context %, cost, 5h/weekly limits) reaches the broker through the status line; no model tokens.
+    s.statusLine = { type: 'command', command: 'hauptling usage claude' };
     writeJson(settingsPath, s);
     // Skip the first-run folder trust dialog for this clone.
     const statePath = process.env.CLAUDE_CONFIG_DIR ? join(configDir, '.claude.json') : join(home, '.claude.json');
@@ -66,6 +68,7 @@ export function prepare(vendor, dir, home = homedir()) {
     // Unattended workers must be able to report and request tests; nothing else is pre-approved.
     s.permissions ||= {};
     s.permissions.allow = [...new Set([...(s.permissions.allow || []), 'command(hauptling)'])];
+    s.statusLine = { type: 'command', command: 'hauptling usage agy' };
     writeJson(settingsPath, s);
   } else throw new Error(`Unknown vendor ${vendor}`);
 }
