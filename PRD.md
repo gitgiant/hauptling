@@ -1,6 +1,6 @@
 # PRD: Hauptling agent delegator
 
-Status: design agreed 2026-11-20 (grill-me interview). Phases 1 and 2 done (decisions under Phases); phase 3 (GPU runner and lease) built and verified on the RTX 2070 SUPER 2026-11-24. Living copy: https://claude.ai/artifact/YbwvdtdzM8JuvEagKG1Xh4
+Status: design agreed 2026-11-20 (grill-me interview). Phases 1 and 2 done (decisions under Phases); phase 3 (GPU runner and lease) built and verified on the RTX 2070 SUPER 2026-11-24; phase 4a (dashboard) decisions settled 2026-11-24, in progress. Living copy: https://claude.ai/artifact/YbwvdtdzM8JuvEagKG1Xh4
 
 Hauptling delegates coding tasks to Claude, Codex and agy (Antigravity CLI) agents running in disposable containers, across any repo.
 
@@ -93,6 +93,18 @@ Sources: https://antigravity.google/docs/cli/headless/, https://antigravity.goog
 4. Dashboard (includes a SQLite DB explorer).
 
 Phases 2–4 get their own grill at phase start.
+
+### Phase 4 decisions (2026-11-24)
+
+- **Split**: 4a is a live board over data the broker already has. 4b (own grill) adds usage collection (tokens, cost, context %, 5h/7d limits), the web terminal and the vendors panel with sign-in.
+- **Build**: one static HTML file plus vanilla JS modules served by the broker on its port; live updates over Server-Sent Events. No framework, no build, no dependencies.
+- **Auth**: a dashboard token separate from the admin API token. `hauptling dashboard` opens `/?k=<token>`; the broker swaps it for an `HttpOnly; SameSite=Strict` cookie and redirects. Requests arriving on `docker0` are refused; actions are POST only with a custom header. `--new-token` rotates it. Remote access via `tailscale serve`.
+- **Actions**: answer a blocked question inline, reply, kill (with confirm), merge local-only repos, `gpu pause | pause --now | resume`. No spawning (that's the delegator's job).
+- **Agent detail**: read-only tmux screen mirror (last ~300 lines, escape codes stripped, refreshed every 2 s only while open); diff tab (`base...HEAD` plus uncommitted, stat + per file); events tab (events, mail, asks, test jobs).
+- **SQLite explorer**: browse with paging, sort and filter, plus ad-hoc `SELECT` on a read-only connection (1000 rows, 2 s). `token` and `nonce` values are masked wherever they appear, so aliases don't leak them.
+- **Board**: active agents of all delegators grouped by delegator and repo; blocked first and blinking, count in the tab title; collapsible "recent" (24 h) and a searchable history tab; GPU queue panel. Rows show branch, PR/CI, last test report, elapsed time, model.
+- **Notifications**: the answer page stays the one-click path; it and notifications gain an "Open dashboard" link. `hauptling dashboard [--print]` opens or prints the URL; `doctor` checks it's served.
+- **Layout**: board on the left, agent detail on the right; stacks on a phone.
 
 ### Phase 3 decisions (2026-11-24)
 
