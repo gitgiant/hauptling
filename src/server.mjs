@@ -67,11 +67,13 @@ export async function runBroker({ port = BROKER_PORT } = {}) {
   const core = createCore({ db, host, github, notify: plat.notify, workerUrl: WORKER_BROKER_URL, publicUrl: base, runnerToken, log });
   const dash = createDashboard({ db, dbPath, core, host, log, slotDir, logins });
 
+  const recovery = core.recover();
   const handler = async (req, res) => {
     const send = (code, body) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); };
     try {
       const url = new URL(req.url, 'http://x');
       if (url.pathname === '/health') return send(200, { ok: true, pid: process.pid });
+      await recovery;
       if (/^\/ask\/\d+$/.test(url.pathname)) return await answerPage(core, req, res, url);
       if (await dash.handle(req, res, url)) return;
       const who = core.authenticate((req.headers.authorization || '').replace(/^Bearer /, ''), adminToken);
@@ -101,8 +103,8 @@ export async function runBroker({ port = BROKER_PORT } = {}) {
   writeFileSync(brokerFile(), JSON.stringify({ port, pid: process.pid, adminToken, runnerToken, startedAt: new Date().toISOString() }, null, 2), { mode: 0o600 });
   chmodSync(brokerFile(), 0o600);
   log(`broker ${process.pid} listening on 127.0.0.1${docker0 ? ` and ${docker0}` : ''}:${port}`);
+  await recovery;
   setInterval(() => core.poll().catch(e => log(`poll: ${e.message}`)), 60e3).unref();
-  await core.recover();
   core.pump().catch(e => log(`test pump: ${e.message}`));
   return { core, servers, db };
 }

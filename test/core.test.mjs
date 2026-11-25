@@ -383,17 +383,54 @@ test('gpu pause: holds new jobs, lets the running one finish; --now kills and re
   assert.equal(g.db.prepare('SELECT COUNT(*) n FROM tests WHERE agent = ?').get(g.id).n, 3, 'no extra test round');
 });
 
-test('broker restart: running jobs are requeued and leftover test containers removed', async () => {
+test('broker restart cancels ended agents’ tests and requeues live agents’ running jobs', async () => {
   const { db, core, host } = setup();
   let removed = 0;
+  const stopped = [];
   host.removeTestContainers = async () => { removed++; };
-  const { id } = await core.call('test.request', { sha: 'abc', repo: 'gitgiant/demo' });
-  const runner = core.authenticate('RUN', 'ADMIN');
-  await core.call('test.claim', { wait: 0 }, runner);
-  assert.equal(db.prepare('SELECT state FROM tests WHERE id = ?').get(id).state, 'running');
+  await core.call('delegator.start', { repo: 'gitgiant/demo' });
+  const killed = await core.call('spawn', { brief: 'killed task', vendor: 'claude', mode: 'cheapest' });
+  const live = await core.call('spawn', { brief: 'live task', vendor: 'claude', mode: 'cheapest' });
+  await settle();
+  const token = db.prepare('SELECT token FROM agents WHERE id = ?');
+  const gate = db.prepare('SELECT id, state, report FROM tests WHERE agent = ?');
+  for (const agent of [killed, live]) {
+    await core.call('report', { text: 'done' }, core.authenticate(token.get(agent.id).token, 'ADMIN'));
+  }
+  await settle();
+  db.prepare("UPDATE tests SET state = 'running'").run();
+  db.prepare("UPDATE agents SET state = 'killed' WHERE id = ?").run(killed.id);
+  const runner = blockingRunner(host);
+  host.killTestJob = async id => { stopped.push(id); };
+
   assert.deepEqual(await core.recover(), { requeued: 1 });
   assert.equal(removed, 1);
-  assert.equal(db.prepare('SELECT state FROM tests WHERE id = ?').get(id).state, 'queued');
+  assert.deepEqual(stopped, [gate.get(killed.id).id]);
+  assert.equal(gate.get(killed.id).state, 'done');
+  assert.equal(JSON.parse(gate.get(killed.id).report).status, 'cancelled');
+  assert.equal(gate.get(live.id).state, 'queued');
+  assert.deepEqual(runner.runs, []);
+});
+
+test('PR polling cancels a queued gate after an external merge', async () => {
+  const { db, core, host, gh } = setup();
+  await core.call('delegator.start', { repo: 'gitgiant/demo' });
+  const { id } = await core.call('spawn', { brief: 'merge externally', vendor: 'claude', mode: 'cheapest' });
+  await settle();
+  const agent = db.prepare('SELECT token, state FROM agents WHERE id = ?');
+  await core.call('report', { text: 'done' }, core.authenticate(agent.get(id).token, 'ADMIN'));
+  await settle();
+  const gate = db.prepare("SELECT state, report FROM tests WHERE agent = ? AND purpose = 'gate'");
+  assert.equal(gate.get(id).state, 'queued');
+  const runner = blockingRunner(host);
+
+  await core.call('poll', {});
+  assert.equal(agent.get(id).state, 'merged');
+  assert.equal(gate.get(id).state, 'done');
+  assert.equal(JSON.parse(gate.get(id).report).status, 'cancelled');
+  assert.deepEqual(runner.runs, []);
+  assert.deepEqual(db.prepare("SELECT kind FROM events WHERE kind = 'merged'").all().map(e => e.kind), ['merged']);
+  assert.equal(gh.log.filter(l => l[0] === 'merge').length, 0);
 });
 
 test('gateGpu: CPU gate passes → GPU gate queued ("gate: waiting for GPU") → GPU pass merges', async () => {

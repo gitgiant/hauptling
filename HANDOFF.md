@@ -1,8 +1,8 @@
 # Handoff — 2026-11-25
 
-All four PRD phases, the sign-in lock, API keys, per-vendor usage, the egress-proxy race fix, CodeGraph in workers and token economy stages 1–2 are on `main`. `npm test` passes.
-
 ## Needs a real run to confirm
+
+- Test recovery and external-merge cancellation were tested with a fake host. The live broker still needs to run the updated code.
 
 - Broker not restarted since `cli-fixes`: header CPU/Mem/GPU graphs, card headlines, usage chips and the CodeGraph launch path go live after `hauptling broker stop` (a test job was running, so it was left up).
 - CodeGraph with a real task: whether agents (and their subagents) actually use it; first-index time on a large repo (nullpunkt). The container path itself is verified (index 3 s / 1 s from cache on this repo, no MCP prompt, repo `.mcp.json` ignored).
