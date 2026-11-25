@@ -174,23 +174,50 @@ export async function imageFor(dir, opts) {
 
 // ---------- network + egress proxy ----------
 
-export async function ensureNetwork({ log = () => {} } = {}) {
-  if (!(await docker(['network', 'inspect', NET]).then(() => true, () => false))) {
-    await docker(['network', 'create', '--internal', NET]);
+/**
+ * The internal network and the egress proxy. Concurrent callers share one run (two spawns at once used
+ * to both recreate the proxy and collide on its name). A running proxy on an older image is kept while
+ * worker or test containers use it (replacing it cuts their network); it is updated on the next call
+ * with nothing running, or with `force` (setup).
+ */
+let ensuring = null;
+export function ensureNetwork(opts = {}) {
+  ensuring ||= ensureNetworkOnce(opts).finally(() => { ensuring = null; });
+  return ensuring;
+}
+
+async function ensureNetworkOnce({ log = () => {}, force = false, dk = docker, baseImage = () => ensureBaseImage({ log }) } = {}) {
+  if (!(await dk(['network', 'inspect', NET]).then(() => true, () => false))) {
+    await dk(['network', 'create', '--internal', NET]).catch(async (e) => {
+      if (!(await dk(['network', 'inspect', NET]).then(() => true, () => false))) throw e; // created meanwhile by another process: fine
+    });
     log(`created network ${NET}`);
   }
   const dir = join(home(), 'egress');
   mkdirSync(dir, { recursive: true });
   if (!existsSync(join(dir, 'allow.txt'))) writeFileSync(join(dir, 'allow.txt'), DEFAULT_ALLOW);
-  const image = await ensureBaseImage({ log });
-  const info = await docker(['inspect', '-f', '{{.State.Running}} {{.Config.Image}}', PROXY]).then(r => r.stdout.trim(), () => '');
-  if (info === `true ${image}`) return;
-  await docker(['rm', '-f', PROXY]).catch(() => {});
-  await docker(['run', '-d', '--name', PROXY, '--restart', 'unless-stopped', '--init', '--user', uid(),
-    '--add-host', 'host.docker.internal:host-gateway', '-v', `${dir}:/egress`, '--label', 'hauptling=egress',
-    image, 'hauptling', 'egress', '--allow', '/egress/allow.txt', '--log', '/egress/egress.log', '--relay', `host.docker.internal:${BROKER_PORT}`]);
-  await docker(['network', 'connect', '--alias', PROXY, NET, PROXY]);
+  const image = await baseImage();
+  const info = await dk(['inspect', '-f', '{{.State.Running}} {{.Config.Image}}', PROXY]).then(r => r.stdout.trim(), () => '');
+  if (info === `true ${image}`) return { proxy: 'current' };
+  if (info.startsWith('true ') && !force) {
+    const users = (await dk(['ps', '-q', '--filter', 'label=hauptling.agent']).then(r => r.stdout, () => '')).trim()
+      + (await dk(['ps', '-q', '--filter', 'label=hauptling.test']).then(r => r.stdout, () => '')).trim();
+    if (users) { log(`${PROXY} runs an older image; keeping it while containers use it`); return { proxy: 'kept' }; }
+  }
+  await dk(['rm', '-f', PROXY]).catch(() => {});
+  try {
+    await dk(['run', '-d', '--name', PROXY, '--restart', 'unless-stopped', '--init', '--user', uid(),
+      '--add-host', 'host.docker.internal:host-gateway', '-v', `${dir}:/egress`, '--label', 'hauptling=egress',
+      image, 'hauptling', 'egress', '--allow', '/egress/allow.txt', '--log', '/egress/egress.log', '--relay', `host.docker.internal:${BROKER_PORT}`]);
+  } catch (e) {
+    // Another process (setup, a second broker command) started it first: accept theirs if it runs our image.
+    const now = await dk(['inspect', '-f', '{{.State.Running}} {{.Config.Image}}', PROXY]).then(r => r.stdout.trim(), () => '');
+    if (now === `true ${image}`) return { proxy: 'current' };
+    throw e;
+  }
+  await dk(['network', 'connect', '--alias', PROXY, NET, PROXY]);
   log(`started ${PROXY}`);
+  return { proxy: 'started' };
 }
 
 const proxyEnv = () => ['HTTPS_PROXY', 'HTTP_PROXY', 'https_proxy', 'http_proxy'].flatMap(k => ['-e', `${k}=${PROXY_URL}`])

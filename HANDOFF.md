@@ -1,10 +1,6 @@
 # Handoff — 2026-11-24
 
-All four PRD phases, the sign-in lock, API keys and the per-vendor Usage tab are on `main`. `npm test` (35) and `hauptling doctor` pass.
-
-## Bug to fix first
-
-- **Egress proxy race:** `ensureNetwork` (`src/docker.mjs`) recreates `hauptling-egress` whenever the worker image tag changed. Two spawns at once both recreate it, and the second `docker run` fails with `Conflict … "/hauptling-egress" is already in use` (seen: `codex_gpt-6.2-sol_2dce4`). Recreating it also cuts the network of workers already running. Fix: serialize `ensureNetwork`, and defer replacing a working proxy while workers run.
+All four PRD phases, the sign-in lock, API keys, the per-vendor Usage tab and the egress-proxy race fix are on `main`. `npm test` (38) and `hauptling doctor` pass.
 
 ## Needs a real run to confirm
 
@@ -20,7 +16,7 @@ All four PRD phases, the sign-in lock, API keys and the per-vendor Usage tab are
 - macOS / Ubuntu install untested; only WSL so far.
 - `hauptling test request` with an empty `--sha` swallows the next flag as the sha and fails later at checkout; validate up front.
 - `hauptling dashboard --print` always prints the `127.0.0.1` link; a `--host` flag would help over Tailscale.
-- Merged branches to delete: `phase-1`, `phase-3`, `phase-4`, `phase-4b`, `signin-guard`, `api-keys`, `handoff-rule`, `usage-per-vendor`.
+- Merged branches to delete: `phase-1`, `phase-3`, `phase-4`, `phase-4b`, `signin-guard`, `api-keys`, `handoff-rule`, `usage-per-vendor`, `egress-race`.
 
 ## This machine now
 

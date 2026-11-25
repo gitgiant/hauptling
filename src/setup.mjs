@@ -53,7 +53,7 @@ export async function setup({ slots = 3, vendors = VENDORS, host = true, login: 
   step('Worker image and network');
   if (!(await dockerReady())) throw new Error('Docker is not running: `sudo service docker start` (WSL) or `sudo systemctl start docker`');
   ok(`image ${await ensureBaseImage({ log: (m) => console.log(`  … ${m}`), stdio: ['ignore', 'inherit', 'inherit'] })}`);
-  await ensureNetwork();
+  await ensureNetwork({ force: true });
   ok(`network ${NET}, proxy ${PROXY} (allowlist: ~/.hauptling/egress/allow.txt)`);
   for (const s of slotNames(slots)) slotDir(s);
 
