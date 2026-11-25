@@ -1,6 +1,6 @@
 # PRD: Hauptling agent delegator
 
-Status: design agreed 2026-11-20 (grill-me interview). Phases 1 and 2 done (decisions under Phases); phase 3 (GPU runner and lease) design in progress 2026-11-24. Living copy: https://claude.ai/artifact/YbwvdtdzM8JuvEagKG1Xh4
+Status: design agreed 2026-11-20 (grill-me interview). Phases 1 and 2 done (decisions under Phases); phase 3 (GPU runner and lease) decisions settled 2026-11-24 (see Phases), not yet built. Living copy: https://claude.ai/artifact/YbwvdtdzM8JuvEagKG1Xh4
 
 Hauptling delegates coding tasks to Claude, Codex and agy (Antigravity CLI) agents running in disposable containers, across any repo.
 
@@ -47,7 +47,7 @@ Hauptling delegates coding tasks to Claude, Codex and agy (Antigravity CLI) agen
 - Request: `{id, from, sha, branch, selector, gpu, artifacts[], timeout_s, round}`.
 - Report: `{id, sha, status: pass|fail|error|timeout, passed, failed, skipped, duration_s, failures:[{test_id, loc, message ≤300, excerpt ≤20 lines}], artifacts, log_path, notes ≤300}`.
 - Reports for a different sha are rejected. Round 4 sets the agent to `blocked`.
-- **GPU tests run on a deterministic host runner, no LLM.** It checks out the sha in a host worktree, runs the repo's declared GPU command, and holds a lease lock released in `finally`.
+- **GPU tests run deterministically, no LLM**, in a fresh `--gpus all` test container, one at a time on their own queue (phase 3; an earlier design used a host worktree).
 
 ## Git
 
@@ -93,6 +93,20 @@ Sources: https://antigravity.google/docs/cli/headless/, https://antigravity.goog
 4. Dashboard (includes a SQLite DB explorer).
 
 Phases 2–4 get their own grill at phase start.
+
+### Phase 3 decisions (2026-11-24)
+
+- **Where**: GPU jobs run in a fresh test container with `--gpus all`, same image (base or per-repo) and egress rules as CPU tests. Setup installs the NVIDIA Container Toolkit. (Replaces the host-worktree design: repo code is untrusted.)
+- **Lease**: only GPU test jobs hold the GPU; workers reach it only through `hauptling test request --gpu`. No interactive worker lease.
+- **Queues**: a GPU queue runs beside the CPU queue (one job each at a time). GPU jobs default to 6 GB RAM and 4 CPUs (`~/.hauptling/config.json`).
+- **Command**: `hauptling.json` must declare `"gpu": [argv]` (same `{selector}`/`{junit}` placeholders as `"test"`); without it `--gpu` is rejected. No fallback to the test command, no auto-detection.
+- **CUDA**: nothing added to `hauptling-worker`. Repos rely on wheels that bundle CUDA (PyTorch, JAX) or add it in `hauptling.Dockerfile`. `doctor` runs `nvidia-smi` in a throwaway `--gpus` container.
+- **Shared desktop GPU**: before starting, the broker checks free VRAM (`nvidia-smi`) against 6 GB or the repo's `"gpuMemMB"`; if short it rechecks each minute and after 30 min reports `error: GPU busy`. `hauptling gpu pause|resume|status` holds the queue by hand. Waiting time doesn't count toward `timeout_s`.
+- **Pause**: `gpu pause` lets the running job finish; `gpu pause --now` kills it and requeues it at the front without using a test round.
+- **Broker restart** (both queues): on startup, leftover test containers are removed and `running` jobs are requeued at the front and rerun from scratch.
+- **No GPU host**: setup detects `nvidia-smi`; without it the toolkit is skipped, `doctor` says "GPU: none (GPU tests disabled)" and `--gpu` fails fast with "no GPU on this host". `"gpu": false` in config disables it on a GPU host.
+- **Merge gate**: CPU only by default. `"gateGpu": true` in `hauptling.json` adds the GPU command to the gate; while it waits the agent status shows `gate: waiting for GPU`.
+- **Timeout**: GPU jobs keep the 1800 s default `timeout_s`.
 
 ### Phase 2 decisions (2026-11-21)
 
