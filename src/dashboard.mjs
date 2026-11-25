@@ -189,10 +189,19 @@ export function createDashboard({ db, dbPath, core, host, log = () => {}, slotDi
   }
 
   // ---------- agent detail ----------
+  const lastScreen = new Map(); // agent id → last text captured, shown once the container is gone
   async function screen(a) {
-    if (!a.slot || NO_SESSION.includes(a.state)) return { text: '', note: `No live session (${a.state})` };
-    const raw = await host.tmuxCapture(a.slot, a.id, 300).catch(e => { throw new Error(`capture failed: ${e.message}`); });
-    return { text: stripAnsi(raw).replace(/\s+$/, '') };
+    const gone = (note) => ({ text: lastScreen.get(a.id) || '', note, ended: true });
+    if (!a.slot || NO_SESSION.includes(a.state)) return gone(`No live session (${a.state})`);
+    let raw;
+    try { raw = await host.tmuxCapture(a.slot, a.id, 300); } catch (e) {
+      if (/No such container|is not running/i.test(e.message)) return gone('Agent has ended (its container is gone)');
+      throw new Error(`capture failed: ${e.message}`);
+    }
+    const text = stripAnsi(raw).replace(/\s+$/, '');
+    lastScreen.set(a.id, text);
+    if (lastScreen.size > 50) lastScreen.delete(lastScreen.keys().next().value);
+    return { text };
   }
 
   async function diff(a) {

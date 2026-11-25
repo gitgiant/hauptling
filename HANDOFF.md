@@ -10,6 +10,7 @@ All four PRD phases, the sign-in lock, API keys, per-vendor usage and the egress
 - The Terminal tab live in a browser (parts tested; headless screenshots fire before data arrives).
 - A worker on an API key: Claude's TUI should show API billing; for agy, whether `GEMINI_API_KEY` or its OAuth sign-in wins is unknown.
 - API budget (branch `api-budget`, on `codegraph`; PRD "API keys"): claude key has a $100/month budget set. Unit-tested only; needs a broker restart, then a real spawn should say `, api`, and the header an "API $x/$100" chip. Whether Claude's reported `total_cost_usd` matches the console bill is unchecked.
+- Superseded gate kill (`killTestJob` on a running gate) and the dashboard's dead-container screen answer: unit-tested only; code is baked into nothing (broker-side) but needs `hauptling broker stop` to go live.
 - GPU `pause --now`, the VRAM wait and `gateGpu` on the real GPU (unit-tested only).
 
 ## Open

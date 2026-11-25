@@ -115,6 +115,42 @@ test('spawn → hooks → mail wake → report → PR without required checks �
   assert.ok(d);
 });
 
+test('a newer report supersedes the agent\'s older gate jobs; only the newest sha merges', async () => {
+  const { db, core, host, gh } = setup();
+  await core.call('delegator.start', { repo: 'gitgiant/demo' });
+  const { id } = await core.call('spawn', { brief: 'task', vendor: 'claude', mode: 'cheapest' });
+  await settle();
+  const who = core.authenticate(db.prepare('SELECT token FROM agents WHERE id = ?').get(id).token, 'ADMIN');
+  const gates = () => db.prepare("SELECT sha, state, report FROM tests WHERE agent = ? AND purpose = 'gate' ORDER BY created_at, rowid").all(id);
+  const runner = core.authenticate('RUN', 'ADMIN');
+  const pass = (job) => core.call('test.report', { id: job.id, report: { sha: job.sha, status: 'pass', passed: 1, failed: 0, skipped: 0, failures: [], duration_s: 1 } }, runner);
+  // Queued gate for sha A is cancelled by a second report (sha B).
+  host.state.head = 'aaaa111';
+  await core.call('report', { text: 'first' }, who); await settle();
+  host.state.head = 'bbbb222';
+  await core.call('report', { text: 'second' }, who); await settle();
+  assert.deepEqual(gates().map(g => [g.sha, g.state]), [['aaaa111', 'done'], ['bbbb222', 'queued']]);
+  assert.equal(JSON.parse(gates()[0].report).status, 'cancelled');
+  const { job } = await core.call('test.claim', { wait: 0 }, runner);
+  assert.equal(job.sha, 'bbbb222', 'only the newest gate runs');
+  assert.equal((await core.call('test.claim', { wait: 0 }, runner)).job, null);
+  // A running gate for B is stopped when C is reported; its late result merges nothing.
+  const killed = [];
+  host.killTestJob = async (tid) => { killed.push(tid); };
+  host.state.head = 'cccc333';
+  await core.call('report', { text: 'third' }, who); await settle();
+  assert.deepEqual(killed, [job.id]);
+  await assert.rejects(pass(job), /already reported/);
+  assert.equal(gh.log.filter(l => l[0] === 'merge').length, 0, 'cancelled gate merged nothing');
+  const evs = db.prepare("SELECT kind FROM events WHERE kind LIKE 'gate-%'").all();
+  assert.deepEqual(evs, []);
+  const c = (await core.call('test.claim', { wait: 0 }, runner)).job;
+  assert.equal(c.sha, 'cccc333');
+  await pass(c);
+  assert.deepEqual(gh.log.filter(l => l[0] === 'merge'), [['merge', 5]]);
+  assert.equal(db.prepare('SELECT state FROM agents WHERE id = ?').get(id).state, 'merged');
+});
+
 test('required checks → auto-merge; queue beyond 3; ask → toast → answer; round 4 blocks', async () => {
   const { db, core, gh, host, toasts } = setup(fakeGithub({ required: ['ci'] }));
   await core.call('delegator.start', { repo: 'gitgiant/demo' });
