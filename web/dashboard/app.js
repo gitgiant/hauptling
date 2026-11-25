@@ -1,7 +1,7 @@
 // Hauptling dashboard (phase 4). Vanilla ES module; all data comes from the broker's /dash routes.
 import { ansiFragment } from './ansi.js';
 import { vendorBadge } from './vendors.js';
-import { STACKED_QUERY, STRIP_PX, DRAG_IGNORE, clampRatio, parseRatio, defaultRatio, splitKey, keyRatio, collapseAfterDrag } from './layout.js';
+import { STACKED_QUERY, HANDLE_PX, DRAG_IGNORE, clampRatio, parseRatio, defaultRatio, splitKey, keyRatio, collapseAfterDrag, HEADER_STEPS, stepClasses, pickStep, handleKey } from './layout.js';
 // Text from the store is always set with textContent (h() below), never parsed as HTML.
 
 const $ = (sel) => document.querySelector(sel);
@@ -67,69 +67,122 @@ function setTheme(t) {
   document.documentElement.dataset.theme = t;
   localStorage.setItem('hl-theme', t);
   const b = $('#theme');
-  b.textContent = t === 'dark' ? '☀ Light' : '☾ Dark';
+  put(b, t === 'dark' ? '☀' : '☾', h('span', { class: 'long', text: t === 'dark' ? ' Light' : ' Dark' }));
+  b.setAttribute('aria-label', `Switch to ${t === 'dark' ? 'light' : 'dark'} mode`);
   b.title = `Switch to ${t === 'dark' ? 'light' : 'dark'} mode`;
 }
 setTheme(localStorage.getItem('hl-theme') === 'light' ? 'light' : 'dark');
 $('#usagebar').addEventListener('click', () => show(state.view === 'usage' ? 'board' : 'usage'));
 $('#theme').addEventListener('click', () => setTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'));
 
-// ---------- header: drag it up (or press ⌃) to hide it; a tab at the top brings it back ----------
+// ---------- header: one row while it fits, degrading step by step (layout.js HEADER_STEPS) ----------
 const top = $('header.top');
-const topTab = $('#top-tab');
-let topFull = top.offsetHeight;
+let headerStep = 0;
+/** Tries the steps on the live header (synchronously, so nothing paints in between) and keeps the first that fits. */
+function fitHeader() {
+  const apply = (s) => {
+    for (const [i, name] of HEADER_STEPS.entries()) if (i) top.classList.toggle(`h-${name}`, stepClasses(s).includes(`h-${name}`));
+  };
+  const slack = (s) => { // its one-row width at max-content vs the window
+    apply(s);
+    top.classList.add('measuring');
+    const w = top.offsetWidth;
+    top.classList.remove('measuring');
+    return document.documentElement.clientWidth - w;
+  };
+  headerStep = pickStep(slack, headerStep);
+  apply(headerStep);
+  top.dataset.step = HEADER_STEPS[headerStep];
+}
+let fitQueued = false;
+const queueFit = () => { if (!fitQueued) { fitQueued = true; requestAnimationFrame(() => { fitQueued = false; fitHeader(); }); } };
+addEventListener('resize', queueFit);
+new MutationObserver(queueFit).observe(top, { childList: true, subtree: true, characterData: true }); // chips, CPU, GPU re-render
+document.fonts?.ready.then(queueFit);
+fitHeader();
+
+// GPU details (jobs, free VRAM, queue controls) sit behind a ⋯ popover once the header is brief.
+document.addEventListener('click', (e) => {
+  const g = $('#gpu');
+  if (e.target.closest('#gpu .more-btn')) { const open = !g.classList.contains('open'); g.classList.toggle('open', open); e.target.closest('button').setAttribute('aria-expanded', String(open)); return; }
+  if (g.classList.contains('open') && !e.target.closest('#gpu .pop')) { g.classList.remove('open'); $('#gpu .more-btn')?.setAttribute('aria-expanded', 'false'); }
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && $('#gpu').classList.contains('open')) { $('#gpu').classList.remove('open'); $('#gpu .more-btn')?.setAttribute('aria-expanded', 'false'); }
+});
+
+// ---------- header handle: a horizontal splitter along its bottom edge; drag, click or keys hide and show it ----------
+const handle = $('#top-handle');
+let topFull = top.offsetHeight + HANDLE_PX;
 let topCollapsed = localStorage.getItem('hl-top') === 'collapsed';
 let topDragging = false;
-document.documentElement.style.setProperty('--strip', `${STRIP_PX}px`);
-/** --header-h is the header's visible height; the layout (body padding, split view heights) follows it. */
+/** --header-h is the header's visible height plus the handle; the layout (body padding, split view heights, handle position) follows it. */
 const setHeaderH = (px) => document.documentElement.style.setProperty('--header-h', `${Math.round(px)}px`);
 function applyTop() {
   top.classList.toggle('collapsed', topCollapsed);
-  topTab.hidden = !topCollapsed;
-  setHeaderH(topCollapsed ? STRIP_PX : topFull);
+  top.inert = topCollapsed;
+  handle.setAttribute('aria-valuenow', topCollapsed ? '0' : '100');
+  handle.setAttribute('aria-valuetext', topCollapsed ? 'header hidden' : 'header shown');
+  handle.setAttribute('aria-label', topCollapsed ? 'Show the header' : 'Hide the header');
+  handle.title = `${topCollapsed ? 'Show' : 'Hide'} the header: click, drag ${topCollapsed ? 'down' : 'up'}, or Enter`;
+  setHeaderH(topCollapsed ? HANDLE_PX : topFull);
 }
 function setCollapsed(c) {
-  const hadFocus = top.contains(document.activeElement) || topTab === document.activeElement;
   topCollapsed = c;
   localStorage.setItem('hl-top', c ? 'collapsed' : 'open');
   applyTop();
-  if (hadFocus) (c ? topTab : $('#hide-top')).focus();
 }
-new ResizeObserver(() => { topFull = top.offsetHeight; if (!topDragging) applyTop(); }).observe(top); // it wraps on narrow screens
+new ResizeObserver(() => { topFull = top.offsetHeight + HANDLE_PX; if (!topDragging) applyTop(); }).observe(top); // two rows on phones
 applyTop();
-$('#hide-top').addEventListener('click', () => setCollapsed(true));
-// Pointer clicks on the tab are handled by the drag below; this is for Enter/Space.
-topTab.addEventListener('click', (e) => { if (e.detail === 0) setCollapsed(false); });
 
-/** Vertical drag on the header (to hide it) or on the collapsed tab (to show it). */
+let dragged = false; // the click that ends a drag must not also toggle
+handle.addEventListener('click', (e) => {
+  if (dragged) { dragged = false; return; }
+  if (e.detail > 1) return; // a double-click toggles once, like a click
+  setCollapsed(!topCollapsed);
+});
+handle.addEventListener('keydown', (e) => {
+  const c = handleKey(e.key, topCollapsed);
+  if (c == null) return;
+  e.preventDefault();
+  if (c !== topCollapsed) setCollapsed(c);
+});
+
+/** Vertical drag on the handle (either state) or on the open header's background: follows the pointer, then snaps. */
 function dragHeader(e) {
   const el = e.currentTarget;
   if (e.button !== 0 || (el === top && (topCollapsed || e.target.closest(DRAG_IGNORE)))) return;
+  if (el === handle) e.preventDefault(); // no text selection, like the pane splitters
   const from = topCollapsed, y0 = e.clientY;
   let lastY = y0, lastT = e.timeStamp, vy = 0, moved = false;
+  dragged = false;
   el.setPointerCapture(e.pointerId);
-  const offset = (dy) => Math.max(-topFull, Math.min(0, (from ? -topFull : 0) + dy));
+  const height = topFull - HANDLE_PX;
+  const offset = (dy) => Math.max(-height, Math.min(0, (from ? -height : 0) + dy));
   const move = (ev) => {
     const dy = ev.clientY - y0;
     if (!moved && Math.abs(dy) < 4) return;
-    if (!moved) { moved = true; topDragging = true; top.classList.add('dragging'); document.body.classList.add('dragging-top'); }
+    if (!moved) { moved = true; topDragging = true; top.classList.add('dragging'); handle.classList.add('dragging'); document.body.classList.add('dragging-top'); }
     const dt = ev.timeStamp - lastT;
     if (dt > 0) { vy = 0.7 * ((ev.clientY - lastY) / dt) + 0.3 * vy; lastY = ev.clientY; lastT = ev.timeStamp; }
     const off = offset(dy);
     top.style.transform = `translateY(${off}px)`;
-    setHeaderH(Math.max(STRIP_PX, topFull + off));
+    setHeaderH(topFull + off);
   };
   const end = (ev) => {
     el.removeEventListener('pointermove', move);
     el.removeEventListener('pointerup', end);
     el.removeEventListener('pointercancel', end);
+    if (!moved) return; // a click: the handle's click listener toggles
+    dragged = el === handle;
     topDragging = false;
     top.style.transform = '';
     top.classList.remove('dragging');
+    handle.classList.remove('dragging');
     document.body.classList.remove('dragging-top');
     if (ev.type === 'pointercancel') { applyTop(); return; } // e.g. the browser took over a sideways scroll
     if (ev.timeStamp - lastT > 120) vy = 0; // held still before letting go: no flick
-    const c = collapseAfterDrag({ collapsed: from, dy: ev.clientY - y0, vy, height: topFull });
+    const c = collapseAfterDrag({ collapsed: from, dy: ev.clientY - y0, vy, height });
     if (c !== topCollapsed) setCollapsed(c); else applyTop();
   };
   el.addEventListener('pointermove', move);
@@ -137,7 +190,7 @@ function dragHeader(e) {
   el.addEventListener('pointercancel', end);
 }
 top.addEventListener('pointerdown', dragHeader);
-topTab.addEventListener('pointerdown', dragHeader);
+handle.addEventListener('pointerdown', dragHeader);
 
 // ---------- splitters between the panes of each split view ----------
 const stacked = matchMedia(STACKED_QUERY);
@@ -207,7 +260,7 @@ function initSplitter(sp) {
   });
   sp.addEventListener('dblclick', () => { localStorage.removeItem(splitKey(id, stacked.matches)); load(); });
 }
-for (const sp of document.querySelectorAll('.splitter')) initSplitter(sp);
+for (const sp of document.querySelectorAll('.splitter[data-split]')) initSplitter(sp);
 
 // ---------- state ----------
 const state = { board: null, selected: null, sub: 'terminal', view: 'board', histSelected: null };
@@ -237,8 +290,8 @@ function connect() {
     if (state.pending) { const id = state.pending; state.pending = null; select(id); }
   });
   es.addEventListener('host', (e) => { state.host = JSON.parse(e.data); renderSys(); });
-  es.onopen = () => { $('#conn').className = 'conn live'; $('#conn').textContent = 'live'; };
-  es.onerror = () => { $('#conn').className = 'conn down'; $('#conn').textContent = 'reconnecting…'; };
+  es.onopen = () => { $('#conn').className = 'conn live'; put($('#conn'), h('span', { class: 'long', text: 'live' })); $('#conn').title = 'Live updates: connected'; };
+  es.onerror = () => { $('#conn').className = 'conn down'; put($('#conn'), h('span', { class: 'long', text: 'reconnecting…' })); $('#conn').title = 'Live updates: reconnecting…'; };
 }
 
 function render() {
@@ -283,14 +336,15 @@ function renderSys() {
   if (g) put(g, metric('', l.gpu, l.hist.gpu, 'GPU utilization'));
 }
 
-/** CPU test jobs: what runs now (agent, repo, elapsed) and how many wait. */
+/** CPU test jobs: how many run of the limit; what runs now (agent, repo, elapsed) and how many wait go in `.more`. */
 function cpuTests(q) {
   if (!q) return null;
-  const tip = q.running.map(r => `${r.id} ${r.purpose}${r.agent ? ` · ${r.agent}` : ''} · ${r.repo} · ${ago(r.claimed_at)}`).join('\n');
-  return h('span', { class: 'cputests', title: `CPU test jobs, up to ${q.limit} at once, one per repo${tip ? `\n${tip}` : ''}` },
-    'Tests ', h('b', { text: `${q.running.length}/${q.limit}` }),
-    q.running.map(r => h('span', { class: 'mono', text: `▶ ${r.agent || r.id} ${r.repo.split('/').pop()} ${ago(r.claimed_at)}` })),
-    q.queued ? h('span', { text: `· ${q.queued} queued` }) : null);
+  return h('span', { class: 'cputests', title: testsTip(q) }, 'Tests ', h('b', { text: `${q.running.length}/${q.limit}` }), h('span', { class: 'more' }, testDetails(q)));
+}
+const testsTip = (q) => `CPU test jobs, up to ${q.limit} at once, one per repo${q.running.length ? `\n${q.running.map(r => `${r.id} ${r.purpose}${r.agent ? ` · ${r.agent}` : ''} · ${r.repo} · ${ago(r.claimed_at)}`).join('\n')}` : ''}`;
+function testDetails(q) {
+  return [q.running.map(r => h('span', { class: 'mono', text: `▶ ${r.agent || r.id} ${r.repo.split('/').pop()} ${ago(r.claimed_at)}` })),
+    q.queued ? h('span', { text: `· ${q.queued} queued` }) : null];
 }
 
 /** "Run now" for a queued CPU test job: starts it past the concurrency limit. */
@@ -299,16 +353,17 @@ function runNow(t) {
   return h('button', { title: `Start ${t.id} now, past the test concurrency limit`, onclick: (e) => { e.stopPropagation(); act('test.run', { id: t.id }, `${t.id} started`); } }, 'Run now');
 }
 
+/**
+ * Header GPU area: CPU tests, GPU state and load, then details (free VRAM, jobs, queue controls).
+ * Once the header is brief (layout.js HEADER_STEPS) the details hide and a ⋯ button shows them in a popover.
+ */
 function renderGpu(g, tq) {
   const el = $('#gpu');
   const cpu = cpuTests(tq);
   if (!g) { put(el, cpu, h('span', { text: 'GPU: ?' })); return; }
   if (!g.available) { put(el, cpu, h('span', { text: 'GPU: none' })); return; }
   const running = g.running[0];
-  put(el, cpu,
-
-    h('span', {}, 'GPU ', h('b', { text: g.paused ? 'paused' : running ? 'busy' : 'idle' })),
-    h('span', { class: 'gpu-util' }),
+  const details = () => [
     h('span', { title: 'Free VRAM / what a job waits for', text: `${g.freeMB ?? '?'} MiB free` }),
     running ? h('span', { class: 'mono', text: `▶ ${running.id}${running.agent ? ` (${running.agent})` : ''}` }) : null,
     g.queued.length ? h('span', { text: `${g.queued.length} queued${g.queued.some(q => q.waiting_since) ? ' · waiting for VRAM' : ''}` }) : null,
@@ -316,6 +371,17 @@ function renderGpu(g, tq) {
       ? h('button', { onclick: () => act('gpu.resume', {}, 'GPU queue resumed') }, 'Resume')
       : [h('button', { onclick: () => act('gpu.pause', {}, 'GPU queue paused; the running job finishes') }, 'Pause'),
         running ? h('button', { class: 'danger', onclick: () => confirm(`Kill ${running.id} and requeue it?`) && act('gpu.pause', { now: true }, `Paused; ${running.id} requeued`) }, 'Pause now') : null],
+  ];
+  const tip = [tq ? testsTip(tq) : null, `GPU ${g.paused ? 'paused' : running ? `busy: ${running.id}${running.agent ? ` (${running.agent})` : ''}` : 'idle'} · ${g.freeMB ?? '?'} MiB free${g.queued.length ? ` · ${g.queued.length} queued` : ''}`].filter(Boolean).join('\n');
+  const open = el.classList.contains('open');
+  put(el, cpu,
+    h('span', { title: tip }, 'GPU ', g.paused ? h('b', { text: 'paused' }) : h('b', { class: 'long', text: running ? 'busy' : 'idle' })),
+    h('span', { class: 'gpu-util' }),
+    h('span', { class: 'more' }, details()),
+    h('button', { class: 'more-btn', type: 'button', title: `${tip}\n(click for details and queue controls)`, 'aria-label': 'GPU and test job details', 'aria-expanded': String(open) }, '⋯'),
+    h('div', { class: 'pop', role: 'group', 'aria-label': 'GPU and test job details' },
+      tq ? h('div', {}, h('b', { text: `Tests ${tq.running.length}/${tq.limit}` }), testDetails(tq)) : null,
+      h('div', {}, h('b', { text: `GPU ${g.paused ? 'paused' : running ? 'busy' : 'idle'}` }), details())),
   );
 }
 

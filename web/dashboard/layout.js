@@ -1,11 +1,11 @@
-// Pure layout logic for the dashboard: split sizes and the header collapse gesture.
+// Pure layout logic for the dashboard: split sizes, the header's degrade steps and its collapse handle.
 // No DOM access here, so node:test can cover it (test/layout.test.mjs).
 
 /** Media query under which split views stack (list above, detail below). */
 export const STACKED_QUERY = '(max-width: 800px), (orientation: portrait)';
 
-/** Height of the strip left at the top when the header is collapsed, px. */
-export const STRIP_PX = 6;
+/** Thickness of the header handle (a horizontal splitter; same as the 1rem pane splitter), px. */
+export const HANDLE_PX = 16;
 
 /**
  * Clamps the first pane's share of a split so both panes keep their minimum size.
@@ -69,7 +69,7 @@ export function keyRatio(key, shift, ratio, total, minA, minB) {
 }
 
 /**
- * Whether a vertical drag on the header (or on its collapsed tab) ends collapsed.
+ * Whether a vertical drag on the header (or on its handle) ends collapsed.
  * Collapses when dragged up past a third of the header's height (at least 24 px) or flicked up;
  * expands when dragged down past 24 px, flicked down, or merely clicked.
  * @param {{collapsed:boolean, dy:number, vy:number, height:number}} g
@@ -92,3 +92,43 @@ export function collapseAfterDrag({ collapsed, dy, vy, height }) {
 
 /** Whether a pointerdown target should start a header drag (not on interactive children). */
 export const DRAG_IGNORE = 'button, a, input, textarea, select, label, [role=tab], [contenteditable]';
+
+/**
+ * How the header degrades as the window narrows, one step at a time; each step keeps the ones before it.
+ * Steps 0–3 keep the header on one row; the last (`phone`) uses two: title, tabs and theme, then a
+ * horizontally scrolling strip of usage chips, CPU, Mem and GPU.
+ */
+export const HEADER_STEPS = ['full', 'no-spark', 'short', 'brief', 'phone'];
+
+/** The header's classes for a step: every degrade up to and including it (`h-no-spark`, `h-short`, …). */
+export function stepClasses(step) {
+  return HEADER_STEPS.slice(1, step + 1).map(s => `h-${s}`);
+}
+
+/**
+ * The least degraded step whose single row fits, else the last (two-row) step.
+ * Going back to a less degraded step than the current one needs `margin` px to spare, so a
+ * number ticking from 9% to 10% can't make the header flip between two steps.
+ * @param {(step:number) => number} slack  px left over on the row at a step (negative: it overflows)
+ * @param {number} current  the step in use now
+ * @param {number} [margin]
+ * @returns {number}
+ */
+export function pickStep(slack, current, margin = 12) {
+  const last = HEADER_STEPS.length - 1;
+  for (let s = 0; s < last; s++) if (slack(s) >= (s < current ? margin : 0)) return s;
+  return last;
+}
+
+/**
+ * The header's collapsed state after a key press on its handle, or null if the key doesn't act.
+ * Enter/Space toggle; Up/PageUp/Home collapse; Down/PageDown/End expand.
+ * @param {string} key  KeyboardEvent.key
+ * @param {boolean} collapsed
+ */
+export function handleKey(key, collapsed) {
+  if (key === 'Enter' || key === ' ') return !collapsed;
+  if (key === 'ArrowUp' || key === 'PageUp' || key === 'Home') return true;
+  if (key === 'ArrowDown' || key === 'PageDown' || key === 'End') return false;
+  return null;
+}
