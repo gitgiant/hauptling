@@ -44,6 +44,7 @@ Then start Claude, Codex or agy in that Linux shell and run `/delegator`.
 - `src/platform/` — host seam (notifications).
 - `src/mail.mjs` — machine-wide mailbox (ported from nullpunkt).
 - `src/vendors.mjs` — user-level hooks and trust for each vendor, hook I/O formats.
+- `src/dashboard.mjs`, `src/dbquery.mjs`, `web/dashboard/` — the dashboard (`hauptling dashboard`): live board over SSE, agent screen/diff/events, actions, read-only SQLite explorer. Served by the broker on 127.0.0.1 only.
 - `src/runner.mjs`, `src/detect.mjs`, `src/junit.mjs` — deterministic test jobs (inside a test container; GPU jobs get `--gpus all`, see `hauptling gpu status|pause|resume`).
 - `src/github.mjs` — PRs and merges via the host `gh` login.
 - `models.json` — shipped defaults; override in `~/.hauptling/models.json`.

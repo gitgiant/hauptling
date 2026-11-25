@@ -5,6 +5,7 @@
  *   name                        'linux' (Ubuntu, and WSL on Windows)
  *   notify(spec)                AskUserQuestion-style notification ({ title, body, choices, links: { page, choice(i) } })
  *   setupHost({ root })         host-only extras; returns lines to print
+ *   openUrl(url)                open a page in your browser (`hauptling dashboard`)
  *
  * Workers run in Docker containers on every host (src/docker.mjs). Windows hosts run everything inside WSL, so they use the linux adapter. macOS is planned
  * (native or a Linux VM); see PRD.md "Turnkey deployment".

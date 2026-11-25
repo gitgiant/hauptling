@@ -163,6 +163,8 @@ export async function doctor({ slots, vendors = VENDORS } = {}) {
   try {
     const info = await ensureBroker();
     ok(`broker on 127.0.0.1:${info.port}`);
+    const dash = await fetch(`http://127.0.0.1:${info.port}/`).then(r => r.status, () => 0);
+    check(dash === 401 || dash === 200, `dashboard at http://127.0.0.1:${info.port}/ (open it: hauptling dashboard)`, `dashboard not served (HTTP ${dash}): restart the broker (\`hauptling broker stop\`)`);
     names = slots ? slotNames(slots) : await call('slots.get');
   } catch (e) { bad(`broker: ${e.message}`); return report(false); }
   if (hasImage && proxyUp) {

@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { brokerFile, readBrokerFile } from './brokerfile.mjs';
 import { openDb } from './db.mjs';
 import { createCore } from './core.mjs';
+import { createDashboard } from './dashboard.mjs';
 import { platform } from './platform/index.mjs';
 import { dockerHost, WORKER_BROKER_URL } from './docker.mjs';
 import { networkInterfaces } from 'node:os';
@@ -20,7 +21,7 @@ const hostGit = (repo, args) => new Promise((resolve, reject) => {
 const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const page = (title, body) => `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>${esc(title)}</title>
 <style>body{font:16px system-ui,sans-serif;max-width:40rem;margin:3rem auto;padding:0 1rem;color:#222}button{font:inherit;padding:.5rem 1rem;margin:.25rem .5rem .25rem 0;cursor:pointer}
-textarea{width:100%;font:inherit;min-height:5rem}.agent{color:#666;font-size:.9rem}</style>${body}`;
+textarea{width:100%;font:inherit;min-height:5rem}.agent{color:#666;font-size:.9rem}footer{margin-top:3rem;font-size:.9rem}</style>${body}<footer><a href="/">Open dashboard</a></footer>`;
 
 /** The answer page: choices as buttons plus a free-text reply. Guarded by the ask's nonce. */
 async function answerPage(core, req, res, url) {
@@ -57,11 +58,13 @@ export async function runBroker({ port = BROKER_PORT } = {}) {
   const runnerToken = prev.runnerToken || token();
   const logPath = join(home(), 'broker.log');
   const log = (m) => appendFileSync(logPath, `${new Date().toISOString()} ${m}\n`);
-  const db = openDb(join(home(), 'hauptling.db'));
+  const dbPath = join(home(), 'hauptling.db');
+  const db = openDb(dbPath);
   const plat = await platform();
   const host = { ...dockerHost({ log }), hostGit };
   const base = `http://127.0.0.1:${port}`;
   const core = createCore({ db, host, github, notify: plat.notify, workerUrl: WORKER_BROKER_URL, publicUrl: base, runnerToken, log });
+  const dash = createDashboard({ db, dbPath, core, host, log });
 
   const handler = async (req, res) => {
     const send = (code, body) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); };
@@ -69,6 +72,7 @@ export async function runBroker({ port = BROKER_PORT } = {}) {
       const url = new URL(req.url, 'http://x');
       if (url.pathname === '/health') return send(200, { ok: true, pid: process.pid });
       if (/^\/ask\/\d+$/.test(url.pathname)) return await answerPage(core, req, res, url);
+      if (await dash.handle(req, res, url)) return;
       const who = core.authenticate((req.headers.authorization || '').replace(/^Bearer /, ''), adminToken);
       if (!who) return send(401, { error: 'Bad or expired token' });
       const m = /^\/api\/([\w.-]+)$/.exec(url.pathname);

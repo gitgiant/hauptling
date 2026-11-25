@@ -3,6 +3,7 @@ import { kvDel, kvGet, kvSet, tx } from './db.mjs';
 import * as mail from './mail.mjs';
 import { findModel, launchArgv, loadModels, nextVendor, pick } from './models.mjs';
 import { canInject } from './vendors.mjs';
+import { dashToken } from './dashboard.mjs';
 import { MAIL_MAX, STATUS_MAX, bounded, githubSlug, hex, isFamily, now, sanitizeModel, token, wslPath } from './util.mjs';
 
 /*
@@ -288,7 +289,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     const r = db.prepare('INSERT INTO asks (agent, question, choices, at, nonce) VALUES (?, ?, ?, ?, ?)').run(a.id, question, JSON.stringify(choices), now(), nonce);
     const id = Number(r.lastInsertRowid);
     const page = `${publicUrl}/ask/${id}?k=${nonce}`;
-    notify({ title: `${a.id} asks`, body: question, choices, links: { page, choice: (i) => `${page}&choice=${i}` } });
+    notify({ title: `${a.id} asks`, body: question, choices, links: { page, choice: (i) => `${page}&choice=${i}` }, dashboard: `${publicUrl}/` });
     log(`ask ${id} from ${a.id}: ${page}`);
     return id;
   }
@@ -612,7 +613,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
           const tail = screen.split('\n').map(l => l.trim()).filter(Boolean).slice(-3).join(' | ');
           update(a.id, { state: 'blocked' });
           mail.setStatus(db, a.id, 'blocked: idle without report');
-          notify({ title: `${a.id} is idle without reporting`, body: `${tail ? `${tail}\n` : ''}Run: hauptling attach ${a.id}`, choices: [], links: null });
+          notify({ title: `${a.id} is idle without reporting`, body: `${tail ? `${tail}\n` : ''}Run: hauptling attach ${a.id}`, choices: [], links: null, dashboard: `${publicUrl}/` });
           log(`idle ${a.id}`);
           continue;
         }
@@ -624,7 +625,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
         const why = prompt ? `waiting on a ${a.vendor} permission prompt` : `no activity for ${stallMinutes} min`;
         update(a.id, { state: 'blocked' });
         mail.setStatus(db, a.id, `blocked: ${why}`.slice(0, STATUS_MAX));
-        notify({ title: `${a.id} may be stuck`, body: `${why}. Run: hauptling attach ${a.id}`, choices: [], links: null });
+        notify({ title: `${a.id} may be stuck`, body: `${why}. Run: hauptling attach ${a.id}`, choices: [], links: null, dashboard: `${publicUrl}/` });
         log(`stall ${a.id}: ${why}`);
       } catch (e) { log(`watch ${a.id}: ${e.message}`); }
     }
@@ -700,6 +701,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     },
     'test.wait': testWait, 'test.get': testGet,
     'test.claim': claim, 'test.report': testReport, 'test.heartbeat': () => kvSet(db, 'runner_seen', Date.now()),
+    'dashboard.token': ({ rotate = false }) => ({ token: dashToken(db, { rotate }), url: publicUrl }),
     'gpu.pause': gpuPause, 'gpu.resume': gpuResume, 'gpu.status': gpuStatus,
     'slots.get': () => slots(),
     'slots.set': ({ slots: s }) => { kvSet(db, 'slots', JSON.stringify(s)); return s; },

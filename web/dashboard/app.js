@@ -1,0 +1,352 @@
+// Hauptling dashboard (phase 4a). Vanilla ES module; all data comes from the broker's /dash routes.
+// Text from the store is always set with textContent (h() below), never parsed as HTML.
+
+const $ = (sel) => document.querySelector(sel);
+function h(tag, props = {}, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(props)) {
+    if (v == null || v === false) continue;
+    if (k === 'class') el.className = v;
+    else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
+    else if (k === 'text') el.textContent = v;
+    else el.setAttribute(k, v === true ? '' : v);
+  }
+  for (const kid of kids.flat()) if (kid != null && kid !== false) el.append(kid instanceof Node ? kid : String(kid));
+  return el;
+}
+
+/** replaceChildren that skips null/false and flattens arrays, like h(). */
+const put = (el, ...kids) => el.replaceChildren(...kids.flat(Infinity).filter(k => k != null && k !== false));
+
+const api = {
+  async get(path) {
+    const r = await fetch(path, { credentials: 'same-origin' });
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(body.error || r.statusText);
+    return body;
+  },
+  async post(path, data = {}) {
+    const r = await fetch(path, { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json', 'x-hauptling': '1' }, body: JSON.stringify(data) });
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(body.error || r.statusText);
+    return body;
+  },
+};
+
+function toast(msg, err = false) {
+  const t = h('div', { class: `toast${err ? ' err' : ''}`, role: 'status', text: msg });
+  document.body.append(t);
+  setTimeout(() => t.remove(), err ? 6000 : 2500);
+}
+async function act(name, args, done) {
+  try { await api.post(`/dash/do/${name}`, args); toast(done); }
+  catch (e) { toast(`${name}: ${e.message}`, true); }
+}
+
+const ago = (iso) => {
+  if (!iso) return '';
+  const s = Math.max(0, (Date.now() - Date.parse(iso)) / 1000);
+  if (s < 60) return `${Math.floor(s)}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+  return `${Math.floor(s / 86400)}d`;
+};
+const clock = (iso) => new Date(iso).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+const isLocal = (a) => a.repo.startsWith('/');
+
+// ---------- state ----------
+const state = { board: null, selected: null, sub: 'screen', view: 'board', screenTimer: null, histSelected: null };
+
+// ---------- tabs ----------
+for (const b of document.querySelectorAll('.tabs button')) {
+  b.addEventListener('click', () => show(b.dataset.view));
+}
+function show(view) {
+  state.view = view;
+  for (const b of document.querySelectorAll('.tabs button')) b.setAttribute('aria-selected', String(b.dataset.view === view));
+  for (const v of ['board', 'history', 'db']) $(`#view-${v}`).hidden = v !== view;
+  if (view === 'history') loadHistory();
+  if (view === 'db') loadTables();
+  location.hash = view === 'board' ? (state.selected ? `agent=${state.selected}` : '') : view;
+  syncScreenTimer();
+}
+
+// ---------- live board ----------
+function connect() {
+  const es = new EventSource('/dash/stream');
+  es.addEventListener('board', (e) => {
+    state.board = JSON.parse(e.data);
+    render();
+    if (state.pending) { const id = state.pending; state.pending = null; select(id); }
+  });
+  es.onopen = () => { $('#conn').className = 'conn live'; $('#conn').textContent = 'live'; };
+  es.onerror = () => { $('#conn').className = 'conn down'; $('#conn').textContent = 'reconnecting…'; };
+}
+
+function render() {
+  const b = state.board;
+  document.title = b.blocked ? `(${b.blocked}) Hauptling` : 'Hauptling';
+  renderGpu(b.gpu);
+  renderBoard(b);
+  if (state.selected) {
+    const a = b.agents.find(x => x.id === state.selected);
+    if (a) renderDetailHead(a, $('#detail'));
+  }
+}
+
+function renderGpu(g) {
+  const el = $('#gpu');
+  if (!g) { put(el, h('span', { text: 'GPU: ?' })); return; }
+  if (!g.available) { put(el, h('span', { text: 'GPU: none' })); return; }
+  const running = g.running[0];
+  put(el, 
+    h('span', {}, 'GPU ', h('b', { text: g.paused ? 'paused' : running ? 'busy' : 'idle' })),
+    h('span', { title: 'Free VRAM / what a job waits for', text: `${g.freeMB ?? '?'} MiB free` }),
+    running ? h('span', { class: 'mono', text: `▶ ${running.id}${running.agent ? ` (${running.agent})` : ''}` }) : null,
+    g.queued.length ? h('span', { text: `${g.queued.length} queued${g.queued.some(q => q.waiting_since) ? ' · waiting for VRAM' : ''}` }) : null,
+    g.paused
+      ? h('button', { onclick: () => act('gpu.resume', {}, 'GPU queue resumed') }, 'Resume')
+      : [h('button', { onclick: () => act('gpu.pause', {}, 'GPU queue paused; the running job finishes') }, 'Pause'),
+        running ? h('button', { class: 'danger', onclick: () => confirm(`Kill ${running.id} and requeue it?`) && act('gpu.pause', { now: true }, `Paused; ${running.id} requeued`) }, 'Pause now') : null],
+  );
+}
+
+function card(a) {
+  const meta = [
+    h('span', { class: 'mono', text: a.id }),
+    h('span', { text: a.model }),
+    h('span', { class: 'mono', text: a.branch }),
+    a.pr_url ? h('a', { href: a.pr_url, target: '_blank', rel: 'noopener', onclick: (e) => e.stopPropagation(), text: `PR #${a.pr_number}` }) : null,
+    a.gate ? h('span', { text: `gate: ${a.gate}` }) : null,
+    a.ci_note ? h('span', { class: 'chip fail', text: `CI failed ${a.ci_note.slice(0, 7)}` }) : null,
+    testChip(a.test),
+  ];
+  const el = h('div', { class: `card ${a.state}${state.selected === a.id ? ' selected' : ''}`, role: 'button', tabindex: '0', onclick: () => select(a.id), onkeydown: (e) => e.key === 'Enter' && select(a.id) },
+    h('span', { class: `dot ${a.state}`, title: a.state }),
+    h('span', { class: 'title', title: a.title, text: a.title }),
+    h('span', { class: 'elapsed', title: `started ${clock(a.created_at)}`, text: ago(a.created_at) }),
+    h('div', { class: 'meta' }, meta),
+    a.ask ? h('div', { class: 'status', text: `asks: ${a.ask.question}` }) : a.status ? h('div', { class: 'status', text: a.status }) : null,
+  );
+  return el;
+}
+
+function testChip(t) {
+  if (!t) return null;
+  const label = `${t.gpu ? 'GPU ' : ''}${t.purpose === 'gate' ? 'gate' : 'test'}`;
+  if (!t.status) return h('span', { class: 'chip run', text: `${label} ${t.state}` });
+  return h('span', { class: `chip ${t.status}`, title: `${t.id} ${clock(t.at)}`, text: `${label} ${t.status} ${t.passed ?? 0}/${(t.passed ?? 0) + (t.failed ?? 0)}` });
+}
+
+const ORDER = { blocked: 0, exited: 1, failed: 1, working: 2, spawning: 3, waiting: 4, queued: 5, done: 6 };
+function renderBoard(b) {
+  const live = b.agents.filter(a => !a.ended);
+  const recent = b.agents.filter(a => a.ended).sort((x, y) => (x.updated_at < y.updated_at ? 1 : -1));
+  const groups = new Map();
+  for (const a of live) {
+    const key = `${a.delegator}\u0000${a.repo}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(a);
+  }
+  const out = [];
+  if (!live.length) out.push(h('p', { class: 'empty', text: 'No active agents. Start Claude, Codex or agy and run /delegator.' }));
+  for (const [key, list] of groups) {
+    const [d, repo] = key.split('\u0000');
+    list.sort((x, y) => (ORDER[x.state] ?? 9) - (ORDER[y.state] ?? 9) || (x.created_at < y.created_at ? -1 : 1));
+    out.push(h('div', { class: 'group' }, h('h2', {}, h('span', { class: 'mono', text: repo }), ' · ', h('span', { class: 'mono', text: d })), list.map(card)));
+  }
+  if (recent.length) {
+    const det = h('details', { class: 'recent', open: localStorage.getItem('hl-recent') === '1' }, h('summary', { text: `Recent, last 24 h (${recent.length})` }), recent.map(card));
+    det.addEventListener('toggle', () => localStorage.setItem('hl-recent', det.open ? '1' : '0'));
+    out.push(det);
+  }
+  put($('#board'), ...out);
+}
+
+// ---------- detail ----------
+function select(id) {
+  state.selected = id;
+  location.hash = `agent=${id}`;
+  const a = state.board?.agents.find(x => x.id === id);
+  if (!a) return;
+  renderBoard(state.board);
+  const el = $('#detail');
+  put(el, h('div', { class: 'dhead' }), h('nav', { class: 'subtabs' }), h('div', { class: 'body' }));
+  renderDetailHead(a, el);
+  renderSub(el, a);
+}
+
+function renderDetailHead(a, el) {
+  const head = el.querySelector('.dhead');
+  if (!head) return;
+  const reply = h('form', { class: 'reply', onsubmit: (e) => {
+    e.preventDefault();
+    const text = e.target.text.value.trim();
+    if (text) act('reply', { agent: a.id, text }, a.ask ? 'Answer sent' : 'Message sent').then(() => { e.target.text.value = ''; });
+  } }, h('input', { name: 'text', maxlength: '300', placeholder: a.ask ? 'Answer in your own words…' : `Message ${a.id}…`, 'aria-label': 'Reply' }), h('button', {}, a.ask ? 'Answer' : 'Send'));
+  // Keep a half-typed reply across live refreshes.
+  const old = head.querySelector('.reply input');
+  if (old && old.value) reply.text.value = old.value;
+  const hadFocus = old && document.activeElement === old;
+  const canMerge = isLocal(a) && a.state === 'done' && a.test?.purpose === 'gate' && a.test?.status === 'pass';
+  put(head, 
+    h('h2', { text: a.title }),
+    h('div', { class: 'meta' },
+      h('span', { class: 'mono', text: a.id }), h('span', { text: a.state }), h('span', { text: `${a.vendor} · ${a.model}` }),
+      h('span', { class: 'mono', text: `${a.branch} → ${a.base}` }), h('span', { class: 'mono', text: a.repo }),
+      a.pr_url ? h('a', { href: a.pr_url, target: '_blank', rel: 'noopener', text: `PR #${a.pr_number}` }) : null,
+      h('span', { text: `started ${clock(a.created_at)} (${ago(a.created_at)})` })),
+    a.ask ? h('div', { class: 'ask' }, h('p', { text: a.ask.question }),
+      h('div', { class: 'choices' }, a.ask.choices.map((c, i) => h('button', { class: 'primary', onclick: () => act('answer', { ask: a.ask.id, choice: i }, `Answered: ${c}`) }, c)))) : null,
+    a.report ? h('div', { class: 'report' }, h('b', { text: 'Report: ' }), a.report) : null,
+    a.ended ? null : reply,
+    a.ended ? null : h('div', { class: 'actions' },
+      canMerge ? h('button', { class: 'primary', onclick: () => act('merge', { agent: a.id }, `${a.id} merged into ${a.base}`) }, `Merge into ${a.base}`) : null,
+      h('button', { class: 'danger', onclick: () => confirm(`Kill ${a.id}? Its container and clone are removed.`) && act('kill', { agent: a.id }, `${a.id} killed`) }, 'Kill'),
+      h('span', { class: 'mono empty', text: `hauptling attach ${a.id}` })),
+  );
+  if (hadFocus) reply.text.focus();
+}
+
+function renderSub(el, a) {
+  const tabs = el.querySelector('.subtabs');
+  const subs = [['screen', 'Screen'], ['diff', 'Diff'], ['events', 'Events']];
+  put(tabs, ...subs.map(([k, label]) => h('button', { 'aria-selected': String(state.sub === k), onclick: () => { state.sub = k; renderSub(el, a); } }, label)));
+  const body = el.querySelector('.body');
+  put(body, h('p', { class: 'empty', text: 'Loading…' }));
+  if (state.sub === 'screen') loadScreen(a.id, body);
+  if (state.sub === 'diff') loadDiff(a.id, body);
+  if (state.sub === 'events') loadEvents(a.id, body);
+  syncScreenTimer();
+}
+
+async function loadScreen(id, body) {
+  try {
+    const s = await api.get(`/dash/agent/${encodeURIComponent(id)}/screen`);
+    if (state.selected !== id || state.sub !== 'screen') return;
+    const pre = body.querySelector('pre.screen');
+    const atBottom = !pre || pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 20;
+    if (s.note) { put(body, h('p', { class: 'empty', text: s.note })); return; }
+    const next = pre || h('pre', { class: 'screen' });
+    next.textContent = s.text || '(empty screen)';
+    if (!pre) put(body, next, h('p', { class: 'empty', text: 'Read-only mirror, refreshed every 2 s. Live terminal: hauptling attach (web terminal comes in 4b).' }));
+    if (atBottom) next.scrollTop = next.scrollHeight;
+  } catch (e) { put(body, h('p', { class: 'empty', text: e.message })); }
+}
+
+function syncScreenTimer() {
+  clearInterval(state.screenTimer);
+  state.screenTimer = null;
+  if (state.view === 'board' && state.selected && state.sub === 'screen') {
+    state.screenTimer = setInterval(() => { if (!document.hidden) loadScreen(state.selected, $('#detail .body')); }, 2000);
+  }
+}
+
+function patchView(text) {
+  const pre = h('pre', { class: 'patch' });
+  for (const line of text.split('\n')) {
+    const cls = line.startsWith('+') && !line.startsWith('+++') ? 'add' : line.startsWith('-') && !line.startsWith('---') ? 'del' : line.startsWith('@@') ? 'hunk' : null;
+    pre.append(cls ? h('span', { class: cls, text: line }) : line, '\n');
+  }
+  return pre;
+}
+
+async function loadDiff(id, body) {
+  try {
+    const d = await api.get(`/dash/agent/${encodeURIComponent(id)}/diff`);
+    if (d.note) { put(body, h('p', { class: 'empty', text: d.note })); return; }
+    put(body, 
+      h('p', { class: 'empty', text: `Against ${d.base} (merge base), committed and uncommitted.` }),
+      d.stat ? h('pre', { class: 'patch', text: d.stat }) : h('p', { class: 'empty', text: 'No changes yet.' }),
+      d.files.map(f => h('details', { class: 'file' }, h('summary', { text: f.path }), patchView(f.patch))),
+      d.untracked.length ? h('p', {}, h('b', { text: 'Untracked: ' }), h('span', { class: 'mono', text: d.untracked.join('  ') })) : null,
+    );
+  } catch (e) { put(body, h('p', { class: 'empty', text: e.message })); }
+}
+
+function timelineView(t) {
+  return [
+    h('ol', { class: 'timeline' }, t.items.map(i => h('li', {}, h('time', { datetime: i.at, text: clock(i.at) }), h('span', { class: 'kind', text: i.kind }), h('span', { text: i.text })))),
+    t.brief ? h('details', {}, h('summary', { text: 'Brief' }), h('pre', { class: 'patch', text: t.brief })) : null,
+  ];
+}
+
+async function loadEvents(id, body) {
+  try { put(body, ...timelineView(await api.get(`/dash/agent/${encodeURIComponent(id)}/events`)).filter(Boolean)); }
+  catch (e) { put(body, h('p', { class: 'empty', text: e.message })); }
+}
+
+// ---------- history ----------
+let histTimer;
+$('#history-q').addEventListener('input', () => { clearTimeout(histTimer); histTimer = setTimeout(loadHistory, 250); });
+async function loadHistory() {
+  try {
+    const rows = await api.get(`/dash/history?q=${encodeURIComponent($('#history-q').value)}`);
+    put($('#history'), ...(rows.length ? rows.map(a => {
+      const el = card({ ...a, ended: true });
+      el.onclick = async () => {
+        const det = $('#history-detail');
+        put(det, h('div', { class: 'dhead' }, h('h2', { text: a.title }),
+          h('div', { class: 'meta' }, h('span', { class: 'mono', text: a.id }), h('span', { text: a.state }), h('span', { text: a.model }), h('span', { class: 'mono', text: a.repo }),
+            a.pr_url ? h('a', { href: a.pr_url, target: '_blank', rel: 'noopener', text: `PR #${a.pr_number}` }) : null, h('span', { text: `ended ${clock(a.updated_at)}` })),
+          a.report ? h('div', { class: 'report' }, h('b', { text: 'Report: ' }), a.report) : null));
+        try { det.append(...timelineView(await api.get(`/dash/agent/${encodeURIComponent(a.id)}/events`)).filter(Boolean)); } catch (e) { det.append(h('p', { class: 'empty', text: e.message })); }
+      };
+      return el;
+    }) : [h('p', { class: 'empty', text: 'No ended agents match.' })]));
+  } catch (e) { toast(e.message, true); }
+}
+
+// ---------- database ----------
+const dbState = { table: null, offset: 0, sort: null, dir: 'asc', filter: '' };
+async function loadTables() {
+  try {
+    const ts = await api.get('/dash/db/tables');
+    put($('#db-tables'), ...ts.map(t => h('button', { class: dbState.table === t.name ? 'on' : null, onclick: () => { Object.assign(dbState, { table: t.name, offset: 0, sort: null, filter: '' }); loadTables(); loadTable(); } }, h('span', { class: 'mono', text: t.name }), h('small', { text: t.rows }))));
+  } catch (e) { toast(e.message, true); }
+}
+
+function grid(columns, rows, { sortable = false } = {}) {
+  return h('table', { class: 'grid' },
+    h('thead', {}, h('tr', {}, columns.map(c => h('th', { onclick: sortable ? () => { dbState.dir = dbState.sort === c && dbState.dir === 'asc' ? 'desc' : 'asc'; dbState.sort = c; dbState.offset = 0; loadTable(); } : null },
+      c, sortable && dbState.sort === c ? (dbState.dir === 'asc' ? ' ▲' : ' ▼') : '')))),
+    h('tbody', {}, rows.map(r => h('tr', {}, r.map(v => (v === null ? h('td', { class: 'null', text: 'null' }) : h('td', { title: String(v), text: String(v) })))))));
+}
+
+async function loadTable() {
+  const s = dbState;
+  if (!s.table) return;
+  try {
+    const q = new URLSearchParams({ name: s.table, offset: s.offset, limit: 100, dir: s.dir, filter: s.filter, ...(s.sort ? { sort: s.sort } : {}) });
+    const t = await api.get(`/dash/db/table?${q}`);
+    const filter = h('input', { type: 'search', placeholder: 'Filter rows', value: s.filter });
+    filter.addEventListener('change', () => { s.filter = filter.value; s.offset = 0; loadTable(); });
+    put($('#db-grid'), 
+      h('div', { class: 'db-bar' }, h('b', { class: 'mono', text: t.name }), filter,
+        h('span', { text: `${t.total ? t.offset + 1 : 0}–${Math.min(t.offset + 100, t.total)} of ${t.total}` }),
+        h('button', { disabled: t.offset === 0, onclick: () => { s.offset = Math.max(0, s.offset - 100); loadTable(); } }, '‹ Prev'),
+        h('button', { disabled: t.offset + 100 >= t.total, onclick: () => { s.offset += 100; loadTable(); } }, 'Next ›')),
+      grid(t.columns, t.rows, { sortable: true }));
+  } catch (e) { toast(e.message, true); }
+}
+
+$('#db-query').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const sql = e.target.sql.value.trim();
+  if (!sql) return;
+  try {
+    const t0 = performance.now();
+    const r = await api.post('/dash/db/query', { sql });
+    put($('#db-grid'), 
+      h('div', { class: 'db-bar' }, h('span', { text: `${r.rows.length} row${r.rows.length === 1 ? '' : 's'}${r.truncated ? ' (stopped at 1000)' : ''} in ${Math.round(performance.now() - t0)} ms` })),
+      grid(r.columns, r.rows));
+  } catch (err) { put($('#db-grid'), h('p', { class: 'toast err', style: 'position:static', text: err.message })); }
+});
+$('#db-query textarea').addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) $('#db-query').requestSubmit(); });
+
+// ---------- start ----------
+setInterval(() => { if (state.board && state.view === 'board') renderBoard(state.board); }, 30e3); // elapsed times
+const hash = location.hash.slice(1);
+connect();
+if (hash === 'history' || hash === 'db') show(hash);
+else if (hash.startsWith('agent=')) state.pending = decodeURIComponent(hash.slice(6));

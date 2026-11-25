@@ -16,6 +16,7 @@ Delegator (host):
   models                                   models.json table (suggest mode reasons over this)
   attach AGENT | reply AGENT <text> | kill AGENT | merge AGENT
   test request --sha S [--selector X] [--gpu] [--timeout S] | test wait ID | test get ID | test report ID FILE
+  dashboard [--print] [--new-token]        open the dashboard in your browser (--print: show the sign-in link)
   gpu status | gpu pause [--now] | gpu resume   hold the GPU test queue (--now kills and requeues the running job)
 Worker (inside a slot; HAUPTLING_AGENT is set):
   report <≤300 chars>                      finish: hauptling pushes, opens the PR, gates the merge
@@ -39,7 +40,7 @@ const [cmd, ...rest] = process.argv.slice(2);
 
 async function main() {
   const { call } = await import('../src/client.mjs');
-  const args = parseArgs(rest, { repeat: ['choice', 'artifacts'], bool: ['test-writer', 'all', 'gpu', 'force', 'no-host', 'no-login', 'now'] });
+  const args = parseArgs(rest, { repeat: ['choice', 'artifacts'], bool: ['test-writer', 'all', 'gpu', 'force', 'no-host', 'no-login', 'now', 'print', 'new-token'] });
   const text = () => args._.join(' ');
   switch (cmd) {
     case undefined: case 'help': case '--help': case '-h': return out(USAGE);
@@ -129,6 +130,15 @@ async function main() {
       if (sub === 'get') return out(fmtTest(await call('test.get', { id })));
       if (sub === 'report') return out(await call('test.report', { id, report: JSON.parse(readFileSync(file, 'utf8')) }));
       throw new Error('test request|wait|get|report');
+    }
+    case 'dashboard': {
+      const { token: t, url } = await call('dashboard.token', { rotate: Boolean(args.newToken) });
+      const link = `${url}/?k=${t}`;
+      if (args.newToken) console.error('New dashboard token: browsers signed in with the old one must open this link again.');
+      if (args.print) return out(link);
+      const { platform } = await import('../src/platform/index.mjs');
+      (await platform()).openUrl(link);
+      return out(`Opening ${url}/ (sign-in link: hauptling dashboard --print)`);
     }
     case 'gpu': {
       const sub = args._[0];

@@ -4,7 +4,7 @@
   "description": "Delegates coding tasks to Claude, Codex and agy workers",
   "type": "module",
   "bin": { "hauptling": "bin/hauptling.mjs" },
-  "files": ["bin", "src", "skills", "scripts", "models.json"],
+  "files": ["bin", "src", "web", "skills", "scripts", "models.json"],
   "engines": { "node": ">=22.5" },
   "scripts": { "test": "node --test test/*.test.mjs" },
   "license": "UNLICENSED",

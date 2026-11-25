@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hauptling</title>
+<link rel="stylesheet" href="/web/style.css">
+<script type="module" src="/web/app.js"></script>
+</head>
+<body>
+<header class="top">
+  <h1>Hauptling</h1>
+  <nav class="tabs" role="tablist">
+    <button role="tab" data-view="board" aria-selected="true">Board</button>
+    <button role="tab" data-view="history">History</button>
+    <button role="tab" data-view="db">Database</button>
+  </nav>
+  <section id="gpu" class="gpu" aria-label="GPU queue"></section>
+  <span id="conn" class="conn" title="Live updates">connecting…</span>
+</header>
+
+<main id="view-board" class="split">
+  <section id="board" class="board" aria-label="Agents"></section>
+  <section id="detail" class="detail" aria-label="Agent detail"><p class="empty">Pick an agent.</p></section>
+</main>
+
+<main id="view-history" class="split" hidden>
+  <section class="board">
+    <input id="history-q" type="search" placeholder="Search ended agents: id, title, repo, branch, report">
+    <div id="history"></div>
+  </section>
+  <section id="history-detail" class="detail"><p class="empty">Pick an agent.</p></section>
+</main>
+
+<main id="view-db" class="db" hidden>
+  <aside id="db-tables" class="db-tables" aria-label="Tables"></aside>
+  <section class="db-main">
+    <form id="db-query" class="db-query">
+      <textarea name="sql" rows="3" spellcheck="false" placeholder="SELECT agent, COUNT(*) FROM tests GROUP BY agent   (read-only · 1000 rows · 2 s)"></textarea>
+      <button>Run</button>
+    </form>
+    <div id="db-grid"></div>
+  </section>
+</main>
+</body>
+</html>

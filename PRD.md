@@ -1,6 +1,6 @@
 # PRD: Hauptling agent delegator
 
-Status: design agreed 2026-11-20 (grill-me interview). Phases 1 and 2 done (decisions under Phases); phase 3 (GPU runner and lease) built and verified on the RTX 2070 SUPER 2026-11-24; phase 4a (dashboard) decisions settled 2026-11-24, in progress. Living copy: https://claude.ai/artifact/YbwvdtdzM8JuvEagKG1Xh4
+Status: design agreed 2026-11-20 (grill-me interview). Phases 1 and 2 done (decisions under Phases); phase 3 (GPU runner and lease) built and verified on the RTX 2070 SUPER 2026-11-24; phase 4a (dashboard) built 2026-11-24; 4b (usage, web terminal, vendors panel) not started. Living copy: https://claude.ai/artifact/YbwvdtdzM8JuvEagKG1Xh4
 
 Hauptling delegates coding tasks to Claude, Codex and agy (Antigravity CLI) agents running in disposable containers, across any repo.
 
