@@ -18,6 +18,7 @@ All four PRD phases, the sign-in lock, API keys, per-vendor usage, the egress-pr
 - A worker on an API key: Claude's TUI should show API billing; for agy, whether `GEMINI_API_KEY` or its OAuth sign-in wins is unknown.
 - API budget (branch `api-budget`, on `codegraph`; PRD "API keys"): claude key has a $100/month budget set. Unit-tested only; needs a broker restart, then a real spawn should say `, api`, and the header an "API $x/$100" chip. Whether Claude's reported `total_cost_usd` matches the console bill is unchecked.
 - Superseded gate kill (`killTestJob` on a running gate): unit-tested only; code is baked into nothing (broker-side) but needs `hauptling broker stop` to go live.
+- Per-delegator `gate`/`automerge` (PRD "Merge gate"): unit-tested only; needs `hauptling broker stop` (broker-side) to go live. Dashboard buttons unseen in a browser. Local repos with auto-merge on still stop at `[gate-passed]` (manual `hauptling merge`), as before.
 - GPU `pause --now`, the VRAM wait and `gateGpu` on the real GPU (unit-tested only).
 
 ## Open

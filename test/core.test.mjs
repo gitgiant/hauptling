@@ -6,6 +6,8 @@ import * as keyStore from '../src/keys.mjs';
 import { loadModels } from '../src/models.mjs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { mkdtempSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
 
 /** Fake worker host: records commands, answers git queries from a tiny model. */
 function fakeHost() {
@@ -536,4 +538,82 @@ test('CPU jobs: up to testConcurrency at once, one per repo, FIFO; Run now start
   for (const run of r.runs.slice(1)) run.done();
   await settle();
   assert.deepEqual([x2, y1, z1].map(st), ['done', 'done', 'done']);
+});
+
+test('delegator merge settings: default gated; gate off merges at once; toggling off cancels a queued gate; auto-merge off stops at [ready]', async () => {
+  const kinds = (db) => db.prepare('SELECT kind FROM events ORDER BY id').all().map(e => e.kind);
+  const spawnReport = async (ctx, d, head) => {
+    const { db, core, host } = ctx;
+    const { id } = await core.call('spawn', { brief: 'task', vendor: 'claude', mode: 'cheapest', delegator: d });
+    await settle();
+    const who = core.authenticate(db.prepare('SELECT token FROM agents WHERE id = ?').get(id).token, 'ADMIN');
+    host.state.head = head;
+    await core.call('report', { text: 'done' }, who); await settle();
+    return id;
+  };
+  const state = (db, id) => db.prepare('SELECT state FROM agents WHERE id = ?').get(id).state;
+  const gateJobs = (db) => db.prepare("SELECT state FROM tests WHERE purpose = 'gate'").all().map(t => t.state);
+
+  // Default stays gated.
+  let ctx = setup();
+  const { id: dd } = await ctx.core.call('delegator.start', { repo: 'gitgiant/demo' });
+  assert.deepEqual({ ...ctx.db.prepare('SELECT gate, automerge FROM delegators WHERE id = ?').get(dd) }, { gate: 1, automerge: 1 });
+  await spawnReport(ctx, dd, 'aaaa111');
+  assert.deepEqual(gateJobs(ctx.db), ['queued']);
+  assert.equal(ctx.gh.log.filter(l => l[0] === 'merge').length, 0);
+
+  // Gate off at start: the report merges, no test job, no gate-* events.
+  ctx = setup();
+  const { id: d1 } = await ctx.core.call('delegator.start', { repo: 'gitgiant/demo', gate: false });
+  const a1 = await spawnReport(ctx, d1, 'aaaa111');
+  assert.deepEqual(gateJobs(ctx.db), []);
+  assert.deepEqual(ctx.gh.log.filter(l => l[0] === 'merge'), [['merge', 5]]);
+  assert.equal(state(ctx.db, a1), 'merged');
+  assert.deepEqual(kinds(ctx.db), ['report', 'merged']);
+
+  // Toggling off cancels the queued gate and merges.
+  ctx = setup();
+  const { id: d2 } = await ctx.core.call('delegator.start', { repo: 'gitgiant/demo' });
+  const a2 = await spawnReport(ctx, d2, 'aaaa111');
+  assert.deepEqual(gateJobs(ctx.db), ['queued']);
+  assert.deepEqual(await ctx.core.call('delegator.set', { delegator: d2, gate: false }), { delegator: d2, gate: false, automerge: true });
+  assert.deepEqual(gateJobs(ctx.db), ['done']);
+  assert.equal(JSON.parse(ctx.db.prepare("SELECT report FROM tests WHERE purpose = 'gate'").get().report).status, 'cancelled');
+  assert.deepEqual(ctx.gh.log.filter(l => l[0] === 'merge'), [['merge', 5]]);
+  assert.equal(state(ctx.db, a2), 'merged');
+  assert.deepEqual(kinds(ctx.db), ['report', 'merged']);
+  // Turning it back on only affects later reports.
+  await ctx.core.call('delegator.set', { delegator: d2, gate: true });
+  assert.equal(ctx.db.prepare('SELECT gate FROM delegators WHERE id = ?').get(d2).gate, 1);
+
+  // Local repo, gate off: merges like `hauptling merge`.
+  ctx = setup();
+  ctx.host.hostGit = async (repo, args) => (args[0] === 'status' ? '' : 'main');
+  const { id: d3 } = await ctx.core.call('delegator.start', { repo: '/tmp/demo', gate: false });
+  const a3 = await spawnReport(ctx, d3, 'aaaa111');
+  assert.equal(state(ctx.db, a3), 'merged');
+  assert.deepEqual(gateJobs(ctx.db), []);
+
+  // Auto-merge off: [ready], no merge, then a manual merge.
+  ctx = setup();
+  const { id: d4 } = await ctx.core.call('delegator.start', { repo: 'gitgiant/demo', gate: false, automerge: false });
+  const a4 = await spawnReport(ctx, d4, 'aaaa111');
+  assert.equal(state(ctx.db, a4), 'done');
+  assert.deepEqual(ctx.gh.log.filter(l => l[0] === 'merge'), []);
+  assert.deepEqual(kinds(ctx.db), ['report', 'ready']);
+  await ctx.core.call('merge', { agent: a4 });
+  assert.deepEqual(ctx.gh.log.filter(l => l[0] === 'merge'), [['merge', 5]]);
+  assert.equal(state(ctx.db, a4), 'merged');
+});
+
+test('migration: a delegators table from before the merge settings gains gate and automerge (default on)', () => {
+  const path = join(mkdtempSync(join(tmpdir(), 'hl-mig-')), 'old.db');
+  const old = new DatabaseSync(path);
+  old.exec(`CREATE TABLE delegators (id TEXT PRIMARY KEY, cli TEXT, repo TEXT, max_agents INTEGER NOT NULL DEFAULT 3,
+    handoff TEXT, handoff_at TEXT, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL);
+    INSERT INTO delegators (id, created_at) VALUES ('d_old', 'x');`);
+  old.close();
+  const db = openDb(path);
+  assert.deepEqual({ ...db.prepare('SELECT gate, automerge FROM delegators WHERE id = ?').get('d_old') }, { gate: 1, automerge: 1 });
+  db.close();
 });

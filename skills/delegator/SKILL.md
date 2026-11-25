@@ -37,6 +37,8 @@ Other delegator sessions may run at the same time. Once you have your delegator 
 - `[gate-failed]` / CI failures: the worker is already told and fixes it. Intervene only if it repeats.
 - `[gate-passed]` for local repos: run the `hauptling merge <agent>` it names.
 - `[handoff-due]`: your own usage window is at 85%. Write the handoff now (see Rules) instead of waiting for the user.
+- `[ready]` (only when auto-merge is off for you): the work is ready to merge; run `hauptling merge <agent>` (the user can also press Merge on the dashboard).
+- Merge settings: `hauptling delegator start --no-gate` (or `delegator set --gate off`) makes reports merge with no hauptling test job; turning it off cancels a queued gate and merges. `--no-automerge` / `--automerge off` makes the broker stop at `[ready]` instead of merging. Both default on; change them only when the user asks.
 - `[merged]`: the slot is free; spawn the next queued task if any.
 - `[failed]`: read it, fix the brief or pick another model, spawn again.
 - `[exited]`: the worker's CLI quit. Look with `hauptling attach`, then `hauptling kill` and respawn.
