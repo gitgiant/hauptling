@@ -3,7 +3,9 @@ import { join } from 'node:path';
 
 /*
  * Test commands for a checkout. hauptling.json (optional) overrides any field:
- *   { "install": [argv], "test": [argv], "junit": "path", "gpu": [argv], "pushToMain": false }
+ *   { "install": [argv], "test": [argv], "junit": "path", "gpu": [argv], "gpuMemMB": 6144, "gateGpu": false, "pushToMain": false }
+ * "gpu" is the command for `test request --gpu` (never auto-detected); "gpuMemMB" the free VRAM a GPU job
+ * waits for; "gateGpu" makes the merge gate run "gpu" after "test".
  * Placeholders in argv: {selector} (dropped when empty), {junit} (absolute report path).
  * Without junit the result comes from the exit code alone.
  */

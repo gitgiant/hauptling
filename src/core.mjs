@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { kvGet, kvSet, tx } from './db.mjs';
+import { kvDel, kvGet, kvSet, tx } from './db.mjs';
 import * as mail from './mail.mjs';
 import { findModel, launchArgv, loadModels, nextVendor, pick } from './models.mjs';
 import { canInject } from './vendors.mjs';
@@ -86,7 +86,7 @@ ${common}`;
 ---
 Hauptling worker notes (you are ${a.id}, branch ${a.branch}, base ${a.base}):
 - Work only in this clone. Commit your work on ${a.branch} if you can; anything left uncommitted is committed for you by \`hauptling report\` and \`hauptling test request\`. Do not push (hauptling pushes for you).
-- Write and fix your own tests. Run them with your usual commands; \`hauptling test request --selector "<tests>"\` then \`hauptling test wait <id>\` runs them on a clean checkout of your HEAD.${a.start_from ? `
+- Write and fix your own tests. Run them with your usual commands; \`hauptling test request --selector "<tests>"\` then \`hauptling test wait <id>\` runs them on a clean checkout of your HEAD. GPU tests: add \`--gpu\` (runs the repo's hauptling.json "gpu" command on the shared GPU, one job at a time; it may queue for a while). You have no GPU yourself.${a.start_from ? `
 - Spec tests from a test writer are already committed on your branch (files/suites named "spec"). Make them pass; do not weaken or delete them. If one contradicts the spec, \`hauptling ask\` the user.` : ''}
 ${common} Keep the session open afterwards: CI failures and review notes arrive as messages.`;
   }
@@ -327,12 +327,11 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
 
   // ---------- tests ----------
   function requestTest({ agent, requester, sha, branch, selector = '', gpu = false, artifacts = [], timeout_s = 1800, purpose = 'agent', repo }) {
-    if (gpu) throw new Error('GPU test jobs arrive in phase 3 (host GPU runner)');
     const a = agent ? agentRow(agent) : null;
     const round = a && purpose === 'agent' ? db.prepare("SELECT COUNT(*) n FROM tests WHERE agent = ? AND purpose = 'agent'").get(a.id).n + 1 : 1;
     const id = `t_${hex(4)}`;
     db.prepare(`INSERT INTO tests (id, agent, requester, repo, sha, branch, selector, gpu, artifacts, timeout_s, round, purpose, state, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, 'queued', ?)`).run(id, a?.id ?? null, requester, repo || a.repo, sha, branch || a?.branch || null, selector, JSON.stringify(artifacts), Number(timeout_s), round, purpose, now());
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)`).run(id, a?.id ?? null, requester, repo || a.repo, sha, branch || a?.branch || null, selector, gpu ? 1 : 0, JSON.stringify(artifacts), Number(timeout_s), round, purpose, now());
     if (a && round >= 4) {
       const q = `${a.id} is on test round ${round}. Keep iterating?`;
       update(a.id, { state: 'blocked' });
@@ -344,41 +343,118 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     return { id, round };
   }
 
-  /** Runs queued (non-GPU) test jobs one at a time, each in a fresh container. External runners (GPU, phase 3) use test.claim. */
-  let pumping = false;
-  async function pump() {
-    if (pumping || !host.runTestJob) return;
-    pumping = true;
+  const errorReport = (job, notes) => ({ id: job.id, sha: job.sha, status: 'error', passed: 0, failed: 0, skipped: 0, failures: [], duration_s: 0, notes: String(notes).slice(0, 300) });
+
+  /**
+   * Two queues, one job each at a time, each job in a fresh container: CPU jobs and GPU jobs
+   * (`--gpus all`). External runners use test.claim (CPU queue only).
+   */
+  const pumping = { cpu: false, gpu: false };
+  async function pump() { await Promise.all([pumpQueue(false), pumpQueue(true)]); }
+  async function pumpQueue(gpu) {
+    const q = gpu ? 'gpu' : 'cpu';
+    if (pumping[q] || !host.runTestJob) return;
+    pumping[q] = true;
     try {
       for (;;) {
-        const { job } = await claim({ wait: 0 });
+        if (gpu && !(await gpuReady())) break;
+        const { job } = await claim({ wait: 0, gpu });
         if (!job) break;
         let report;
         try {
           const env = job.url.startsWith('https://github.com/') ? await github.gitAuthEnv() : {};
           report = await host.runTestJob(job, { env });
-        } catch (e) {
-          report = { id: job.id, sha: job.sha, status: 'error', passed: 0, failed: 0, skipped: 0, failures: [], duration_s: 0, notes: e.message.slice(0, 300) };
-        }
+        } catch (e) { report = errorReport(job, e.message); }
+        const row = db.prepare('SELECT state, claimed_at FROM tests WHERE id = ?').get(job.id);
+        if (row.state !== 'running' || row.claimed_at !== job.claimed_at) continue; // killed by `gpu pause --now` and requeued
         await testReport({ id: job.id, report }).catch(e => log(`test report ${job.id}: ${e.message}`));
       }
-    } finally { pumping = false; }
+    } finally { pumping[q] = false; }
+  }
+
+  // ---------- GPU queue ----------
+  const gpuCfg = () => ({ memMB: 6144, waitMinutes: 30, ...host.gpuConfig?.() });
+  const nextGpuJob = () => db.prepare("SELECT * FROM tests WHERE state = 'queued' AND gpu = 1 ORDER BY created_at LIMIT 1").get();
+
+  /**
+   * May the next GPU job start? Not while paused. Otherwise it needs enough free VRAM (your desktop
+   * shares the GPU): short → wait (rechecked each minute by poll); waiting past `waitMinutes` →
+   * `error: GPU busy`. Waiting doesn't count toward the job's timeout_s (that starts in the container).
+   */
+  async function gpuReady(at = Date.now()) {
+    if (kvGet(db, 'gpu:paused')) return false;
+    for (;;) {
+      const t = nextGpuJob();
+      if (!t) return true;
+      const need = Number(kvGet(db, `gpu:need:${t.id}`) || gpuCfg().memMB);
+      const free = await host.gpuFreeMB?.().catch(() => null);
+      if (free == null || free >= need) { kvDel(db, `gpu:wait:${t.id}`); return true; }
+      const since = Number(kvGet(db, `gpu:wait:${t.id}`) || 0);
+      if (!since) { kvSet(db, `gpu:wait:${t.id}`, at); log(`gpu busy: ${free} MiB free, ${t.id} needs ${need}`); return false; }
+      if (at - since < gpuCfg().waitMinutes * 60e3) return false;
+      kvDel(db, `gpu:wait:${t.id}`);
+      db.prepare("UPDATE tests SET state = 'running', claimed_at = ? WHERE id = ?").run(now(), t.id);
+      await testReport({ id: t.id, report: errorReport(t, `GPU busy: ${free} MiB free, needs ${need} MiB, waited ${gpuCfg().waitMinutes} min`) }).catch(e => log(`test report ${t.id}: ${e.message}`));
+    }
+  }
+
+  /** `gpu pause [--now]`: hold the GPU queue. --now kills the running job and requeues it (same row: no extra round). */
+  async function gpuPause({ now: hard = false } = {}) {
+    kvSet(db, 'gpu:paused', 1);
+    const running = db.prepare("SELECT id FROM tests WHERE state = 'running' AND gpu = 1").all();
+    if (!hard) return { paused: true, running: running.map(r => r.id) };
+    for (const { id } of running) {
+      db.prepare("UPDATE tests SET state = 'queued', claimed_at = NULL WHERE id = ?").run(id);
+      await host.killTestJob?.(id).catch(e => log(`kill test ${id}: ${e.message}`));
+    }
+    return { paused: true, requeued: running.map(r => r.id) };
+  }
+  function gpuResume() { kvDel(db, 'gpu:paused'); pump().catch(e => log(`test pump: ${e.message}`)); return { paused: false }; }
+  async function gpuStatus() {
+    const c = gpuCfg();
+    const running = db.prepare("SELECT id, agent, purpose, claimed_at, timeout_s FROM tests WHERE state = 'running' AND gpu = 1").all();
+    const queued = db.prepare("SELECT id, agent, purpose, created_at FROM tests WHERE state = 'queued' AND gpu = 1 ORDER BY created_at").all()
+      .map(t => ({ ...t, waiting_since: kvGet(db, `gpu:wait:${t.id}`) ? new Date(Number(kvGet(db, `gpu:wait:${t.id}`))).toISOString() : null }));
+    return { available: Boolean(await host.gpuAvailable?.()), paused: Boolean(kvGet(db, 'gpu:paused')), freeMB: await host.gpuFreeMB?.().catch(() => null) ?? null, needMB: c.memMB, running, queued };
+  }
+
+  /** Checks a GPU request before it is queued: a GPU on this host and a "gpu" command in hauptling.json. */
+  async function checkGpu(cfg) {
+    if (!(await host.gpuAvailable?.())) throw new Error('no GPU on this host (GPU tests disabled; see `hauptling doctor`)');
+    if (cfg && !Array.isArray(cfg.gpu)) throw new Error('--gpu needs a "gpu": [argv] command in hauptling.json (same {selector} and {junit} placeholders as "test")');
+  }
+  function gpuRequest(args, cfg) {
+    const r = requestTest({ ...args, gpu: true });
+    if (cfg?.gpuMemMB) kvSet(db, `gpu:need:${r.id}`, Number(cfg.gpuMemMB));
+    return r;
+  }
+
+  /** Broker start: test containers from before the restart are gone; their jobs rerun from scratch, first in line. */
+  async function recover() {
+    await host.removeTestContainers?.().catch(e => log(`remove test containers: ${e.message}`));
+    const r = db.prepare("UPDATE tests SET state = 'queued', claimed_at = NULL WHERE state = 'running'").run();
+    if (r.changes) log(`requeued ${r.changes} test job(s) after restart`);
+    return { requeued: r.changes };
   }
 
   async function agentTestRequest(who, args) {
     const a = agentRow(who.agent);
+    const cfg = args.gpu ? await repoConfig(a) : null;
+    if (args.gpu) await checkGpu(cfg);
     await commitFor(a, `wip: ${a.title}`);
     const head = await pushBranch(a);
     if (args.sha && !head.startsWith(args.sha)) throw new Error(`--sha ${args.sha} is not your HEAD (${head})`);
-    return requestTest({ ...args, agent: a.id, requester: a.id, sha: head });
+    const req = { ...args, agent: a.id, requester: a.id, sha: head };
+    return args.gpu ? gpuRequest(req, cfg) : requestTest(req);
   }
 
-  async function claim({ wait = 25 } = {}) {
-    kvSet(db, 'runner_seen', Date.now());
+  async function claim({ wait = 25, gpu = false } = {}) {
+    if (!gpu) kvSet(db, 'runner_seen', Date.now());
     const grab = () => tx(db, () => {
-      const t = db.prepare("SELECT * FROM tests WHERE state = 'queued' AND gpu = 0 ORDER BY created_at LIMIT 1").get();
+      const t = db.prepare("SELECT * FROM tests WHERE state = 'queued' AND gpu = ? ORDER BY created_at LIMIT 1").get(gpu ? 1 : 0);
       if (!t) return null;
-      db.prepare("UPDATE tests SET state = 'running', claimed_at = ? WHERE id = ?").run(now(), t.id);
+      t.claimed_at = now();
+      db.prepare("UPDATE tests SET state = 'running', claimed_at = ? WHERE id = ?").run(t.claimed_at, t.id);
       return t;
     });
     let t = grab();
@@ -388,7 +464,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     }
     if (!t) return { job: null };
     const a = t.agent ? agentRow(t.agent) : null;
-    return { job: { id: t.id, url: cloneUrl(a || { repo: t.repo }), sha: t.sha, selector: t.selector, timeout_s: t.timeout_s, artifacts: JSON.parse(t.artifacts) } };
+    return { job: { id: t.id, url: cloneUrl(a || { repo: t.repo }), sha: t.sha, selector: t.selector, timeout_s: t.timeout_s, artifacts: JSON.parse(t.artifacts), gpu: Boolean(t.gpu), claimed_at: t.claimed_at } };
   }
 
   async function testReport({ id, report }) {
@@ -399,6 +475,8 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     if (!['pass', 'fail', 'error', 'timeout'].includes(report.status)) throw new Error('Bad status');
     report = { ...report, id, notes: report.notes?.slice(0, 300), failures: (report.failures || []).slice(0, 20).map(f => ({ ...f, message: String(f.message || '').slice(0, 300), excerpt: String(f.excerpt || '').split('\n').slice(0, 20).join('\n') })) };
     db.prepare("UPDATE tests SET state = 'done', report = ?, done_at = ? WHERE id = ?").run(JSON.stringify(report), now(), id);
+    kvDel(db, `gpu:need:${id}`);
+    kvDel(db, `gpu:wait:${id}`);
     bus.emit(`test:${id}`);
     if (t.purpose === 'gate' && t.agent) await gateResult(agentRow(t.agent), t, report);
     return { ok: true };
@@ -412,6 +490,16 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
       emit(a.delegator, a.id, 'gate-failed', `${a.id} gate tests ${summary}`);
       await sendMail('hauptling', a.id, `Gate test job ${t.id} on ${t.sha.slice(0, 8)} ${summary}. \`hauptling test get ${t.id}\` for details. Fix, commit, then report again.`.slice(0, MAIL_MAX));
       return;
+    }
+    if (!t.gpu) {
+      // Per-repo opt-in ("gateGpu": true): the GPU command must pass too before merging.
+      const cfg = await repoConfig(a);
+      if (cfg.gateGpu && Array.isArray(cfg.gpu) && await host.gpuAvailable?.()) {
+        gpuRequest({ agent: a.id, requester: 'hauptling', sha: t.sha, purpose: 'gate' }, cfg);
+        mail.setStatus(db, a.id, 'gate: waiting for GPU');
+        emit(a.delegator, a.id, 'gate-cpu-passed', `${a.id} gate tests ${summary}; GPU gate queued`);
+        return;
+      }
     }
     const slug = githubSlug(a.repo);
     if (a.gate === 'push') {
@@ -544,6 +632,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
 
   /** Every minute: PR state for done agents (merged → free the slot; CI failure → wake the worker). */
   async function poll() {
+    pump().catch(e => log(`test pump: ${e.message}`)); // also rechecks a GPU job held for VRAM
     await watch();
     for (const a of db.prepare("SELECT * FROM agents WHERE state IN ('done','working') AND pr_number IS NOT NULL").all()) {
       try {
@@ -603,9 +692,15 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     'mail.status': ({ identity, text }, who) => mail.setStatus(db, who.role === 'agent' ? who.agent : identity, text),
     'mail.peers': ({ all }) => mail.peers(db, all),
     'mail.prune': ({ hours = 12, force = false }) => mail.prune(db, Number(hours), Date.now(), force),
-    'test.request': (a, who) => (who.role === 'agent' ? agentTestRequest(who, a) : requestTest({ requester: 'user', ...a })),
+    'test.request': async (a, who) => {
+      if (who.role === 'agent') return agentTestRequest(who, a);
+      if (!a.gpu) return requestTest({ requester: 'user', ...a });
+      await checkGpu(null);
+      return gpuRequest({ requester: 'user', ...a }, null);
+    },
     'test.wait': testWait, 'test.get': testGet,
     'test.claim': claim, 'test.report': testReport, 'test.heartbeat': () => kvSet(db, 'runner_seen', Date.now()),
+    'gpu.pause': gpuPause, 'gpu.resume': gpuResume, 'gpu.status': gpuStatus,
     'slots.get': () => slots(),
     'slots.set': ({ slots: s }) => { kvSet(db, 'slots', JSON.stringify(s)); return s; },
   };
@@ -627,5 +722,5 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     return null;
   }
 
-  return { call, authenticate, poll, watch, startQueued, bus, askForPage, answer, pump };
+  return { call, authenticate, poll, watch, startQueued, bus, askForPage, answer, pump, recover, gpuReady };
 }

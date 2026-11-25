@@ -8,7 +8,7 @@ import { BROKER_PORT, VENDORS, home } from './util.mjs';
 import { call, ensureBroker } from './client.mjs';
 import { readBrokerFile } from './brokerfile.mjs';
 import { platform } from './platform/index.mjs';
-import { NET, PROXY, PROXY_URL, WORKER_BROKER_URL, baseImageTag, docker, dockerReady, ensureBaseImage, ensureNetwork, slotDir } from './docker.mjs';
+import { NET, PROXY, PROXY_URL, WORKER_BROKER_URL, baseImageTag, docker, dockerReady, ensureBaseImage, ensureNetwork, slotDir, config, hasGpu, gpuAvailable } from './docker.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const step = (m) => console.log(`\n▶ ${m}`);
@@ -44,8 +44,8 @@ export async function setup({ slots = 3, vendors = VENDORS, host = true, login: 
   gitIdentity();
 
   if (host) {
-    step('Host (sudo): git, gh, Docker Engine, hauptling on PATH');
-    const r = spawnSync('sudo', ['bash', join(ROOT, 'scripts', 'setup-host.sh'), ROOT, userInfo().username, home()], { stdio: 'inherit' });
+    step('Host (sudo): git, gh, Docker Engine, NVIDIA Container Toolkit (if a GPU), hauptling on PATH');
+    const r = spawnSync('sudo', ['bash', join(ROOT, 'scripts', 'setup-host.sh'), ROOT, userInfo().username, home(), config().gpu === false ? 'nogpu' : 'gpu'], { stdio: 'inherit' });
     if (r.status !== 0) throw new Error('Host setup failed (see output above)');
   }
 
@@ -171,6 +171,13 @@ export async function doctor({ slots, vendors = VENDORS } = {}) {
     check(/broker 200/.test(out), 'containers reach the broker (via egress relay)', `containers cannot reach the broker: ${out.split('\n')[0]}`);
     check(/allowed [1-5]\d\d/.test(out), 'egress allows vendor APIs', `egress to api.anthropic.com failed: ${out}`);
     check(/blocked 000/.test(out) || /blocked 403/.test(out), 'egress blocks other hosts', `example.com was reachable: ${out}`);
+  }
+  if (config().gpu === false) ok('GPU: disabled in ~/.hauptling/config.json');
+  else if (!hasGpu()) ok('GPU: none (GPU tests disabled)');
+  else if (!(await gpuAvailable())) { bad('GPU found but Docker has no NVIDIA runtime: rerun setup (installs the NVIDIA Container Toolkit)'); all = false; }
+  else if (hasImage) {
+    const smi = await docker(['run', '--rm', '--gpus', 'all', baseImageTag(), 'nvidia-smi', '-L'], { timeout: 90e3 }).then(r => r.stdout.trim(), e => `ERR ${e.message}`);
+    check(/^GPU \d/m.test(smi), `GPU in containers: ${smi.split('\n')[0].replace(/ \(UUID.*\)/, '')}`, `GPU container check failed: ${smi.slice(0, 200)}`);
   }
   for (const l of logins(names, vendors)) check(l.ok, `${l.slot} ${l.vendor} signed in`, `${l.slot} ${l.vendor} not signed in: \`hauptling login ${l.slot} ${l.vendor}\``);
   return report(all);

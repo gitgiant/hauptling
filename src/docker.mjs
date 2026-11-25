@@ -20,6 +20,7 @@ export const PROXY = 'hauptling-egress';
 export const PROXY_URL = `http://${PROXY}:3128`;
 export const WORKER_BROKER_URL = `http://${PROXY}:${BROKER_PORT}`;
 const uid = () => `${process.getuid()}:${process.getgid()}`;
+const testContainer = (id) => `hauptling-test-${String(id).replace(/[^a-zA-Z0-9_-]/g, '-')}`;
 export const container = (id) => `hl-${String(id).replace(/[^a-zA-Z0-9_-]/g, '-')}`;
 
 /** Whether this process can use the Docker socket directly (else go through `sg docker`). */
@@ -46,7 +47,29 @@ export function docker(args, { input, timeout = 120e3 } = {}) {
 export function config() {
   const p = join(home(), 'config.json');
   const c = existsSync(p) ? JSON.parse(readFileSync(p, 'utf8')) : {};
-  return { memory: '2560m', cpus: 3, ...c };
+  return { memory: '2560m', cpus: 3, gpu: true, gpuMemory: '6g', gpuCpus: 4, gpuMemMB: 6144, gpuWaitMinutes: 30, ...c };
+}
+
+// ---------- GPU (phase 3) ----------
+/** nvidia-smi on PATH, or WSL's copy (the Windows driver exposes it there). */
+const nvidiaSmi = () => ['nvidia-smi', '/usr/lib/wsl/lib/nvidia-smi'].find(b => { try { execFileSync(b, ['-L'], { stdio: 'ignore', timeout: 15e3 }); return true; } catch { return false; } }) || null;
+export const hasGpu = () => Boolean(nvidiaSmi());
+
+/** Free VRAM in MiB on the first GPU (your desktop shares it), or null when unknown. */
+export function gpuFreeMB() {
+  const bin = nvidiaSmi();
+  if (!bin) return Promise.resolve(null);
+  return new Promise((resolve) => execFile(bin, ['--query-gpu=memory.free', '--format=csv,noheader,nounits'], { timeout: 15e3 }, (err, out) => {
+    const n = parseInt(String(out).split('\n')[0], 10);
+    resolve(err || Number.isNaN(n) ? null : n);
+  }));
+}
+
+/** GPU tests are on: not disabled in config, a GPU on the host, and Docker has the NVIDIA runtime. */
+export async function gpuAvailable() {
+  if (config().gpu === false || !hasGpu()) return false;
+  const r = await docker(['info', '--format', '{{json .Runtimes}}'], { timeout: 20e3 }).catch(() => null);
+  return Boolean(r && /nvidia/.test(r.stdout));
 }
 
 export const DEFAULT_ALLOW = `# Hosts worker containers may reach (one per line; "*.example.com" matches subdomains).
@@ -242,10 +265,11 @@ export function dockerHost({ log = () => {} } = {}) {
       await ensureNetwork({ log });
       const image = await imageFor(dir, { log }).catch(e => { throw e; });
       const c = config();
+      const limits = job.gpu ? ['--gpus', 'all', '--memory', String(c.gpuMemory), '--cpus', String(c.gpuCpus)] : ['--memory', String(c.memory), '--cpus', String(c.cpus)];
       try {
-        await docker(['run', '--rm', '--init', '--user', uid(), '--network', NET, '--memory', String(c.memory), '--cpus', String(c.cpus),
+        await docker(['run', '--rm', '--init', '--name', testContainer(job.id), '--user', uid(), '--network', NET, ...limits,
           '--label', `hauptling.test=${job.id}`, '-v', `${dir}:/work`, '-v', `${art}:/artifacts`, ...proxyEnv(),
-          image, 'hauptling', 'test-exec', '--selector', job.selector || '', '--timeout', String(job.timeout_s || 1800), '--artifacts', JSON.stringify(job.artifacts || [])],
+          image, 'hauptling', 'test-exec', ...(job.gpu ? ['--gpu'] : []), '--selector', job.selector || '', '--timeout', String(job.timeout_s || 1800), '--artifacts', JSON.stringify(job.artifacts || [])],
         { timeout: ((job.timeout_s || 1800) + 1200) * 1000 });
       } catch (e) { if (!existsSync(join(art, 'report.json'))) return fail(`test container failed: ${e.message}`); }
       const report = JSON.parse(readFileSync(join(art, 'report.json'), 'utf8'));
@@ -253,6 +277,16 @@ export function dockerHost({ log = () => {} } = {}) {
       const hostPath = (p) => (p && p.startsWith('/artifacts') ? join(art, p.slice('/artifacts'.length)) : p);
       return { ...report, id: job.id, sha: job.sha, log_path: hostPath(report.log_path), artifacts: (report.artifacts || []).map(hostPath) };
     },
+
+    /** `gpu pause --now`: stop a running test job's container (the broker has already requeued it). */
+    async killTestJob(id) { await docker(['rm', '-f', testContainer(id)]).catch(() => {}); },
+    /** Broker start: remove test containers left from before a restart. */
+    async removeTestContainers() {
+      const ids = (await docker(['ps', '-aq', '--filter', 'label=hauptling.test'])).stdout.split('\n').filter(Boolean);
+      if (ids.length) await docker(['rm', '-f', ...ids]);
+    },
+    gpuAvailable, gpuFreeMB,
+    gpuConfig: () => { const c = config(); return { memMB: c.gpuMemMB, waitMinutes: c.gpuWaitMinutes }; },
 
     /** argv for an interactive sign-in in a throwaway container with the slot's credentials. */
     loginArgv(slot, vendorArgv) {

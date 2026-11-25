@@ -97,6 +97,7 @@ export async function runBroker({ port = BROKER_PORT } = {}) {
   chmodSync(brokerFile(), 0o600);
   log(`broker ${process.pid} listening on 127.0.0.1${docker0 ? ` and ${docker0}` : ''}:${port}`);
   setInterval(() => core.poll().catch(e => log(`poll: ${e.message}`)), 60e3).unref();
+  await core.recover();
   core.pump().catch(e => log(`test pump: ${e.message}`));
   return { core, servers, db };
 }

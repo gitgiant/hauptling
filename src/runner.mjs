@@ -46,7 +46,7 @@ export function collectArtifacts(dir, globs, dest) {
 }
 
 /** Runs install + tests in `dir`; writes the log and artifacts into `out`. */
-export async function execTests(dir, { selector = '', timeout_s = 1800, artifacts = [] }, out) {
+export async function execTests(dir, { selector = '', timeout_s = 1800, artifacts = [], gpu = false }, out) {
   mkdirSync(out, { recursive: true });
   const log = join(out, 'test.log');
   const t0 = Date.now();
@@ -54,14 +54,15 @@ export async function execTests(dir, { selector = '', timeout_s = 1800, artifact
   const step = async (argv, timeout) => run(argv, { cwd: dir, timeout, log });
   const finish = (report) => ({ ...report, artifacts: artifacts.length ? collectArtifacts(dir, artifacts, out) : [] });
   const cfg = detect(dir);
-  if (!cfg.test) return { ...base, status: 'error', duration_s: 0, notes: 'No test command detected; add hauptling.json with "test": [argv]' };
+  const testArgv = gpu ? cfg.gpu : cfg.test;
+  if (!testArgv) return { ...base, status: 'error', duration_s: 0, notes: gpu ? 'No "gpu": [argv] command in hauptling.json' : 'No test command detected; add hauptling.json with "test": [argv]' };
   let r;
   if (cfg.install) {
     r = await step(cfg.install, 900);
     if (r.code !== 0) return { ...base, status: 'error', duration_s: (Date.now() - t0) / 1000, notes: `install failed (${cfg.install.join(' ')}): ${r.out.trim().split('\n').pop()}`.slice(0, 300) };
   }
   const junit = join(dir, '.hauptling-junit.xml');
-  const argv = fill(cfg.test, { selector: selector || cfg.defaultSelector || '', junit });
+  const argv = fill(testArgv, { selector: selector || cfg.defaultSelector || '', junit });
   r = await step(argv, timeout_s);
   const duration_s = (Date.now() - t0) / 1000;
   if (r.timedOut) return finish({ ...base, status: 'timeout', duration_s, notes: `timed out after ${timeout_s}s` });

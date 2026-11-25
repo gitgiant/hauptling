@@ -15,11 +15,12 @@ Delegator (host):
   status [--all]                           agents of the current delegator
   models                                   models.json table (suggest mode reasons over this)
   attach AGENT | reply AGENT <text> | kill AGENT | merge AGENT
-  test request --sha S [--selector X] [--timeout S] | test wait ID | test get ID | test report ID FILE
+  test request --sha S [--selector X] [--gpu] [--timeout S] | test wait ID | test get ID | test report ID FILE
+  gpu status | gpu pause [--now] | gpu resume   hold the GPU test queue (--now kills and requeues the running job)
 Worker (inside a slot; HAUPTLING_AGENT is set):
   report <≤300 chars>                      finish: hauptling pushes, opens the PR, gates the merge
   ask <question> --choice A [--choice B…]  ask the user (notification + answer page); end your turn after
-  test request [--selector X] [--timeout S]   then: test wait ID
+  test request [--selector X] [--gpu] [--timeout S]   then: test wait ID (--gpu runs hauptling.json "gpu")
 Mailbox (any session):
   mail send <you> <to|family> <text> | mail check <you> | mail status <you> <text>
   mail peers [--all] | mail need <you> <to> <path> [why] | mail give <you> <to> <path> | mail prune [hours] [--force]
@@ -38,7 +39,7 @@ const [cmd, ...rest] = process.argv.slice(2);
 
 async function main() {
   const { call } = await import('../src/client.mjs');
-  const args = parseArgs(rest, { repeat: ['choice', 'artifacts'], bool: ['test-writer', 'all', 'gpu', 'force', 'no-host', 'no-login'] });
+  const args = parseArgs(rest, { repeat: ['choice', 'artifacts'], bool: ['test-writer', 'all', 'gpu', 'force', 'no-host', 'no-login', 'now'] });
   const text = () => args._.join(' ');
   switch (cmd) {
     case undefined: case 'help': case '--help': case '-h': return out(USAGE);
@@ -129,6 +130,19 @@ async function main() {
       if (sub === 'report') return out(await call('test.report', { id, report: JSON.parse(readFileSync(file, 'utf8')) }));
       throw new Error('test request|wait|get|report');
     }
+    case 'gpu': {
+      const sub = args._[0];
+      if (sub === 'pause') { const r = await call('gpu.pause', { now: Boolean(args.now) }); return out(r.requeued ? `GPU queue paused; killed and requeued ${r.requeued.join(', ') || 'nothing'}` : `GPU queue paused${r.running.length ? `; ${r.running.join(', ')} still running (finishes first; --now kills and requeues it)` : ''}`); }
+      if (sub === 'resume') { await call('gpu.resume'); return out('GPU queue resumed'); }
+      if (sub === 'status' || !sub) {
+        const g = await call('gpu.status');
+        const lines = [`GPU: ${g.available ? 'available' : 'none/disabled'}${g.paused ? ', PAUSED' : ''}; free ${g.freeMB ?? '?'} MiB (jobs need ${g.needMB} MiB)`];
+        for (const t of g.running) lines.push(`running ${t.id} ${t.purpose} ${t.agent || ''} since ${t.claimed_at} (timeout ${t.timeout_s}s)`);
+        for (const t of g.queued) lines.push(`queued  ${t.id} ${t.purpose} ${t.agent || ''}${t.waiting_since ? ` (waiting for VRAM since ${t.waiting_since})` : ''}`);
+        return out(lines.join('\n'));
+      }
+      throw new Error('gpu pause [--now]|resume|status');
+    }
 
     // ----- mailbox -----
     case 'mail': {
@@ -155,7 +169,7 @@ async function main() {
     case 'test-exec': {
       // Inside a test container: /work is the checkout, /artifacts receives log, artifacts and report.json.
       const { execTests } = await import('../src/runner.mjs');
-      const report = await execTests('/work', { selector: args.selector || '', timeout_s: Number(args.timeout || 1800), artifacts: JSON.parse(args.artifacts || '[]') }, '/artifacts');
+      const report = await execTests('/work', { selector: args.selector || '', timeout_s: Number(args.timeout || 1800), artifacts: JSON.parse(args.artifacts || '[]'), gpu: Boolean(args.gpu) }, '/artifacts');
       writeFileSync('/artifacts/report.json', JSON.stringify(report));
       return;
     }

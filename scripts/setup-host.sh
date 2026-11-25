@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Host provisioning for `hauptling setup` (Ubuntu, or WSL on Windows). Run via sudo:
-#   setup-host.sh <hauptling checkout> <user who runs hauptling> <hauptling home>
-# Installs git, gh and Docker Engine, starts Docker at boot, puts hauptling on PATH, and migrates
+#   setup-host.sh <hauptling checkout> <user who runs hauptling> <hauptling home> [gpu|nogpu]
+# Installs git, gh and Docker Engine (plus the NVIDIA Container Toolkit when the host has an NVIDIA GPU), starts Docker at boot, puts hauptling on PATH, and migrates
 # phase 1 worker users (hl-w*, hl-test) into per-slot credential dirs. Idempotent.
 set -euo pipefail
 SRC="$(cd "${1:?hauptling checkout}" && pwd)"
 OWNER="${2:?user}"
 HL_HOME="${3:?hauptling home}"
+GPU="${4:-gpu}"
 export DEBIAN_FRONTEND=noninteractive
 . /etc/os-release
 arch=$(dpkg --print-architecture)
@@ -42,6 +43,25 @@ if grep -qi microsoft /proc/version && [ "$(ps -p 1 -o comm=)" != systemd ]; the
   service docker status >/dev/null 2>&1 || service docker start >/dev/null
 else
   systemctl enable --now docker >/dev/null
+fi
+
+# GPU test jobs (phase 3): containers get the GPU via the NVIDIA Container Toolkit (`docker run --gpus all`).
+smi=$(command -v nvidia-smi || { [ -x /usr/lib/wsl/lib/nvidia-smi ] && echo /usr/lib/wsl/lib/nvidia-smi; } || true)
+if [ "$GPU" = gpu ] && [ -n "$smi" ] && "$smi" -L >/dev/null 2>&1; then
+  if ! command -v nvidia-ctk >/dev/null; then
+    echo "installing NVIDIA Container Toolkit"
+    curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor --yes -o /etc/apt/keyrings/nvidia-container-toolkit.gpg
+    curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+      | sed 's#deb https://#deb [signed-by=/etc/apt/keyrings/nvidia-container-toolkit.gpg] https://#' > /etc/apt/sources.list.d/nvidia-container-toolkit.list
+    apt-get update -qq && apt-get install -y -qq nvidia-container-toolkit >/dev/null
+  fi
+  if ! docker info --format '{{json .Runtimes}}' 2>/dev/null | grep -q nvidia; then
+    nvidia-ctk runtime configure --runtime=docker >/dev/null
+    if command -v systemctl >/dev/null && [ "$(ps -p 1 -o comm=)" = systemd ]; then systemctl restart docker; else service docker restart >/dev/null; fi
+  fi
+  echo "GPU: $("$smi" -L | head -1)"
+else
+  echo "GPU: none or disabled (GPU tests off)"
 fi
 
 # hauptling on PATH: a link to this checkout, so edits apply at once (containers get their own copy in the image).

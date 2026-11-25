@@ -17,6 +17,7 @@ You think; the `hauptling` CLI does everything mechanical. All state lives in th
 
 - Split the goal into tasks that touch separate files or areas, so branches rarely conflict. At most 3 run at once (more are queued).
 - Write each task's brief to a file (scratch dir, not the target repo): goal, acceptance criteria, relevant files, constraints, how to test. Workers see only the brief.
+- GPU code: workers have no GPU; they run GPU tests with `hauptling test request --gpu`, which needs `"gpu": [argv]` in the repo's hauptling.json and a GPU on this host (`hauptling gpu status`). GPU jobs queue one at a time and wait while the user's desktop needs the VRAM or `hauptling gpu pause` is on. If there's no GPU, tell workers not to write tests that need one.
 - Pick the model. Default is suggest mode: read `hauptling models` and pass `--model`. Without `--vendor`, the vendor rotates claude → codex → agy. `--mode cheapest` or `--mode rule --difficulty easy|normal|hard` pick for you.
 - Add `--test-writer` only for settled areas with a spec (protocol, save format, invariants). The user may override. A test writer (cheapest model of the next vendor unless `--test-writer-vendor/--test-writer-model`) writes spec tests on the task branch first; the implementer then starts from them. You get `[tests-ready]` in between.
 - `hauptling spawn --brief <file> [--vendor V] --model M [--test-writer]`

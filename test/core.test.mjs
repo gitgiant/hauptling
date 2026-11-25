@@ -247,3 +247,122 @@ test('test writer: runs first on the task branch; implementer starts from its co
   const kinds = (await core.call('wait', { timeout: 1 })).events.map(e => e.kind);
   assert.deepEqual(kinds, ['tests-ready']);
 });
+
+/** A worker on gitgiant/demo with hauptling.json `cfg`, and a fake GPU host that runs jobs on demand. */
+async function gpuSetup(cfg, { free = 8000, available = true } = {}) {
+  const env = setup();
+  const { db, core, host } = env;
+  host.gpu = { available, free, runs: [], killed: [] };
+  host.gpuAvailable = async () => host.gpu.available;
+  host.gpuFreeMB = async () => host.gpu.free;
+  host.gpuConfig = () => ({ memMB: 6144, waitMinutes: 30 });
+  host.killTestJob = async (id) => { host.gpu.killed.push(id); host.gpu.runs.find(r => r.job.id === id)?.done(null); };
+  // Jobs block until the test calls done(report); a killed job resolves null (→ error report, discarded).
+  host.runTestJob = (job) => new Promise(resolve => host.gpu.runs.push({ job, done: (r) => resolve(r || { id: job.id, sha: job.sha, status: 'error', passed: 0, failed: 0, skipped: 0, failures: [], duration_s: 0, notes: 'killed' }) }));
+  const pass = (job) => ({ id: job.id, sha: job.sha, status: 'pass', passed: 1, failed: 0, skipped: 0, failures: [], duration_s: 1 });
+  await core.call('delegator.start', { repo: 'gitgiant/demo' });
+  const { id } = await core.call('spawn', { brief: 'task', vendor: 'claude', mode: 'cheapest' });
+  await settle();
+  host.state.config = cfg;
+  const who = core.authenticate(db.prepare('SELECT token FROM agents WHERE id = ?').get(id).token, 'ADMIN');
+  return { ...env, id, who, pass, state: (t) => db.prepare('SELECT state, gpu FROM tests WHERE id = ?').get(t) };
+}
+
+test('gpu: rejected without a GPU or a "gpu" command; runs on its own queue beside the CPU queue', async () => {
+  let g = await gpuSetup({ gpu: ['pytest', '-m', 'gpu', '{selector}'] }, { available: false });
+  await assert.rejects(g.core.call('test.request', { gpu: true }, g.who), /no GPU on this host/);
+  g = await gpuSetup({});
+  await assert.rejects(g.core.call('test.request', { gpu: true }, g.who), /"gpu": \[argv\]/);
+  g = await gpuSetup({ gpu: ['pytest', '-m', 'gpu'] });
+  const gpuJob = await g.core.call('test.request', { gpu: true }, g.who);
+  const cpuJob = await g.core.call('test.request', {}, g.who);
+  await settle();
+  assert.equal(g.host.gpu.runs.length, 2, 'one GPU and one CPU job run at the same time');
+  assert.deepEqual(g.host.gpu.runs.map(r => r.job.gpu).sort(), [false, true]);
+  const second = await g.core.call('test.request', { gpu: true }, g.who);
+  await settle();
+  assert.equal(g.state(second.id).state, 'queued', 'GPU jobs run one at a time');
+  g.host.gpu.runs.find(r => r.job.id === gpuJob.id).done(g.pass(g.host.gpu.runs.find(r => r.job.id === gpuJob.id).job));
+  await settle();
+  assert.equal(g.state(gpuJob.id).state, 'done');
+  assert.equal(g.state(second.id).state, 'running');
+  assert.equal(g.state(cpuJob.id).state, 'running');
+});
+
+test('gpu: held while VRAM is short; error after the wait limit; gpuMemMB overrides the need', async () => {
+  const g = await gpuSetup({ gpu: ['run-gpu'], gpuMemMB: 2000 }, { free: 1000 });
+  const t = await g.core.call('test.request', { gpu: true }, g.who);
+  await settle();
+  assert.equal(g.state(t.id).state, 'queued');
+  assert.equal(g.host.gpu.runs.length, 0);
+  assert.equal(await g.core.gpuReady(Date.now() + 29 * 60e3), false);
+  assert.equal(await g.core.gpuReady(Date.now() + 31 * 60e3), true);
+  const r = await g.core.call('test.get', { id: t.id });
+  assert.equal(r.report.status, 'error');
+  assert.match(r.report.notes, /GPU busy: 1000 MiB free, needs 2000 MiB/);
+  const t2 = await g.core.call('test.request', { gpu: true }, g.who);
+  g.host.gpu.free = 2500;
+  await g.core.poll();
+  await settle();
+  assert.equal(g.state(t2.id).state, 'running', '2000 MiB needed, 2500 free');
+});
+
+test('gpu pause: holds new jobs, lets the running one finish; --now kills and requeues it without a new round; resume', async () => {
+  const g = await gpuSetup({ gpu: ['run-gpu'] });
+  const a = await g.core.call('test.request', { gpu: true }, g.who);
+  await settle();
+  const b = await g.core.call('test.request', { gpu: true }, g.who);
+  const p = await g.core.call('gpu.pause');
+  assert.deepEqual(p.running, [a.id]);
+  g.host.gpu.runs[0].done(g.pass(g.host.gpu.runs[0].job));
+  await settle();
+  assert.equal(g.state(a.id).state, 'done');
+  assert.equal(g.state(b.id).state, 'queued', 'paused: next job waits');
+  await g.core.call('gpu.resume');
+  await settle();
+  assert.equal(g.state(b.id).state, 'running');
+  const c = await g.core.call('test.request', { gpu: true }, g.who);
+  const hard = await g.core.call('gpu.pause', { now: true });
+  assert.deepEqual(hard.requeued, [b.id]);
+  await settle();
+  assert.deepEqual(g.host.gpu.killed, [b.id]);
+  assert.equal(g.state(b.id).state, 'queued', 'killed job is requeued, its error report discarded');
+  assert.equal((await g.core.call('test.get', { id: b.id })).report, null);
+  const status = await g.core.call('gpu.status');
+  assert.equal(status.paused, true);
+  assert.deepEqual(status.queued.map(t => t.id), [b.id, c.id], 'requeued job is first in line');
+  await g.core.call('gpu.resume');
+  await settle();
+  assert.equal(g.state(b.id).state, 'running');
+  assert.equal(g.host.gpu.runs.at(-1).job.id, b.id);
+  assert.equal(g.db.prepare('SELECT COUNT(*) n FROM tests WHERE agent = ?').get(g.id).n, 3, 'no extra test round');
+});
+
+test('broker restart: running jobs are requeued and leftover test containers removed', async () => {
+  const { db, core, host } = setup();
+  let removed = 0;
+  host.removeTestContainers = async () => { removed++; };
+  const { id } = await core.call('test.request', { sha: 'abc', repo: 'gitgiant/demo' });
+  const runner = core.authenticate('RUN', 'ADMIN');
+  await core.call('test.claim', { wait: 0 }, runner);
+  assert.equal(db.prepare('SELECT state FROM tests WHERE id = ?').get(id).state, 'running');
+  assert.deepEqual(await core.recover(), { requeued: 1 });
+  assert.equal(removed, 1);
+  assert.equal(db.prepare('SELECT state FROM tests WHERE id = ?').get(id).state, 'queued');
+});
+
+test('gateGpu: CPU gate passes → GPU gate queued ("gate: waiting for GPU") → GPU pass merges', async () => {
+  const g = await gpuSetup({ pushToMain: true, gpu: ['run-gpu'], gateGpu: true });
+  await g.core.call('report', { text: 'done' }, g.who);
+  await settle();
+  const cpu = g.host.gpu.runs.find(r => !r.job.gpu);
+  cpu.done(g.pass(cpu.job));
+  await settle();
+  assert.equal(g.db.prepare('SELECT state FROM agents WHERE id = ?').get(g.id).state, 'done', 'not merged yet');
+  assert.equal(g.db.prepare('SELECT text FROM status WHERE identity = ?').get(g.id).text, 'gate: waiting for GPU');
+  const gpu = g.host.gpu.runs.find(r => r.job.gpu);
+  assert.ok(gpu, 'GPU gate job started');
+  gpu.done(g.pass(gpu.job));
+  await settle();
+  assert.equal(g.db.prepare('SELECT state FROM agents WHERE id = ?').get(g.id).state, 'merged');
+});

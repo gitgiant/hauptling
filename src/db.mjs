@@ -59,6 +59,7 @@ export function openDb(path) {
 }
 
 export const kvGet = (db, key) => db.prepare('SELECT value FROM kv WHERE key = ?').get(key)?.value ?? null;
+export const kvDel = (db, key) => db.prepare('DELETE FROM kv WHERE key = ?').run(key);
 export const kvSet = (db, key, value) => db.prepare('INSERT INTO kv (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value').run(key, String(value));
 
 export function tx(db, fn) {
