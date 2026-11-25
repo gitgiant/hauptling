@@ -9,9 +9,11 @@ You think; the `hauptling` CLI does everything mechanical. All state lives in th
 
 ## Start
 
-1. `hauptling resume` — if it shows an active delegator with agents or a handoff note, continue that one: read the handoff, then go to **Loop**.
+Other delegator sessions may run at the same time. Once you have your delegator id (`d_…`), pass `--delegator <id>` on **every** `spawn`, `wait`, `status`, `handoff` and `resume`; without it a command is refused when several delegators are active, and could act for another session.
+
+1. `hauptling resume` — if it shows an active delegator with agents or a handoff note, continue that one: read the handoff, note its id, then go to **Loop**. If it says several delegators are active, pick the one for the user's repo and run `hauptling resume --delegator <id>`; ask the user if it's unclear.
 2. Otherwise ask the user for the goal and the repo. For a new piece of work offer: an existing GitHub repo (`owner/name`), a new GitHub repo (create it with `gh repo create` after the user confirms the name and visibility), or local only (a path).
-3. `hauptling delegator start --repo <repo> --cli <claude|codex|agy>`.
+3. `hauptling delegator start --repo <repo> --cli <claude|codex|agy>` prints your id.
 
 ## Split and spawn
 
@@ -22,20 +24,21 @@ You think; the `hauptling` CLI does everything mechanical. All state lives in th
 - GPU code: workers have no GPU; they run GPU tests with `hauptling test request --gpu`, which needs `"gpu": [argv]` in the repo's hauptling.json and a GPU on this host (`hauptling gpu status`). GPU jobs queue one at a time and wait while the user's desktop needs the VRAM or `hauptling gpu pause` is on. If there's no GPU, tell workers not to write tests that need one.
 - Pick the model. Default is suggest mode: read `hauptling models` and pass `--model`. Without `--vendor`, the vendor rotates claude → codex → agy. `--mode cheapest` or `--mode rule --difficulty easy|normal|hard` pick for you.
 - Add `--test-writer` only for settled areas with a spec (protocol, save format, invariants). The user may override. A test writer (cheapest model of the next vendor unless `--test-writer-vendor/--test-writer-model`) writes spec tests on the task branch first; the implementer then starts from them. You get `[tests-ready]` in between.
-- `hauptling spawn --brief <file> [--vendor V] --model M [--test-writer]`
+- `hauptling spawn --delegator <id> --brief <file> [--vendor V] --model M [--test-writer]`
 
 ## Loop
 
-- `hauptling wait` blocks without using tokens and returns the next events. It returns after at most ~4.5 minutes with no events; just run it again.
+- `hauptling wait --delegator <id>` blocks without using tokens and returns the next events. It returns after at most ~4.5 minutes with no events; just run it again.
 - `[report]`: the worker is done (≤300 chars). Hauptling has pushed its branch, opened the PR and enabled auto-merge (or queued a gate test job when the repo has no required checks). Read the report; only look at the diff (`gh pr diff`) if the report raises doubt. If more work is needed, `hauptling reply <agent> "<instruction>"`.
 - `[gate-failed]` / CI failures: the worker is already told and fixes it. Intervene only if it repeats.
 - `[gate-passed]` for local repos: run the `hauptling merge <agent>` it names.
 - `[merged]`: the slot is free; spawn the next queued task if any.
 - `[failed]`: read it, fix the brief or pick another model, spawn again.
 - `[exited]`: the worker's CLI quit. Look with `hauptling attach`, then `hauptling kill` and respawn.
-- `hauptling status` shows every agent; blocked agents (questions, stuck permission prompts) go to the user directly, not you.
+- `hauptling status --delegator <id>` shows every agent; blocked agents (questions, stuck permission prompts) go to the user directly, not you.
 
 ## Rules
 
 - Never edit target repos yourself; workers do. Never put credentials in briefs or mail.
-- When the user says the usage window is nearly spent (≈90%), write a handoff: `hauptling handoff --file <note>` with the goal, what is done, what is running, what is next and any decisions made. Tell the user to start the next CLI and run `/delegator` (which resumes).
+- When the user says the usage window is nearly spent (≈90%), write a handoff: `hauptling handoff --delegator <id> --file <note>` with the goal, what is done, what is running, what is next and any decisions made. Tell the user to start the next CLI and run `/delegator` (which resumes), and give them your id.
+- When the whole goal is done and no agents are left, `hauptling delegator end --delegator <id>`.

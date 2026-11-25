@@ -20,6 +20,8 @@ import * as keyStore from './keys.mjs';
 
 const ACTIVE = ['spawning', 'working', 'blocked', 'done'];
 const ENDED = ['merged', 'killed', 'closed', 'handed-off'];
+/** Paths added to every clone's .git/info/exclude: Hauptling's own files and caches tools write into the clone. */
+export const CLONE_EXCLUDES = ['.hauptling/', '.pnpm-store/'];
 const AGENT_CALLS = new Set(['hook', 'report', 'ask', 'mail.send', 'mail.check', 'mail.status', 'mail.peers', 'test.request', 'test.wait', 'test.get', 'whoami', 'usage.report']);
 const RUNNER_CALLS = new Set(['test.claim', 'test.report', 'test.heartbeat']);
 
@@ -43,9 +45,11 @@ export function createCore({ db, host, github, notify = () => false, models = lo
 
   function delegatorId(id) {
     if (id) { if (!db.prepare('SELECT 1 FROM delegators WHERE id = ?').get(id)) throw new Error(`No delegator ${id}`); return id; }
-    const d = db.prepare('SELECT id FROM delegators WHERE active = 1 ORDER BY created_at DESC LIMIT 1').get();
-    if (!d) throw new Error('No active delegator; run `hauptling delegator start` (the /delegator skill does this)');
-    return d.id;
+    // No id: only unambiguous with one active delegator (several sessions may run at once; PRD "Several delegators").
+    const act = db.prepare('SELECT id, repo FROM delegators WHERE active = 1 ORDER BY created_at').all();
+    if (!act.length) throw new Error('No active delegator; run `hauptling delegator start` (the /delegator skill does this)');
+    if (act.length > 1) throw new Error(`Several delegators are active: ${act.map(d => `${d.id} (${d.repo || 'no repo'})`).join(', ')}. Pass --delegator ID; end finished ones with \`hauptling delegator end --delegator ID\`.`);
+    return act[0].id;
   }
 
   // ---------- git on the worker side ----------
@@ -269,7 +273,9 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     const { config: mcp, missing } = codegraph.mcpConfig({ codegraph: cg, repoCfg, repoMcp });
     if (missing.length) emit(a.delegator, a.id, 'mcp-missing', `hauptling.json "mcp" names servers not in .mcp.json: ${missing.join(', ')}`);
     const withBase = { ...a, base, codegraph: cg };
-    await host.run(a.slot, ['sh', '-c', 'mkdir -p "$(dirname "$0")" && cat > "$0" && echo .hauptling/ >> "$1/.git/info/exclude"', briefPath, a.dir], { input: briefText(withBase) });
+    // Kept out of git (and so out of commitFor's `add -A`): the brief, and pnpm's store, which pnpm puts in /work
+    // because the clone is a different mount from the worker's home.
+    await host.run(a.slot, ['sh', '-c', `mkdir -p "$(dirname "$0")" && cat > "$0" && printf '%s\\n' ${CLONE_EXCLUDES.join(' ')} >> "$1/.git/info/exclude"`, briefPath, a.dir], { input: briefText(withBase) });
     const prompt = 'Read your brief at .hauptling/brief.md and carry it out.';
     await host.startWorker({ slot: a.slot, id: a.id, dir: a.dir, vendor: a.vendor, apiKey: a.billing === 'api', argv: launchArgv(cfg, a.vendor, entry, prompt),
       mcp, codegraphCache: cg ? codegraph.cacheDir(a.repo) : null,
@@ -769,6 +775,16 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     return { id };
   }
 
+  /** Marks a delegator ended, so commands without --delegator stop considering it. Refused while it has live agents. */
+  function delegatorEnd({ delegator }) {
+    const d = delegatorId(delegator);
+    // Running or still to start; failed/exited ones need no delegator.
+    const live = db.prepare(`SELECT id FROM agents WHERE delegator = ? AND state IN (${[...ACTIVE, 'queued', 'waiting'].map(x => `'${x}'`).join(',')})`).all(d).map(r => r.id);
+    if (live.length) throw new Error(`${d} still has agents: ${live.join(', ')}. Wait for them, or \`hauptling kill\` them first.`);
+    db.prepare('UPDATE delegators SET active = 0 WHERE id = ?').run(d);
+    return { delegator: d };
+  }
+
   function handoff({ delegator, text }) {
     const d = delegatorId(delegator);
     db.prepare('UPDATE delegators SET handoff = ?, handoff_at = ? WHERE id = ?').run(bounded(text, 8000, 'Handoff'), now(), d);
@@ -798,7 +814,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     answer, reply, spawn, wait, agents, kill, merge: (a) => merge(a, (repo, args) => host.hostGit(repo, args)), poll,
     'agent.get': ({ agent }) => { const { token: _t, ...r } = mustAgent(agent); return r; },
     'attach': ({ agent }) => { const a = mustAgent(agent); return { argv: host.attachArgv(a.slot, a.id) }; },
-    'delegator.start': delegatorStart, 'delegator.list': () => db.prepare('SELECT * FROM delegators ORDER BY created_at DESC').all(),
+    'delegator.start': delegatorStart, 'delegator.end': delegatorEnd, 'delegator.list': () => db.prepare('SELECT * FROM delegators ORDER BY created_at DESC').all(),
     handoff, resume,
     'mail.send': ({ from, to, text }, who) => sendMail(who.role === 'agent' ? who.agent : from, to, text),
     'mail.check': ({ identity }, who) => mail.take(db, who.role === 'agent' ? who.agent : identity),

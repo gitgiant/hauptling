@@ -5,8 +5,11 @@ import { parseArgs } from '../src/util.mjs';
 
 const USAGE = `hauptling — delegate coding tasks to Claude, Codex and agy workers
 
-Delegator (host):
+Delegator (host): pass --delegator ID on spawn, wait, status, handoff and resume
+  (optional when only one delegator is active; required when several are)
   delegator start [--repo R] [--cli claude|codex|agy] [--max 3]   new delegator session
+  delegator end [--delegator ID]           mark it ended (refused while it has agents)
+  delegator list                           all delegators
   resume [--delegator ID] [--cli C]        state + handoff for a new CLI
   handoff <text|--file F>                  store a handoff note
   spawn --brief FILE [--vendor V] [--model M | --mode cheapest|rule] [--difficulty easy|normal|hard]
@@ -67,9 +70,10 @@ async function main() {
 
     // ----- delegator -----
     case 'delegator': {
+      if (args._[0] === 'end') { const r = await call('delegator.end', { delegator: args.delegator }); return out(`Delegator ${r.delegator} ended.`); }
       if (args._[0] !== 'start') { const list = await call('delegator.list'); return out(list.map(d => `${d.id} ${d.active ? 'active' : 'ended'} ${d.cli || ''} ${d.repo || ''} max ${d.max_agents}`).join('\n') || 'none'); }
       const r = await call('delegator.start', { repo: args.repo && normalizeRepo(args.repo), cli: args.cli, max: args.max ? Number(args.max) : 3 });
-      return out(`Delegator ${r.id} started.`);
+      return out(`Delegator ${r.id} started. Pass --delegator ${r.id} on every spawn, wait, status, handoff and resume.`);
     }
     case 'resume': {
       const r = await call('resume', { delegator: args.delegator, cli: args.cli });

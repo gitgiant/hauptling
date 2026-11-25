@@ -388,3 +388,36 @@ test('CodeGraph: on by default (MCP server, cache, brief line); hauptling.json t
   assert.doesNotMatch(host.state.input, /codegraph/);
   assert.ok(db.prepare("SELECT 1 FROM events WHERE agent = ? AND kind = 'mcp-missing' AND text LIKE '%nope%'").get(b.id));
 });
+
+test('several delegators: no --delegator is refused when ambiguous; each session keeps its own repo, agents and events; end', async () => {
+  const { db, core } = setup();
+  const { id: a } = await core.call('delegator.start', { repo: 'gitgiant/one', cli: 'claude' });
+  await core.call('spawn', { brief: 'one task', vendor: 'claude', mode: 'cheapest' });
+  const { id: b } = await core.call('delegator.start', { repo: 'gitgiant/two', cli: 'claude' });
+  await assert.rejects(core.call('spawn', { brief: 'x', vendor: 'claude', mode: 'cheapest' }), new RegExp(`Several delegators are active: ${a} \\(gitgiant/one\\), ${b} \\(gitgiant/two\\)`));
+  await assert.rejects(core.call('wait', { timeout: 0 }), /Pass --delegator ID/);
+  await assert.rejects(core.call('agents', {}), /Several delegators/);
+  await assert.rejects(core.call('resume', {}), /Several delegators/);
+  const sa = await core.call('spawn', { delegator: a, brief: 'two', vendor: 'claude', mode: 'cheapest' });
+  const sb = await core.call('spawn', { delegator: b, brief: 'three', vendor: 'claude', mode: 'cheapest' });
+  await settle();
+  const repo = (id) => db.prepare('SELECT repo, delegator FROM agents WHERE id = ?').get(id);
+  assert.deepEqual({ ...repo(sa.id) }, { repo: 'gitgiant/one', delegator: a });
+  assert.deepEqual({ ...repo(sb.id) }, { repo: 'gitgiant/two', delegator: b }, 'B spawns into B\'s repo');
+  assert.equal((await core.call('agents', { delegator: a })).length, 2);
+  assert.equal((await core.call('agents', { delegator: b })).length, 1);
+  await assert.rejects(core.call('delegator.end', { delegator: b }), new RegExp(`${b} still has agents: ${sb.id}`));
+  await core.call('kill', { agent: sb.id });
+  await core.call('delegator.end', { delegator: b });
+  assert.equal(db.prepare('SELECT active FROM delegators WHERE id = ?').get(b).active, 0);
+  assert.equal((await core.call('agents', {})).length, 2, 'one active again: no flag needed');
+});
+
+test('clones exclude the brief and pnpm\'s store from git, so `hauptling report` never commits them', async () => {
+  const { host, core } = setup();
+  await core.call('delegator.start', { repo: 'gitgiant/demo' });
+  await core.call('spawn', { brief: 'task', vendor: 'claude', mode: 'cheapest' });
+  await settle();
+  const sh = host.calls.find(c => c[1] === 'sh' && String(c[3]).includes('info/exclude'));
+  assert.match(sh[3], /printf '%s\\n' \.hauptling\/ \.pnpm-store\/ >> "\$1\/\.git\/info\/exclude"/);
+});
