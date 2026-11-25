@@ -210,7 +210,7 @@ function initSplitter(sp) {
 for (const sp of document.querySelectorAll('.splitter')) initSplitter(sp);
 
 // ---------- state ----------
-const state = { board: null, selected: null, sub: 'screen', view: 'board', screenTimer: null, histSelected: null };
+const state = { board: null, selected: null, sub: 'terminal', view: 'board', histSelected: null };
 
 // ---------- tabs ----------
 for (const b of document.querySelectorAll('.tabs button')) {
@@ -226,7 +226,6 @@ function show(view) {
   if (view === 'usage') loadUsage();
   if (view === 'db') loadTables();
   location.hash = view === 'board' ? (state.selected ? `agent=${state.selected}` : '') : view;
-  syncScreenTimer();
 }
 
 // ---------- live board ----------
@@ -412,7 +411,7 @@ function renderBoard(b) {
 function select(id) {
   closeTerm();
   state.selected = id;
-  location.hash = `agent=${id}${state.sub !== 'screen' ? `/${state.sub}` : ''}`;
+  location.hash = `agent=${id}${state.sub !== 'terminal' ? `/${state.sub}` : ''}`;
   const a = state.board?.agents.find(x => x.id === id);
   if (!a) return;
   renderBoard(state.board);
@@ -460,37 +459,16 @@ function renderDetailHead(a, el) {
 function renderSub(el, a) {
   const tabs = el.querySelector('.subtabs');
   closeTerm();
-  const subs = [['screen', 'Screen'], ['terminal', 'Terminal'], ['diff', 'Diff'], ['events', 'Events']];
-  put(tabs, ...subs.map(([k, label]) => h('button', { 'aria-selected': String(state.sub === k), onclick: () => { state.sub = k; location.hash = `agent=${a.id}${k !== 'screen' ? `/${k}` : ''}`; renderSub(el, a); } }, label)));
+  const subs = [['terminal', 'Terminal'], ['diff', 'Diff'], ['events', 'Events']];
+  put(tabs, ...subs.map(([k, label]) => h('button', { 'aria-selected': String(state.sub === k), onclick: () => { state.sub = k; location.hash = `agent=${a.id}${k !== 'terminal' ? `/${k}` : ''}`; renderSub(el, a); } }, label)));
   const body = el.querySelector('.body');
   put(body, h('p', { class: 'empty', text: 'Loading…' }));
-  if (state.sub === 'screen') loadScreen(a.id, body);
   if (state.sub === 'diff') loadDiff(a.id, body);
   if (state.sub === 'events') loadEvents(a.id, body);
-  if (state.sub === 'terminal') state.term = openTerminal(body, a.id);
-  syncScreenTimer();
-}
-
-async function loadScreen(id, body) {
-  try {
-    const s = await api.get(`/dash/agent/${encodeURIComponent(id)}/screen`);
-    if (state.selected !== id || state.sub !== 'screen') return;
-    const pre = body.querySelector('pre.screen');
-    const atBottom = !pre || pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 20;
-    if (s.ended) clearInterval(state.screenTimer); // container gone: stop polling
-    if (s.note) { put(body, s.text ? h('pre', { class: 'screen' }, s.text) : null, h('p', { class: 'empty', text: s.note })); return; }
-    const next = pre || h('pre', { class: 'screen' });
-    next.textContent = s.text || '(empty screen)';
-    if (!pre) put(body, next, h('p', { class: 'empty', text: 'Read-only mirror, refreshed every 2 s. Live terminal: hauptling attach (web terminal comes in 4b).' }));
-    if (atBottom) next.scrollTop = next.scrollHeight;
-  } catch (e) { put(body, h('p', { class: 'empty', text: e.message })); }
-}
-
-function syncScreenTimer() {
-  clearInterval(state.screenTimer);
-  state.screenTimer = null;
-  if (state.view === 'board' && state.selected && state.sub === 'screen') {
-    state.screenTimer = setInterval(() => { if (!document.hidden) loadScreen(state.selected, $('#detail .body')); }, 2000);
+  if (state.sub === 'terminal') {
+    // Same live states as the server's terminal (src/terminal.mjs); otherwise the stream would retry forever.
+    if (a.slot && ['spawning', 'working', 'blocked', 'done'].includes(a.state)) state.term = openTerminal(body, a.id);
+    else put(body, h('p', { class: 'empty', text: `No live session (${a.state})` }));
   }
 }
 
@@ -767,5 +745,5 @@ if (['usage', 'history', 'db'].includes(hash)) show(hash);
 else if (hash.startsWith('agent=')) {
   const [id, sub] = decodeURIComponent(hash.slice(6)).split('/');
   state.pending = id;
-  if (['screen', 'terminal', 'diff', 'events'].includes(sub)) state.sub = sub;
+  if (['terminal', 'diff', 'events'].includes(sub)) state.sub = sub;
 }

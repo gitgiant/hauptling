@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { openDb } from '../src/db.mjs';
 import { createCore } from '../src/core.mjs';
 import * as keyStore from '../src/keys.mjs';
-import { createDashboard, dashToken, headline, stripAnsi } from '../src/dashboard.mjs';
+import { createDashboard, dashToken, headline } from '../src/dashboard.mjs';
 import { loadModels } from '../src/models.mjs';
 
 function fakeHost() {
@@ -73,23 +73,6 @@ test('dashboard auth: token → cookie, no cookie → 401, docker0 → 403, othe
   s.done();
 });
 
-test('screen of a dead container: ended answer (last screen kept), no error, no log noise', async () => {
-  const s = await setup();
-  const url = `/dash/agent/${s.id}/screen`;
-  assert.equal((await s.req(url)).json.text, 'hello world');
-  s.host.tmuxCapture = async () => { throw new Error('docker exec: Error response from daemon: No such container: hl-x'); };
-  const r = await s.req(url);
-  assert.equal(r.code, 200);
-  assert.equal(r.json.ended, true);
-  assert.equal(r.json.text, 'hello world', 'last saved screen');
-  assert.match(r.json.note, /ended/);
-  s.host.tmuxCapture = async () => { throw new Error('tmux exploded'); };
-  assert.equal((await s.req(url)).code, 400, 'other capture errors still surface');
-  s.db.prepare("UPDATE agents SET state = 'merged' WHERE id = ?").run(s.id);
-  assert.equal((await s.req(url)).json.ended, true);
-  s.done();
-});
-
 test('dashboard board, detail and actions', async () => {
   const s = await setup();
   const who = s.core.authenticate(s.db.prepare('SELECT token FROM agents WHERE id = ?').get(s.id).token, 'ADMIN');
@@ -99,7 +82,6 @@ test('dashboard board, detail and actions', async () => {
   const a = b.agents.find(x => x.id === s.id);
   assert.equal(a.ask.question, 'Which DB?');
   assert.equal(a.token, undefined, 'no worker token on the board');
-  assert.equal((await s.req(`/dash/agent/${s.id}/screen`)).json.text, 'hello world');
   const d = (await s.req(`/dash/agent/${s.id}/diff`)).json;
   assert.equal(d.files[0].path, 'a.js');
   assert.match(d.stat, /a\.js/);
@@ -159,9 +141,6 @@ test('SQLite explorer: browse + read-only SQL, secrets masked even under an alia
   s.done();
 });
 
-test('stripAnsi removes colours, cursor moves and OSC titles', () => {
-  assert.equal(stripAnsi('\x1b[31mred\x1b[0m \x1b[2K\x1b]0;title\x07ok\r'), 'red ok');
-});
 
 test('web terminal: frames from the agent pane; input off until switched on, gated keys, idle timeout', async () => {
   const s = await setup();

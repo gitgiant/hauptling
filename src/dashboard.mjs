@@ -13,7 +13,7 @@ import { token as newToken } from './util.mjs';
  *   GET  /?k=<token>        swaps the dashboard token for an HttpOnly SameSite=Strict cookie
  *   GET  /, /web/*          the static page (web/dashboard)
  *   GET  /dash/stream       Server-Sent Events: a board snapshot whenever it changes
- *   GET  /dash/agent/<id>/screen|diff|events, /dash/history, /dash/db/tables, /dash/db/table
+ *   GET  /dash/agent/<id>/diff|events, /dash/history, /dash/db/tables, /dash/db/table
  *   POST /dash/db/query     ad-hoc read-only SQL
  *   POST /dash/do/<call>    actions (answer, reply, kill, merge, gpu.*), need `X-Hauptling: 1`
  * Only requests to 127.0.0.1 are served (containers reach the broker on docker0 through the
@@ -72,9 +72,6 @@ export function headline(a) {
 const ACTIONS = new Set(['answer', 'reply', 'kill', 'merge', 'gpu.pause', 'gpu.resume', 'test.run']);
 const COOKIE = 'hl_dash';
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml' };
-const ANSI = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(\x07|\x1b\\)|\x1b[@-Z\\-_]/g;
-
-export const stripAnsi = (s) => String(s).replace(ANSI, '').replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '');
 
 /** The dashboard token (created on first use); `rotate` replaces it, logging every browser out. */
 export function dashToken(db, { rotate = false } = {}) {
@@ -205,21 +202,6 @@ export function createDashboard({ db, dbPath, core, host, log = () => {}, slotDi
   }
 
   // ---------- agent detail ----------
-  const lastScreen = new Map(); // agent id → last text captured, shown once the container is gone
-  async function screen(a) {
-    const gone = (note) => ({ text: lastScreen.get(a.id) || '', note, ended: true });
-    if (!a.slot || NO_SESSION.includes(a.state)) return gone(`No live session (${a.state})`);
-    let raw;
-    try { raw = await host.tmuxCapture(a.slot, a.id, 300); } catch (e) {
-      if (/No such container|is not running/i.test(e.message)) return gone('Agent has ended (its container is gone)');
-      throw new Error(`capture failed: ${e.message}`);
-    }
-    const text = stripAnsi(raw).replace(/\s+$/, '');
-    lastScreen.set(a.id, text);
-    if (lastScreen.size > 50) lastScreen.delete(lastScreen.keys().next().value);
-    return { text };
-  }
-
   async function diff(a) {
     if (!a.dir || !a.slot || NO_SESSION.includes(a.state)) return { stat: '', files: [], note: `No clone (${a.state})` };
     const g = async (args) => (await host.run(a.slot, ['git', '-C', a.dir, ...args], { timeout: 30e3 })).stdout;
@@ -417,11 +399,11 @@ export function createDashboard({ db, dbPath, core, host, log = () => {}, slotDi
         if (ts) { try { termStream(req, res, ts[1]); } catch (e) { json(res, 404, { error: e.message }); } return true; }
         if (p === '/dash/db/tables') { json(res, 200, tables()); return true; }
         if (p === '/dash/db/table') { json(res, 200, table(Object.fromEntries(url.searchParams))); return true; }
-        const m = /^\/dash\/agent\/([\w.-]+)\/(screen|diff|events)$/.exec(p);
+        const m = /^\/dash\/agent\/([\w.-]+)\/(diff|events)$/.exec(p);
         if (m) {
           const a = agentRow(m[1]);
           if (!a) { json(res, 404, { error: `No agent ${m[1]}` }); return true; }
-          json(res, 200, m[2] === 'screen' ? await screen(a) : m[2] === 'diff' ? await diff(a) : timeline(a));
+          json(res, 200, m[2] === 'diff' ? await diff(a) : timeline(a));
           return true;
         }
       }
