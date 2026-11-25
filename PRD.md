@@ -72,6 +72,7 @@ Hauptling delegates coding tasks to Claude, Codex and agy (Antigravity CLI) agen
 
 - **Localhost, served by the host broker**, random access token; remote access via Tailscale only.
 - Per agent: status (spin working, blink blocked), attach button (web tty on localhost), log, diff, branch, PR and CI state, last test report, elapsed time, tokens, cost $, context %, model, GPU lease holder, kill.
+- **Report an issue (F2)**: F2 (or the header's "Report issue") opens a dialog (title, description, optional context block, read-only preview of the scrubbed body); the broker files it with `gh issue create -R <issueRepo>` (host config `issueRepo`, default the checkout's `origin`, else `gitgiant/hauptling`), label `dashboard`. Tokens, nonces, API keys, cookies and the home path are scrubbed first; F2 is ignored while the web terminal has input on.
 - **Vendors panel**: signed-in and auto-mode state for each vendor, usage % and reset time, sign-in button that opens the login in a slot container.
 - Data: Claude statusline gives cost, context, model, 5h and 7d limits. Codex statusline and `/status` give limits; cost is estimated from `models.json`. agy usage is read from `/usage` (see below). Subscription cost is an API-equivalent estimate.
 

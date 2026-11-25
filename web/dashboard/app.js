@@ -1,6 +1,7 @@
 // Hauptling dashboard (phase 4). Vanilla ES module; all data comes from the broker's /dash routes.
 import { ansiFragment } from './ansi.js';
 import { vendorBadge } from './vendors.js';
+import { openReport, shouldOpenReport, terminalInputFocused } from './report.js';
 import { STACKED_QUERY, HANDLE_PX, DRAG_IGNORE, clampRatio, parseRatio, defaultRatio, splitKey, keyRatio, collapseAfterDrag, HEADER_STEPS, stepClasses, pickStep, handleKey } from './layout.js';
 // Text from the store is always set with textContent (h() below), never parsed as HTML.
 
@@ -36,10 +37,10 @@ const api = {
   },
 };
 
-function toast(msg, err = false) {
-  const t = h('div', { class: `toast${err ? ' err' : ''}`, role: 'status', text: msg });
+function toast(msg, err = false, ms = err ? 6000 : 2500) {
+  const t = h('div', { class: `toast${err ? ' err' : ''}`, role: 'status' }, msg);
   document.body.append(t);
-  setTimeout(() => t.remove(), err ? 6000 : 2500);
+  setTimeout(() => t.remove(), ms);
 }
 async function act(name, args, done) {
   try { await api.post(`/dash/do/${name}`, args); toast(done); }
@@ -823,3 +824,24 @@ else if (hash.startsWith('agent=')) {
   state.pending = id;
   if (['terminal', 'diff', 'events'].includes(sub)) state.sub = sub;
 }
+
+// ---------- F2: report an issue ----------
+let reporting = null;
+function report() {
+  if (reporting) return;
+  const context = () => {
+    const a = state.view === 'board' ? state.board?.agents.find(x => x.id === state.selected) : state.view === 'history' ? state.board?.agents.find(x => x.id === state.histSelected) : null;
+    return {
+      view: state.view, tab: state.view === 'board' && a ? state.sub : null,
+      agent: a ? { id: a.id, vendor: a.vendor, state: a.state } : null,
+      viewport: `${innerWidth}x${innerHeight}`, theme: document.documentElement.dataset.theme,
+    };
+  };
+  reporting = openReport({ h, api, toast, context, onClose: () => { reporting = null; } });
+}
+document.addEventListener('keydown', (e) => {
+  if (!shouldOpenReport(e, { open: Boolean(reporting), terminalInput: terminalInputFocused() })) return;
+  e.preventDefault();
+  report();
+});
+$('#report').addEventListener('click', report);

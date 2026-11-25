@@ -255,3 +255,29 @@ test('dashboard: CPU test queue in the header, queue position in the headline, R
   assert.equal(s.db.prepare('SELECT state FROM tests WHERE id = ?').get(ahead).state, 'queued');
   s.done();
 });
+
+test('report endpoints: need the header, scrub tokens, run gh with the stubbed argv', async () => {
+  const s = await setup();
+  const calls = [];
+  const secret = s.tok;
+  const dash = createDashboard({ db: s.db, dbPath: '', core: s.core, host: fakeHost(), report: {
+    gh: async (args, o) => { calls.push({ args, o }); return args[0] === 'issue' ? 'https://github.com/o/r/issues/1' : ''; },
+    facts: async () => ({ version: 'v', os: 'Linux', log: [`leak ${secret}`] }), origin: async () => 'https://github.com/o/r.git', config: () => ({}),
+  } });
+  const post = async (path, body, headers = { 'x-hauptling': '1' }) => {
+    const r = { method: 'POST', url: path, headers: { host: '127.0.0.1:47800', cookie: `hl_dash=${secret}`, ...headers }, socket: { localAddress: '127.0.0.1' }, on() {}, async *[Symbol.asyncIterator]() { yield JSON.stringify(body); } };
+    const res = { code: 0, body: '', writeHead(c) { this.code = c; }, end(b) { this.body += b ?? ''; } };
+    await dash.handle(r, res, new URL(path, 'http://x'));
+    return { code: res.code, json: JSON.parse(res.body) };
+  };
+  assert.equal((await post('/dash/report/send', { title: 't' }, {})).code, 403);
+  const pv = await post('/dash/report/preview', { title: 't', description: `d ${secret}` });
+  assert.equal(pv.code, 200);
+  assert.ok(!pv.json.body.includes(secret));
+  const sent = await post('/dash/report/send', { title: 't', description: 'd' });
+  assert.equal(sent.json.url, 'https://github.com/o/r/issues/1');
+  assert.deepEqual(calls.find(c => c.args[0] === 'issue').args.slice(0, 6), ['issue', 'create', '-R', 'o/r', '--title', 't']);
+  assert.ok(!calls.find(c => c.args[0] === 'issue').o.input.includes(secret));
+  assert.equal((await post('/dash/report/send', { title: ' ' })).code, 400);
+  s.done();
+});
