@@ -252,7 +252,7 @@ function renderDetailHead(a, el) {
     h('h2', { text: a.headline || a.title }),
     a.headline ? h('p', { class: 'prompt', title: 'Prompt (spawn title)', text: a.title }) : null,
     h('div', { class: 'meta' },
-      h('span', { class: 'mono', text: a.id }), h('span', { text: a.state }), h('span', { text: `${a.vendor} · ${a.model}` }),
+      h('span', { class: 'mono', text: a.id }), h('span', { text: a.state }), h('span', { text: `${a.vendor} · ${a.model}${a.billing ? ` · ${a.billing === 'api' ? 'API' : 'plan'}` : ''}` }),
       h('span', { class: 'mono', text: `${a.branch} → ${a.base}` }), h('span', { class: 'mono', text: a.repo }),
       a.pr_url ? h('a', { href: a.pr_url, target: '_blank', rel: 'noopener', text: `PR #${a.pr_number}` }) : null,
       h('span', { text: `started ${clock(a.created_at)} (${ago(a.created_at)})` }),
@@ -425,10 +425,11 @@ async function loadUsage() {
       const signed = v.slots.filter(s => s.signed_in).length;
       return h('section', { class: 'vendor' },
         h('h3', { text: v.vendor }),
-        v.key ? h('div', { class: 'ok', title: `Every slot uses this key; billed per token. hauptling key rm ${v.vendor} switches back to sign-ins.`, text: `✓ API key ${v.key}` })
-          : h('div', { class: signed === v.slots.length ? 'ok' : 'no', text: `${signed === v.slots.length ? '✓' : '✗'} signed in on ${signed}/${v.slots.length} slots` }),
+        v.budget ? budgetLine(v) : null,
+        v.key && !v.budget ? h('div', { class: 'ok', title: `Every slot uses this key; billed per token. hauptling key rm ${v.vendor} switches back to sign-ins.`, text: `✓ API key ${v.key}` })
+          : h('div', { class: signed === v.slots.length ? 'ok' : 'no', text: `${signed === v.slots.length ? '✓' : '✗'} signed in on ${signed}/${v.slots.length} slots${v.budget ? ' (after the API budget)' : ''}` }),
         v.limits.length ? v.limits.sort((a) => (a.window === '5h' ? -1 : 1)).map(meter) : h('p', { class: 'resets', text: 'No usage reported yet; workers report it while they run.' }),
-        v.key ? null : h('details', { class: 'slots', open: signed < v.slots.length },
+        v.key && !v.budget ? null : h('details', { class: 'slots', open: signed < v.slots.length },
           h('summary', { text: 'Slot sign-ins' }),
           v.slots.map(s => h('div', { class: 'slotrow' },
             h('span', { class: 'mono', text: s.slot }),
@@ -440,7 +441,14 @@ async function loadUsage() {
   } catch (e) { if (state.view === 'usage') toast(e.message, true); }
   finally { usageTimer = setTimeout(loadUsage, state.view === 'usage' ? 15e3 : 30e3); }
 }
-/** Header: one chip per vendor with tiny bars (5h on top, week below), plus 30-day spend. */
+/** Vendor card: API key with a monthly budget, used first. */
+function budgetLine(v) {
+  const b = v.budget, over = b.spent >= b.stop_at;
+  return h('div', { class: over ? 'no' : 'ok', title: `API key ${v.key}. New ${v.vendor} workers use the API while spend is under $${b.stop_at}, then the slots' sign-ins. Hauptling's own tally of its API workers' reported cost.` },
+    `${over ? '✗' : '✓'} API first: $${b.spent.toFixed(2)} of $${b.usd} (new API spawns stop at $${b.stop_at}) · resets ${new Date(b.until).toLocaleDateString()}`);
+}
+
+/** Header: one chip per vendor with tiny bars (5h on top, week below), an API budget chip where set, plus 30-day spend. */
 function renderUsageBar(u) {
   const level = (p) => (p >= 100 ? 'full' : p >= 90 ? 'warn' : '');
   const chips = u.vendors.map(v => {
@@ -451,6 +459,11 @@ function renderUsageBar(u) {
       ls.length ? h('span', { class: 'minis' }, ls.map(l => h('span', { class: `mini ${level(l.used_pct)}` }, h('span', { style: `width:${Math.min(100, l.used_pct)}%` }))))
         : h('span', { class: 'vnone', text: '–' }));
   });
+  for (const v of u.vendors.filter(x => x.budget)) {
+    const b = v.budget;
+    chips.push(h('span', { class: `uchip spend ${b.spent >= b.usd ? 'full' : b.spent >= b.stop_at ? 'warn' : ''}`, title: `${v.vendor} API budget this month (resets ${new Date(b.until).toLocaleDateString()}); at $${b.stop_at} new workers move to your plan` },
+      h('span', { class: 'vname', text: 'API' }), `$${Math.round(b.spent)}/$${b.usd}`));
+  }
   const t = u.spend.total;
   chips.push(h('span', { class: 'uchip spend', title: t ? `Spend, last 30 days: ${t.agents} agents · ${kfmt(t.tokens_in)} in / ${kfmt(t.tokens_out)} out tokens` : 'No spend recorded yet', text: t ? money(t.cost_usd, t.estimated > 0) : '$0' }));
   put($('#usagebar'), ...chips);

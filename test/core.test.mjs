@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { openDb } from '../src/db.mjs';
 import { createCore } from '../src/core.mjs';
+import * as keyStore from '../src/keys.mjs';
 import { loadModels } from '../src/models.mjs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -57,7 +58,7 @@ function setup(gh = fakeGithub()) {
   const db = openDb(':memory:');
   const host = fakeHost();
   const toasts = [];
-  const core = createCore({ db, host, github: gh, notify: t => toasts.push(t), models: () => loadModels(join(tmpdir(), 'none.json')), workerUrl: 'http://172.0.0.1:47800', runnerToken: 'RUN' });
+  const core = createCore({ db, host, github: gh, keys: { ...keyStore, getKey: () => null, getBudget: () => null }, notify: t => toasts.push(t), models: () => loadModels(join(tmpdir(), 'none.json')), workerUrl: 'http://172.0.0.1:47800', runnerToken: 'RUN' });
   return { db, host, core, gh, toasts };
 }
 

@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { openDb } from '../src/db.mjs';
 import { createCore } from '../src/core.mjs';
+import * as keyStore from '../src/keys.mjs';
 import { createDashboard, dashToken, headline, stripAnsi } from '../src/dashboard.mjs';
 import { loadModels } from '../src/models.mjs';
 
@@ -31,7 +32,7 @@ async function setup() {
   const dbPath = join(dir, 'hauptling.db');
   const db = openDb(dbPath);
   const host = fakeHost();
-  const core = createCore({ db, host, github: gh, notify: () => true, models: () => loadModels(join(tmpdir(), 'none.json')), workerUrl: 'http://w', publicUrl: 'http://127.0.0.1:47800', runnerToken: 'RUN' });
+  const core = createCore({ db, host, github: gh, keys: { ...keyStore, getKey: () => null, getBudget: () => null }, notify: () => true, models: () => loadModels(join(tmpdir(), 'none.json')), workerUrl: 'http://w', publicUrl: 'http://127.0.0.1:47800', runnerToken: 'RUN' });
   const dash = createDashboard({ db, dbPath, core, host });
   await core.call('delegator.start', { repo: 'gitgiant/demo' });
   const { id } = await core.call('spawn', { brief: 'task brief', vendor: 'claude', mode: 'cheapest' });

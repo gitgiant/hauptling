@@ -252,6 +252,7 @@ export function createDashboard({ db, dbPath, core, host, log = () => {}, slotDi
       return {
         vendor,
         key: keyOf.get(vendor) || null,
+        budget: core.budgetState?.(vendor) || null, // API first, then the plan: { usd, spent, stop_at, until, … }
         limits: [...latest.values()],
         slots: slotNames.map(slot => ({
           slot,

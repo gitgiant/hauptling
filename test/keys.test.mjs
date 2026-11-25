@@ -56,3 +56,22 @@ test('prepare in key mode: Claude key pre-approved + onboarding skipped; Codex k
   assert.equal(calls.length, 2, 'changed key: login again');
   assert.throws(() => prepare('codex', '/work', HOME, { env: { CODEX_HOME: codexHome, OPENAI_API_KEY: 'sk-proj-key3' }, run: () => ({ status: 1, stderr: 'bad key' }) }), /bad key/);
 });
+
+test('budget: stored next to the key, validated, removed with the key; periods start on the reset day', () => {
+  keys.setKey('claude', KEY);
+  assert.equal(keys.getBudget('claude'), null);
+  assert.deepEqual(keys.setBudget('claude', '100', 15), { usd: 100, resets_on: 15 });
+  assert.deepEqual(keys.getBudget('claude'), { usd: 100, resets_on: 15 });
+  assert.throws(() => keys.setBudget('claude', 'lots'), /positive amount/);
+  assert.throws(() => keys.setBudget('claude', 10, 31), /day 1–28/);
+  assert.equal(keys.setBudget('claude', 'off'), null);
+  assert.equal(keys.getBudget('claude'), null);
+  keys.setBudget('claude', 50);
+  keys.removeKey('claude');
+  assert.equal(keys.getBudget('claude'), null, 'key rm drops the budget too');
+  const at = new Date(2026, 10, 25, 12);
+  assert.equal(keys.periodStart(1, at), new Date(2026, 10, 1).toISOString());
+  assert.equal(keys.periodStart(28, at), new Date(2026, 9, 28).toISOString());
+  assert.equal(keys.periodEnd(28, at), new Date(2026, 10, 28).toISOString());
+  assert.equal(keys.periodStart(1, new Date(2026, 0, 5)), new Date(2026, 0, 1).toISOString());
+});

@@ -31,6 +31,7 @@ Setup:
   doctor                                   check tools, Docker, image, egress, broker and sign-ins
   image                                    build the worker image if hauptling changed
   key set VENDOR | key rm VENDOR | key list   API key instead of slot sign-ins (one key for all slots; billed per token)
+  key budget VENDOR USD|off [--resets-on DAY] API first up to USD a month (new API spawns stop at 90%), then slot sign-ins
   login SLOT VENDOR [--force]              sign one slot in to claude|codex|agy (refused while a worker of that vendor runs on the slot)
   init [DIR]                               write the detected hauptling.json
   broker start|stop|status|run
@@ -90,7 +91,7 @@ async function main() {
         testWriter: args.testWriter || args.testWriterModel ? { vendor: args.testWriterVendor, model: args.testWriterModel } : false,
         brief: readFileSync(args.brief, 'utf8'),
       });
-      out(`${r.id} (${r.vendor} ${r.model}) ${r.state}`);
+      out(`${r.id} (${r.vendor} ${r.model}${r.billing ? `, ${r.billing}` : ''}) ${r.state}`);
       if (r.testWriter) out(`${r.testWriter.id} (${r.testWriter.vendor} ${r.testWriter.model}) ${r.testWriter.state} — writes spec tests first`);
       return;
     }
@@ -219,15 +220,29 @@ async function main() {
     case 'key': {
       const keys = await import('../src/keys.mjs');
       const [sub, vendor] = args._;
-      if (sub === 'list' || !sub) return out(Object.entries(keys.keyHints()).map(([v, h]) => `${v.padEnd(7)} ${h ? `API key ${h} (all slots, billed per token)` : 'slot sign-ins (subscription)'}`).join('\n'));
+      const mode = (v, h, b = keys.getBudget(v)) => (!h ? 'slot sign-ins (subscription)'
+        : b ? `API key ${h} first, up to $${b.usd} a month (new API spawns stop at $${Math.round(b.usd * keys.STOP_AT * 100) / 100}; resets on day ${b.resets_on}), then slot sign-ins`
+        : `API key ${h} (all slots, billed per token)`);
+      if (sub === 'list' || !sub) return out(Object.entries(keys.keyHints()).map(([v, h]) => `${v.padEnd(7)} ${mode(v, h)}`).join('\n'));
+      if (sub === 'budget') {
+        if (!keys.getKey(vendor)) throw new Error(`${vendor}: no API key; first: hauptling key set ${vendor}`);
+        const amount = args._[2] ?? args.budget;
+        if (amount == null) throw new Error('key budget VENDOR USD [--resets-on DAY] | key budget VENDOR off');
+        keys.setBudget(vendor, amount === 'off' ? null : amount, args.resetsOn ?? 1);
+        return out(`${vendor}: ${mode(vendor, keys.keyHints()[vendor])}.\nApplies to new workers; spend so far shows on the dashboard's usage page.`);
+      }
       if (sub === 'rm') { const r = keys.removeKey(vendor); return out(r.removed ? `${vendor}: key removed; new workers use the slots' sign-ins again.` : `${vendor}: no key was set.`); }
       if (sub === 'set') {
         // Read the key from stdin (pipe) or a hidden prompt; never from argv, so it stays out of shell history.
         const key = process.stdin.isTTY ? await hiddenPrompt(`${keys.KEY_ENV[vendor] || 'API key'} for ${vendor}: `) : (await (async () => { let s = ''; for await (const c of process.stdin) s += c; return s; })());
         const r = keys.setKey(vendor, key);
-        return out(`${vendor}: API key ${r.hint} stored (~/.hauptling/keys/${vendor}, mode 600).\nNew ${vendor} workers on every slot now use it and are billed per token by the API, not your subscription. Running workers are unchanged.\nSwitch back: hauptling key rm ${vendor}`);
+        if (args.budget != null) {
+          keys.setBudget(vendor, args.budget, args.resetsOn ?? 1);
+          return out(`${vendor}: API key ${r.hint} stored (~/.hauptling/keys/${vendor}, mode 600).\n${mode(vendor, r.hint)}. Keep the slots signed in for the fallback.\nKey for every spawn instead: hauptling key budget ${vendor} off`);
+        }
+        return out(`${vendor}: API key ${r.hint} stored (~/.hauptling/keys/${vendor}, mode 600).\nNew ${vendor} workers on every slot now use it and are billed per token by the API, not your subscription. Running workers are unchanged.\nAPI first, then your plan: hauptling key budget ${vendor} USD [--resets-on DAY]\nSwitch back: hauptling key rm ${vendor}`);
       }
-      throw new Error('key set VENDOR (reads the key from stdin or a hidden prompt) | key rm VENDOR | key list');
+      throw new Error('key set VENDOR [--budget USD [--resets-on DAY]] (reads the key from stdin or a hidden prompt) | key budget VENDOR USD|off [--resets-on DAY] | key rm VENDOR | key list');
     }
     case 'login': { const { login } = await import('../src/setup.mjs'); return login(args._[0], args._[1], { force: Boolean(args.force) }); }
     default: throw new Error(`Unknown command ${cmd}\n\n${USAGE}`);

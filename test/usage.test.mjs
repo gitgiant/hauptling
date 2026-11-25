@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { openDb } from '../src/db.mjs';
 import { createCore } from '../src/core.mjs';
+import * as keyStore from '../src/keys.mjs';
 import { loadModels } from '../src/models.mjs';
 import { lastTokenCount, normalizeUsage, scrub, statusText } from '../src/usage.mjs';
 
@@ -58,16 +59,18 @@ test('usage: Codex rollout tail → last token_count; cost estimated from models
   assert.equal(lastTokenCount('{"type":"session_meta"}\n'), null);
 });
 
-function setup() {
+/** `keys`: { key, budget } stands in for ~/.hauptling/keys (none by default). */
+function setup({ key = null, budget = null } = {}) {
   const db = openDb(':memory:');
   const toasts = [];
   const host = {
-    calls: [], async run() { return { stdout: 'abc\n' }; }, workRoot: '/w', async startWorker() {}, async tmuxType() {}, async stopWorker() {},
+    calls: [], async run() { return { stdout: 'abc\n' }; }, workRoot: '/w', started: [], async startWorker(w) { this.started.push(w); }, async tmuxType() {}, async stopWorker() {},
     async tmuxAlive() { return true; }, async tmuxCapture() { return ''; }, attachArgv: () => [], async hostGit() { return 'main'; },
     codex: null, async codexUsage() { return this.codex; },
   };
   const gh = { gitAuthEnv: async () => ({}), prFind: async () => null, prCreate: async () => ({}), requiredChecks: async () => [], prAutoMerge: async () => {}, prMerge: async () => {}, prView: async () => ({ state: 'OPEN', statusCheckRollup: [] }) };
-  const core = createCore({ db, host, github: gh, notify: t => toasts.push(t), models: () => loadModels(join(tmpdir(), 'none.json')), workerUrl: 'http://w', publicUrl: 'http://127.0.0.1:47800', runnerToken: 'RUN' });
+  const keys = { ...keyStore, getKey: () => key, getBudget: () => budget };
+  const core = createCore({ db, host, github: gh, keys, notify: t => toasts.push(t), models: () => loadModels(join(tmpdir(), 'none.json')), workerUrl: 'http://w', publicUrl: 'http://127.0.0.1:47800', runnerToken: 'RUN' });
   return { db, host, core, toasts };
 }
 const settle = () => new Promise(r => setTimeout(r, 20));
@@ -122,4 +125,46 @@ test('Codex usage comes from the session log via poll; a missing log leaves usag
   const u = JSON.parse(db.prepare('SELECT usage FROM agents WHERE id = ?').get(id).usage);
   assert.equal(u.tokens_out, 1017);
   assert.equal(db.prepare("SELECT used_pct FROM slot_usage WHERE vendor = 'codex' AND window = 'week'").get().used_pct, 73);
+});
+
+test('API budget: API first until 90% of it is spent, then the plan; one warning per period', async () => {
+  const { db, core, host, toasts } = setup({ key: 'sk-ant-api03-test', budget: { usd: 100, resets_on: 1 } });
+  await core.call('delegator.start', { repo: 'gitgiant/demo', max: 5 });
+  const future = new Date(Date.now() + 3600e3).toISOString();
+  db.prepare("INSERT INTO slot_usage VALUES ('hl-w2', 'claude', '5h', 100, ?, ?)").run(future, future);
+  const a = await core.call('spawn', { brief: 'a', vendor: 'claude', mode: 'cheapest' });
+  await settle();
+  assert.equal(a.billing, 'api');
+  assert.equal(db.prepare('SELECT state FROM agents WHERE id = ?').get(a.id).state, 'working', 'on the API the plan limit does not hold it back');
+  assert.equal(host.started.at(-1).apiKey, true);
+  const report = (id, cost) => core.call('usage.report', { vendor: 'claude', payload: { ...CLAUDE, rate_limits: undefined, cost: { total_cost_usd: cost } } },
+    core.authenticate(db.prepare('SELECT token FROM agents WHERE id = ?').get(id).token, 'ADMIN'));
+  await report(a.id, 89.99);
+  assert.equal(core.budgetState('claude').spent, 89.99);
+  assert.equal(toasts.length, 0, 'under $90: no warning');
+  const b = await core.call('spawn', { brief: 'b', vendor: 'claude', mode: 'cheapest' });
+  await settle();
+  assert.equal(b.billing, 'api');
+  await report(b.id, 0.02);
+  await report(b.id, 0.03);
+  assert.equal(toasts.length, 1, 'one warning per period');
+  assert.match(toasts[0].title, /claude API budget 90%/);
+  assert.match((await core.call('wait', { timeout: 0 })).events.find(e => e.kind === 'api-budget').text, /new claude workers use your plan/);
+  const c = await core.call('spawn', { brief: 'c', vendor: 'claude', mode: 'cheapest' });
+  await settle();
+  assert.equal(db.prepare('SELECT state FROM agents WHERE id = ?').get(c.id).state, 'queued', 'budget used up and the plan at 100%: waits');
+  db.prepare("DELETE FROM slot_usage").run();
+  await core.poll();
+  await settle();
+  const row = db.prepare('SELECT state, billing FROM agents WHERE id = ?').get(c.id);
+  assert.deepEqual({ ...row }, { state: 'working', billing: 'plan' });
+  assert.equal(host.started.at(-1).apiKey, false, 'plan workers get no key');
+  db.prepare("UPDATE agents SET created_at = ? WHERE billing = 'api'").run(new Date(Date.now() - 40 * 86400e3).toISOString());
+  assert.equal(core.billingFor('claude'), 'api', 'last period\'s spend does not count');
+});
+
+test('billing without a budget: a key covers every spawn, no key means the plan', () => {
+  assert.equal(setup({ key: 'sk-ant-api03-test' }).core.billingFor('claude'), 'api');
+  assert.equal(setup().core.billingFor('claude'), 'plan');
+  assert.equal(setup().core.budgetState('claude'), null);
 });

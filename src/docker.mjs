@@ -264,7 +264,7 @@ export function dockerHost({ log = () => {} } = {}) {
     kind: 'docker',
     workRoot,
     run,
-    async startWorker({ slot, id, dir, vendor, argv, env, mcp = { mcpServers: {} }, codegraphCache = null }) {
+    async startWorker({ slot, id, dir, vendor, argv, env, apiKey = false, mcp = { mcpServers: {} }, codegraphCache = null }) {
       await ensureNetwork({ log });
       const image = await imageFor(dir, { log });
       const c = config();
@@ -277,7 +277,7 @@ export function dockerHost({ log = () => {} } = {}) {
       await docker(['run', '-d', '--name', container(id), '--init', '--user', uid(), '--network', NET,
         '--memory', String(c.memory), '--cpus', String(c.cpus), '--label', `hauptling.agent=${id}`, '--label', `hauptling.slot=${slot}`,
         '-v', `${dir}:/work`, '-v', `${slotDir(slot)}:/home/worker/.vendor`, '-v', `${mcpFile}:/etc/claude-code/managed-mcp.json:ro`, ...proxyEnv(),
-        ...Object.entries({ ...env, ...workerKeyEnv(vendor), GIT_AUTHOR_NAME: `hauptling ${slot}`, GIT_AUTHOR_EMAIL: `${slot}@hauptling.local`, GIT_COMMITTER_NAME: `hauptling ${slot}`, GIT_COMMITTER_EMAIL: `${slot}@hauptling.local` }).flatMap(([k, v]) => ['-e', `${k}=${v}`]),
+        ...Object.entries({ ...env, ...(apiKey ? workerKeyEnv(vendor) : {}), GIT_AUTHOR_NAME: `hauptling ${slot}`, GIT_AUTHOR_EMAIL: `${slot}@hauptling.local`, GIT_COMMITTER_NAME: `hauptling ${slot}`, GIT_COMMITTER_EMAIL: `${slot}@hauptling.local` }).flatMap(([k, v]) => ['-e', `${k}=${v}`]),
         image, 'sleep', 'infinity']);
       await exec(id, ['hauptling', 'prepare', vendor, '/work']);
       if (codegraphCache) {

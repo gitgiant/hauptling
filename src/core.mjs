@@ -7,6 +7,7 @@ import { canInject } from './vendors.mjs';
 import { normalizeUsage, scrub, statusText } from './usage.mjs';
 import { dashToken } from './dashboard.mjs';
 import { MAIL_MAX, STATUS_MAX, bounded, githubSlug, hex, isFamily, now, sanitizeModel, token, wslPath } from './util.mjs';
+import * as keyStore from './keys.mjs';
 
 /*
  * Broker logic. Everything that touches the outside world is injected, so tests can fake it:
@@ -22,10 +23,11 @@ const ENDED = ['merged', 'killed', 'closed', 'handed-off'];
 const AGENT_CALLS = new Set(['hook', 'report', 'ask', 'mail.send', 'mail.check', 'mail.status', 'mail.peers', 'test.request', 'test.wait', 'test.get', 'whoami', 'usage.report']);
 const RUNNER_CALLS = new Set(['test.claim', 'test.report', 'test.heartbeat']);
 
-export function createCore({ db, host, github, notify = () => false, models = loadModels, workerUrl, publicUrl = workerUrl, runnerToken, log = () => {}, stallMinutes = Number(process.env.HAUPTLING_STALL_MINUTES || 10), idleMinutes = Number(process.env.HAUPTLING_IDLE_MINUTES || 15) }) {
+export function createCore({ db, host, github, notify = () => false, models = loadModels, keys = keyStore, workerUrl, publicUrl = workerUrl, runnerToken, log = () => {}, stallMinutes = Number(process.env.HAUPTLING_STALL_MINUTES || 10), idleMinutes = Number(process.env.HAUPTLING_IDLE_MINUTES || 15) }) {
   const bus = new EventEmitter();
   bus.setMaxListeners(0);
   const agentRow = (id) => db.prepare('SELECT * FROM agents WHERE id = ?').get(id);
+  const { getKey, getBudget, periodStart, periodEnd, STOP_AT } = keys;
   const mustAgent = (id) => { const a = agentRow(id) || agentRow(mail.resolve(db, id)); if (!a) throw new Error(`No agent ${id}`); return a; };
   const update = (id, fields) => {
     const keys = Object.keys(fields);
@@ -105,7 +107,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     if (!vendor) {
       // Round robin, skipping vendors whose every slot is at 100% of a usage window (if all are, the spawn waits in the queue).
       const tried = [];
-      for (let i = 0; i < 3 && !vendor; i++) { const v = nextVendor(db, cfg); tried.push(v); if (vendorUsable(v)) vendor = v; }
+      for (let i = 0; i < 3 && !vendor; i++) { const v = nextVendor(db, cfg); tried.push(v); if (startable(v)) vendor = v; }
       vendor ||= tried[0];
     }
     const entry = model ? findModel(cfg, vendor, model) : pick(cfg, vendor, mode, difficulty);
@@ -128,7 +130,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     if (tw) insert({ ...tw, title: `Spec tests: ${title}`.slice(0, 72), state: 'queued', role: 'tests' });
     const started = await startQueued(d);
     const state = (x) => (started.includes(x) ? 'spawning' : agentRow(x).state);
-    return { id, vendor, model: entry.id, state: state(id), ...(tw ? { testWriter: { id: tw.id, vendor: tw.vendor, model: tw.model, state: state(tw.id) } } : {}) };
+    return { id, vendor, model: entry.id, state: state(id), billing: agentRow(id).billing, ...(tw ? { testWriter: { id: tw.id, vendor: tw.vendor, model: tw.model, state: state(tw.id) } } : {}) };
   }
 
   /** Starts queued agents while the delegator is under its limit and a slot is free. */
@@ -141,13 +143,14 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
         if (active >= max) return null;
         const used = new Set(db.prepare(`SELECT slot FROM agents WHERE slot IS NOT NULL AND state IN (${ACTIVE.map(() => '?').join(',')})`).all(...ACTIVE).map(r => r.slot));
         const free = slots().filter(s => !used.has(s));
-        // First queued agent whose vendor account isn't at 100%; agents of an exhausted vendor wait for the reset.
-        const a = free.length ? db.prepare("SELECT * FROM agents WHERE delegator = ? AND state = 'queued' ORDER BY created_at").all(d).find(q => !exhausted(q.vendor)) : null;
+        // First queued agent that can start: on the API key, or on a plan that isn't at 100% (else it waits for the reset).
+        const a = free.length ? db.prepare("SELECT * FROM agents WHERE delegator = ? AND state = 'queued' ORDER BY created_at").all(d).find(q => startable(q.vendor)) : null;
         const slot = free[0];
         if (!slot || !a) return null;
         const dir = `${host.workRoot}/${a.id}`;
-        db.prepare("UPDATE agents SET state = 'spawning', slot = ?, dir = ?, updated_at = ? WHERE id = ?").run(slot, dir, now(), a.id);
-        return { ...a, slot, dir, state: 'spawning' };
+        const billing = billingFor(a.vendor);
+        db.prepare("UPDATE agents SET state = 'spawning', slot = ?, dir = ?, billing = ?, updated_at = ? WHERE id = ?").run(slot, dir, billing, now(), a.id);
+        return { ...a, slot, dir, billing, state: 'spawning' };
       });
       if (!next) return started;
       started.push(next.id);
@@ -168,12 +171,32 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   function exhausted(vendor) {
     return db.prepare('SELECT used_pct, resets_at FROM slot_usage WHERE vendor = ? AND used_pct >= 100').all(vendor).some(r => live(r.resets_at));
   }
-  const vendorUsable = (vendor) => !exhausted(vendor);
+
+  /** API spend of this vendor in the budget's current period (the reported cost of its `api` agents). */
+  function apiSpend(vendor, b = getBudget(vendor)) {
+    const since = periodStart(b?.resets_on || 1);
+    const rows = db.prepare("SELECT usage FROM agents WHERE vendor = ? AND billing = 'api' AND usage IS NOT NULL AND created_at >= ?").all(vendor, since);
+    return Math.round(rows.reduce((s, r) => s + (JSON.parse(r.usage).cost_usd || 0), 0) * 100) / 100;
+  }
+  /** { usd, resets_on, spent, stop_at, from, until } for a vendor with a budgeted key, else null. */
+  function budgetState(vendor) {
+    const b = getKey(vendor) && getBudget(vendor);
+    if (!b) return null;
+    return { ...b, spent: apiSpend(vendor, b), stop_at: Math.round(b.usd * STOP_AT * 100) / 100, from: periodStart(b.resets_on), until: periodEnd(b.resets_on) };
+  }
+  /** 'api' or 'plan' for a worker starting now: a key without budget covers every spawn; with a budget, until STOP_AT of it is spent. */
+  function billingFor(vendor) {
+    if (!getKey(vendor)) return 'plan';
+    const b = budgetState(vendor);
+    return !b || b.spent < b.stop_at ? 'api' : 'plan';
+  }
+  const startable = (vendor) => billingFor(vendor) === 'api' || !exhausted(vendor);
   function priceOf(a) { try { return findModel(models(), a.vendor, a.model); } catch { return null; } }
 
   /** Stores an agent's usage and its slot's limit windows; warns once per window at 90%. */
   function recordUsage(a, u) {
     update(a.id, { usage: JSON.stringify({ ...u, at: now() }) });
+    if (a.billing === 'api') budgetWarn(a);
     if (!a.slot) return u;
     for (const l of u.limits) {
       db.prepare(`INSERT INTO slot_usage (slot, vendor, window, used_pct, resets_at, at) VALUES (?, ?, ?, ?, ?, ?)
@@ -190,6 +213,19 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
       log(`usage-high ${text}`);
     }
     return u;
+  }
+
+  /** Once per budget period, when API spend reaches STOP_AT: new spawns of that vendor go to the plan. */
+  function budgetWarn(a) {
+    const b = budgetState(a.vendor);
+    if (!b || b.spent < b.stop_at) return;
+    const key = `budget:warn:${a.vendor}:${b.from}`;
+    if (kvGet(db, key)) return;
+    kvSet(db, key, now());
+    const text = `${a.vendor} API spend $${b.spent.toFixed(2)} of $${b.usd} this period; new ${a.vendor} workers use your plan until ${new Date(b.until).toLocaleDateString()} (running API workers finish on the API)`;
+    emit(a.delegator, a.id, 'api-budget', text);
+    notify({ title: `${a.vendor} API budget ${Math.round((b.spent / b.usd) * 100)}%`, body: text, choices: [], links: null, dashboard: `${publicUrl}/#usage` });
+    log(`api-budget ${text}`);
   }
 
   /** `hauptling usage <vendor>` from a worker's status line: raw vendor JSON → stored; returns the text to show. */
@@ -235,7 +271,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     const withBase = { ...a, base, codegraph: cg };
     await host.run(a.slot, ['sh', '-c', 'mkdir -p "$(dirname "$0")" && cat > "$0" && echo .hauptling/ >> "$1/.git/info/exclude"', briefPath, a.dir], { input: briefText(withBase) });
     const prompt = 'Read your brief at .hauptling/brief.md and carry it out.';
-    await host.startWorker({ slot: a.slot, id: a.id, dir: a.dir, vendor: a.vendor, argv: launchArgv(cfg, a.vendor, entry, prompt),
+    await host.startWorker({ slot: a.slot, id: a.id, dir: a.dir, vendor: a.vendor, apiKey: a.billing === 'api', argv: launchArgv(cfg, a.vendor, entry, prompt),
       mcp, codegraphCache: cg ? codegraph.cacheDir(a.repo) : null,
       env: { HAUPTLING_AGENT: a.id, HAUPTLING_TOKEN: a.token, HAUPTLING_BROKER: workerUrl } });
     update(a.id, { state: 'working', base, idle: 0 });
@@ -801,5 +837,5 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     return null;
   }
 
-  return { call, authenticate, poll, watch, startQueued, bus, askForPage, answer, pump, recover, gpuReady, refreshUsage, recordUsage };
+  return { call, authenticate, poll, watch, startQueued, bus, askForPage, answer, pump, recover, gpuReady, refreshUsage, recordUsage, budgetState, billingFor };
 }

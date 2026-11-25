@@ -57,7 +57,8 @@ export function openDb(path) {
   db.exec(SCHEMA);
   // Columns added after phase 1 shipped; ALTER fails harmlessly when they exist.
   // usage: latest normalized usage JSON (src/usage.mjs); kept as the final total once the agent ends.
-  for (const col of ["role TEXT NOT NULL DEFAULT 'impl'", 'depends_on TEXT', 'start_from TEXT', 'usage TEXT']) {
+  // billing: 'api' (the vendor's API key) or 'plan' (the slot's sign-in), fixed when the agent starts.
+  for (const col of ["role TEXT NOT NULL DEFAULT 'impl'", 'depends_on TEXT', 'start_from TEXT', 'usage TEXT', 'billing TEXT']) {
     try { db.exec(`ALTER TABLE agents ADD COLUMN ${col}`); } catch {}
   }
   try { db.exec('ALTER TABLE asks ADD COLUMN nonce TEXT'); } catch {}
