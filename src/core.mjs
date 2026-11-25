@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { kvDel, kvGet, kvSet, tx } from './db.mjs';
 import * as mail from './mail.mjs';
+import * as codegraph from './codegraph.mjs';
 import { findModel, launchArgv, loadModels, nextVendor, pick } from './models.mjs';
 import { canInject } from './vendors.mjs';
 import { normalizeUsage, scrub, statusText } from './usage.mjs';
@@ -67,7 +68,8 @@ export function createCore({ db, host, github, notify = () => false, models = lo
   // ---------- spawning ----------
   function briefText(a) {
     const common = `- Blocked on a decision only the user can make? \`hauptling ask "question" --choice "A" --choice "B"\`, then end your turn; the answer arrives as your next message.
-- When finished: run \`hauptling report "<what you did, ≤300 chars>"\` as a command on its own (not chained with git or anything else); it commits and pushes for you.`;
+- When finished: run \`hauptling report "<what you did, ≤300 chars>"\` as a command on its own (not chained with git or anything else); it commits and pushes for you.${a.codegraph ? `
+- This clone has a CodeGraph index: find code with the codegraph_explore and codegraph_node tools (in a shell: \`codegraph explore "<what you look for>"\`, \`codegraph node <symbol or file>\`) before grep or reading whole files, and tell any subagent you start to use them too.` : ''}`;
     if (a.role === 'tests') {
       return `# Spec tests: ${a.title.replace(/^Spec tests: /, '')}
 
@@ -222,10 +224,19 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     await git(a, ['checkout', '--quiet', '-B', a.branch, `origin/${a.start_from || base}`]);
     // Inside the clone (auto modes don't read outside the workspace), excluded from git.
     const briefPath = `${a.dir}/.hauptling/brief.md`;
-    const withBase = { ...a, base };
+    const repoCfg = await repoConfig(a);
+    const cg = codegraph.enabled(repoCfg);
+    let repoMcp = {};
+    if (Array.isArray(repoCfg.mcp) && repoCfg.mcp.length) {
+      try { repoMcp = JSON.parse((await host.run(a.slot, ['cat', `${a.dir}/.mcp.json`])).stdout); } catch { /* none: every name is missing */ }
+    }
+    const { config: mcp, missing } = codegraph.mcpConfig({ codegraph: cg, repoCfg, repoMcp });
+    if (missing.length) emit(a.delegator, a.id, 'mcp-missing', `hauptling.json "mcp" names servers not in .mcp.json: ${missing.join(', ')}`);
+    const withBase = { ...a, base, codegraph: cg };
     await host.run(a.slot, ['sh', '-c', 'mkdir -p "$(dirname "$0")" && cat > "$0" && echo .hauptling/ >> "$1/.git/info/exclude"', briefPath, a.dir], { input: briefText(withBase) });
     const prompt = 'Read your brief at .hauptling/brief.md and carry it out.';
     await host.startWorker({ slot: a.slot, id: a.id, dir: a.dir, vendor: a.vendor, argv: launchArgv(cfg, a.vendor, entry, prompt),
+      mcp, codegraphCache: cg ? codegraph.cacheDir(a.repo) : null,
       env: { HAUPTLING_AGENT: a.id, HAUPTLING_TOKEN: a.token, HAUPTLING_BROKER: workerUrl } });
     update(a.id, { state: 'working', base, idle: 0 });
     mail.setStatus(db, a.id, `working: ${a.title}`.slice(0, STATUS_MAX));

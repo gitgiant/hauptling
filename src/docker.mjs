@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BROKER_PORT, home, shellLine } from './util.mjs';
 import { workerKeyEnv } from './keys.mjs';
+import * as codegraph from './codegraph.mjs';
 
 /*
  * Where workers run: a fresh Docker container per task.
@@ -242,6 +243,8 @@ export function slotDir(slot) {
 
 // ---------- worker host (what core.mjs drives) ----------
 
+const mcpPath = (id) => join(home(), 'mcp', `${id}.json`);
+
 export function dockerHost({ log = () => {} } = {}) {
   const exec = (id, args, opts) => docker(['exec', container(id), ...args], opts);
   const workRoot = join(home(), 'work');
@@ -261,17 +264,28 @@ export function dockerHost({ log = () => {} } = {}) {
     kind: 'docker',
     workRoot,
     run,
-    async startWorker({ slot, id, dir, vendor, argv, env }) {
+    async startWorker({ slot, id, dir, vendor, argv, env, mcp = { mcpServers: {} }, codegraphCache = null }) {
       await ensureNetwork({ log });
       const image = await imageFor(dir, { log });
       const c = config();
+      // Claude's managed MCP list (exclusive: the repo's own .mcp.json servers stay out unless copied in).
+      const mcpFile = mcpPath(id);
+      mkdirSync(dirname(mcpFile), { recursive: true });
+      writeFileSync(mcpFile, JSON.stringify(mcp, null, 2));
+      if (codegraphCache) codegraph.seed(codegraphCache, dir);
       await docker(['rm', '-f', container(id)]).catch(() => {});
       await docker(['run', '-d', '--name', container(id), '--init', '--user', uid(), '--network', NET,
         '--memory', String(c.memory), '--cpus', String(c.cpus), '--label', `hauptling.agent=${id}`, '--label', `hauptling.slot=${slot}`,
-        '-v', `${dir}:/work`, '-v', `${slotDir(slot)}:/home/worker/.vendor`, ...proxyEnv(),
+        '-v', `${dir}:/work`, '-v', `${slotDir(slot)}:/home/worker/.vendor`, '-v', `${mcpFile}:/etc/claude-code/managed-mcp.json:ro`, ...proxyEnv(),
         ...Object.entries({ ...env, ...workerKeyEnv(vendor), GIT_AUTHOR_NAME: `hauptling ${slot}`, GIT_AUTHOR_EMAIL: `${slot}@hauptling.local`, GIT_COMMITTER_NAME: `hauptling ${slot}`, GIT_COMMITTER_EMAIL: `${slot}@hauptling.local` }).flatMap(([k, v]) => ['-e', `${k}=${v}`]),
         image, 'sleep', 'infinity']);
       await exec(id, ['hauptling', 'prepare', vendor, '/work']);
+      if (codegraphCache) {
+        // Before the agent starts, so the saved index is the base commit's. A failure only costs the index.
+        const t0 = Date.now();
+        try { await exec(id, codegraph.SETUP, { timeout: 1800e3 }); codegraph.save(dir, codegraphCache); log(`codegraph ${id}: index ready in ${Math.round((Date.now() - t0) / 1000)} s`); }
+        catch (e) { log(`codegraph ${id}: ${e.message}`); }
+      }
       await exec(id, ['tmux', 'new-session', '-d', '-s', 'main', '-x', '220', '-y', '50', '-c', '/work', shellLine(argv)]);
       await exec(id, ['tmux', 'set-option', '-t', 'main', 'remain-on-exit', 'on']).catch(() => {});
     },
@@ -294,7 +308,7 @@ export function dockerHost({ log = () => {} } = {}) {
       await new Promise(r => setTimeout(r, 300));
       await exec(id, ['tmux', 'send-keys', '-t', 'main:', 'Enter'], { timeout: 15e3 });
     },
-    async stopWorker(_slot, id) { await docker(['rm', '-f', container(id)]).catch(() => {}); },
+    async stopWorker(_slot, id) { await docker(['rm', '-f', container(id)]).catch(() => {}); rmSync(mcpPath(id), { force: true }); },
     attachArgv: (_slot, id) => dockerArgv(['exec', '-it', container(id), 'tmux', 'attach', '-t', 'main']),
 
     /** Runs one test job: checkout on the host, tests in a fresh container; returns the report. */

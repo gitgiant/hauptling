@@ -8,7 +8,7 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends nodejs \
  && rm -rf /var/lib/apt/lists/*
 RUN corepack enable \
- && npm install -g --no-audit --no-fund @anthropic-ai/claude-code @openai/codex \
+ && npm install -g --no-audit --no-fund @anthropic-ai/claude-code @openai/codex @colbymchenry/codegraph \
  && npm cache clean --force
 COPY agy /usr/local/bin/agy
 COPY hauptling /opt/hauptling
@@ -20,5 +20,5 @@ RUN chmod 0755 /usr/local/bin/agy /opt/hauptling/bin/hauptling.mjs \
  && mkdir -p /home/worker /work && chmod 1777 /home/worker /work \
  && ln -s /home/worker/.vendor/gemini /home/worker/.gemini
 # Vendor config lives in the slot's credentials dir, mounted at /home/worker/.vendor.
-ENV HOME=/home/worker CLAUDE_CONFIG_DIR=/home/worker/.vendor/claude CODEX_HOME=/home/worker/.vendor/codex
+ENV CODEGRAPH_TELEMETRY=0 HOME=/home/worker CLAUDE_CONFIG_DIR=/home/worker/.vendor/claude CODEX_HOME=/home/worker/.vendor/codex
 WORKDIR /work

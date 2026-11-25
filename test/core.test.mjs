@@ -13,18 +13,20 @@ function fakeHost() {
   const state = { dirty: '', ahead: '1', head: 'abc1234def' };
   return {
     calls, typed, state,
-    async run(user, argv) {
+    async run(user, argv, opts = {}) {
       calls.push([user, ...argv]);
+      if (opts.input !== undefined) state.input = opts.input;
       const g = argv[0] === 'git' ? argv.slice(3) : null;
       if (g?.[0] === 'rev-parse' && g[1] === '--abbrev-ref') return { stdout: 'main\n' };
       if (g?.[0] === 'rev-parse') return { stdout: `${state.head}\n` };
       if (g?.[0] === 'status') return { stdout: state.dirty };
       if (g?.[0] === 'rev-list') return { stdout: `${state.ahead}\n` };
+      if (argv[0] === 'cat' && argv[1].endsWith('.mcp.json')) { if (!state.mcpJson) throw new Error('no file'); return { stdout: JSON.stringify(state.mcpJson) }; }
       if (argv[0] === 'cat' && argv[1].endsWith('hauptling.json')) { if (!state.config) throw new Error('no file'); return { stdout: JSON.stringify(state.config) }; }
       return { stdout: '' };
     },
     workRoot: '/hl/work',
-    async startWorker({ slot, id, dir, argv, env }) { calls.push(['tmux', slot, id, dir, argv, env]); },
+    async startWorker({ slot, id, dir, argv, env, mcp, codegraphCache }) { calls.push(['tmux', slot, id, dir, argv, env]); state.mcp = mcp; state.codegraphCache = codegraphCache; },
     async tmuxType(user, session, text) { typed.push([session, text]); },
     async stopWorker(user, session) { calls.push(['kill', session]); },
     alive: true, screen: '',
@@ -365,4 +367,23 @@ test('gateGpu: CPU gate passes → GPU gate queued ("gate: waiting for GPU") →
   gpu.done(g.pass(gpu.job));
   await settle();
   assert.equal(g.db.prepare('SELECT state FROM agents WHERE id = ?').get(g.id).state, 'merged');
+});
+
+test('CodeGraph: on by default (MCP server, cache, brief line); hauptling.json turns it off and allowlists repo servers', async () => {
+  const { db, host, core } = setup();
+  await core.call('delegator.start', { repo: 'gitgiant/demo', cli: 'claude' });
+  await core.call('spawn', { brief: '# A\nDo it.', model: 'haiku-5-5', vendor: 'claude' });
+  await settle();
+  assert.deepEqual(Object.keys(host.state.mcp.mcpServers), ['codegraph']);
+  assert.match(host.state.codegraphCache, /codegraph[\\/]gitgiant_demo$/);
+  assert.match(host.state.input, /codegraph_explore/);
+
+  host.state.config = { codegraph: false, mcp: ['db', 'nope'] };
+  host.state.mcpJson = { mcpServers: { db: { command: 'node', args: ['db.mjs'] }, other: { command: 'x' } } };
+  const b = await core.call('spawn', { brief: '# B\nDo it.', model: 'haiku-5-5', vendor: 'claude' });
+  await settle();
+  assert.deepEqual(host.state.mcp, { mcpServers: { db: { command: 'node', args: ['db.mjs'] } } });
+  assert.equal(host.state.codegraphCache, null);
+  assert.doesNotMatch(host.state.input, /codegraph/);
+  assert.ok(db.prepare("SELECT 1 FROM events WHERE agent = ? AND kind = 'mcp-missing' AND text LIKE '%nope%'").get(b.id));
 });
