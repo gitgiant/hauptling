@@ -66,6 +66,16 @@ Hauptling delegates coding tasks to Claude, Codex and agy (Antigravity CLI) agen
 - **Vendors panel**: signed-in and auto-mode state for each vendor, usage % and reset time, sign-in button that opens the login in a slot container.
 - Data: Claude statusline gives cost, context, model, 5h and 7d limits. Codex statusline and `/status` give limits; cost is estimated from `models.json`. agy usage is read from `/usage` (see below). Subscription cost is an API-equivalent estimate.
 
+### Dashboard layout (2026-11-25)
+
+- **Split views** (Board | Detail, History | detail, DB tables | main) fill the viewport below the header (`100dvh - --header-h`); each pane scrolls on its own. A splitter between the panes drags with pointer events (mouse, touch, pen); it is focusable, `role="separator"` with `aria-valuenow` (first pane, %), and arrow keys move it (Shift: bigger steps, Home/End: limits). Each pane keeps a minimum size. The size is a fraction of the view, kept in `localStorage` per view and orientation; double-click resets it.
+- **Stacked when portrait or narrow** (`max-width: 800px` or portrait): list above, detail below, and the splitter resizes heights.
+- **Hideable header**: drag it up past about a third of its height (or flick it up) to collapse it to a slim strip with a grab tab; click the tab or drag it down to bring the header back. A small ⌃ button does the same by keyboard. Drags never start on buttons, links or inputs. Collapsed state is in `localStorage`. `--header-h` (set from a ResizeObserver; the header wraps on narrow screens) is what the layout uses. No slide animation under `prefers-reduced-motion`.
+- **Narrow header**: usage chips and the host/GPU row scroll sideways instead of overflowing.
+- **Ultrawide**: board cards flow into columns (min 24rem each) instead of stretching; long text in the detail is capped at 110ch; the Usage view is capped at 110rem and centred.
+- **Collapsible Board groups**: each delegator group heading (delegator · repo) is a toggle (`aria-expanded`, caret). Collapsed, the group shows only its agents' status dots (tooltip = id and state; click selects). Remembered per group in `localStorage` (`hl-groups-shut`).
+- Pure logic (clamping, keyboard steps, collapse threshold) lives in `web/dashboard/layout.js`, unit-tested with `node:test`.
+
 ## Security
 
 - **Container egress allowlist**: containers sit on an internal Docker network with no route out; a hauptling egress proxy (domain allowlist in `~/.hauptling/egress-allow.txt`, blocked hosts logged) is the only exit: vendor APIs and sign-in, GitHub, package registries.

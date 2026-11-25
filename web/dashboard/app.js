@@ -1,5 +1,6 @@
 // Hauptling dashboard (phase 4). Vanilla ES module; all data comes from the broker's /dash routes.
 import { ansiFragment } from './ansi.js';
+import { STACKED_QUERY, STRIP_PX, DRAG_IGNORE, clampRatio, parseRatio, defaultRatio, splitKey, keyRatio, collapseAfterDrag } from './layout.js';
 // Text from the store is always set with textContent (h() below), never parsed as HTML.
 
 const $ = (sel) => document.querySelector(sel);
@@ -66,6 +67,141 @@ function setTheme(t) {
 setTheme(localStorage.getItem('hl-theme') === 'light' ? 'light' : 'dark');
 $('#usagebar').addEventListener('click', () => show(state.view === 'usage' ? 'board' : 'usage'));
 $('#theme').addEventListener('click', () => setTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'));
+
+// ---------- header: drag it up (or press ⌃) to hide it; a tab at the top brings it back ----------
+const top = $('header.top');
+const topTab = $('#top-tab');
+let topFull = top.offsetHeight;
+let topCollapsed = localStorage.getItem('hl-top') === 'collapsed';
+let topDragging = false;
+document.documentElement.style.setProperty('--strip', `${STRIP_PX}px`);
+/** --header-h is the header's visible height; the layout (body padding, split view heights) follows it. */
+const setHeaderH = (px) => document.documentElement.style.setProperty('--header-h', `${Math.round(px)}px`);
+function applyTop() {
+  top.classList.toggle('collapsed', topCollapsed);
+  topTab.hidden = !topCollapsed;
+  setHeaderH(topCollapsed ? STRIP_PX : topFull);
+}
+function setCollapsed(c) {
+  const hadFocus = top.contains(document.activeElement) || topTab === document.activeElement;
+  topCollapsed = c;
+  localStorage.setItem('hl-top', c ? 'collapsed' : 'open');
+  applyTop();
+  if (hadFocus) (c ? topTab : $('#hide-top')).focus();
+}
+new ResizeObserver(() => { topFull = top.offsetHeight; if (!topDragging) applyTop(); }).observe(top); // it wraps on narrow screens
+applyTop();
+$('#hide-top').addEventListener('click', () => setCollapsed(true));
+// Pointer clicks on the tab are handled by the drag below; this is for Enter/Space.
+topTab.addEventListener('click', (e) => { if (e.detail === 0) setCollapsed(false); });
+
+/** Vertical drag on the header (to hide it) or on the collapsed tab (to show it). */
+function dragHeader(e) {
+  const el = e.currentTarget;
+  if (e.button !== 0 || (el === top && (topCollapsed || e.target.closest(DRAG_IGNORE)))) return;
+  const from = topCollapsed, y0 = e.clientY;
+  let lastY = y0, lastT = e.timeStamp, vy = 0, moved = false;
+  el.setPointerCapture(e.pointerId);
+  const offset = (dy) => Math.max(-topFull, Math.min(0, (from ? -topFull : 0) + dy));
+  const move = (ev) => {
+    const dy = ev.clientY - y0;
+    if (!moved && Math.abs(dy) < 4) return;
+    if (!moved) { moved = true; topDragging = true; top.classList.add('dragging'); document.body.classList.add('dragging-top'); }
+    const dt = ev.timeStamp - lastT;
+    if (dt > 0) { vy = 0.7 * ((ev.clientY - lastY) / dt) + 0.3 * vy; lastY = ev.clientY; lastT = ev.timeStamp; }
+    const off = offset(dy);
+    top.style.transform = `translateY(${off}px)`;
+    setHeaderH(Math.max(STRIP_PX, topFull + off));
+  };
+  const end = (ev) => {
+    el.removeEventListener('pointermove', move);
+    el.removeEventListener('pointerup', end);
+    el.removeEventListener('pointercancel', end);
+    topDragging = false;
+    top.style.transform = '';
+    top.classList.remove('dragging');
+    document.body.classList.remove('dragging-top');
+    if (ev.type === 'pointercancel') { applyTop(); return; } // e.g. the browser took over a sideways scroll
+    if (ev.timeStamp - lastT > 120) vy = 0; // held still before letting go: no flick
+    const c = collapseAfterDrag({ collapsed: from, dy: ev.clientY - y0, vy, height: topFull });
+    if (c !== topCollapsed) setCollapsed(c); else applyTop();
+  };
+  el.addEventListener('pointermove', move);
+  el.addEventListener('pointerup', end);
+  el.addEventListener('pointercancel', end);
+}
+top.addEventListener('pointerdown', dragHeader);
+topTab.addEventListener('pointerdown', dragHeader);
+
+// ---------- splitters between the panes of each split view ----------
+const stacked = matchMedia(STACKED_QUERY);
+/** Defaults and minimum px of [first, second] pane, side by side and stacked. */
+const SPLITS = {
+  board: { def: [0.4, 0.45], min: [[288, 320], [96, 140]] },
+  history: { def: [0.4, 0.45], min: [[288, 320], [96, 140]] },
+  db: { def: [{ px: 208 }, 0.3], min: [[128, 320], [64, 140]] },
+};
+function initSplitter(sp) {
+  const id = sp.dataset.split, cfg = SPLITS[id], view = sp.parentElement, first = sp.previousElementSibling;
+  Object.assign(sp, { tabIndex: 0 });
+  sp.setAttribute('role', 'separator');
+  sp.setAttribute('aria-controls', first.id);
+  sp.setAttribute('aria-valuemin', '0');
+  sp.setAttribute('aria-valuemax', '100');
+  sp.title = 'Drag or use the arrow keys to resize; double-click to reset';
+  let ratio = 0.4;
+  const geo = () => {
+    const st = stacked.matches, cs = getComputedStyle(view), r = view.getBoundingClientRect();
+    const [a, b] = st ? [parseFloat(cs.paddingTop), parseFloat(cs.paddingBottom)] : [parseFloat(cs.paddingLeft), parseFloat(cs.paddingRight)];
+    const total = (st ? r.height : r.width) - a - b - (st ? sp.offsetHeight : sp.offsetWidth);
+    return { st, total, start: (st ? r.top : r.left) + a, min: cfg.min[st ? 1 : 0] };
+  };
+  const set = (want, save) => {
+    const g = geo();
+    ratio = clampRatio(want, g.total, ...g.min);
+    view.style.setProperty('--split', ratio.toFixed(4));
+    sp.setAttribute('aria-orientation', g.st ? 'horizontal' : 'vertical');
+    sp.setAttribute('aria-valuenow', String(Math.round(ratio * 100)));
+    if (save) localStorage.setItem(splitKey(id, g.st), ratio.toFixed(4));
+  };
+  const load = () => {
+    const g = geo();
+    if (g.total <= 0) return; // hidden view
+    set(parseRatio(localStorage.getItem(splitKey(id, g.st))) ?? defaultRatio(cfg.def[g.st ? 1 : 0], g.total), false);
+  };
+  new ResizeObserver(load).observe(view); // also fires when a hidden view is shown and when orientation flips
+  sp.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    sp.setPointerCapture(e.pointerId);
+    sp.classList.add('dragging');
+    document.body.classList.add('resizing');
+    const g = geo();
+    const pos = (ev) => (g.st ? ev.clientY : ev.clientX) - g.start;
+    const grab = pos(e) - ratio * g.total; // keep the handle where it was grabbed
+    const move = (ev) => set((pos(ev) - grab) / g.total, false);
+    const end = () => {
+      sp.removeEventListener('pointermove', move);
+      sp.removeEventListener('pointerup', end);
+      sp.removeEventListener('pointercancel', end);
+      sp.classList.remove('dragging');
+      document.body.classList.remove('resizing');
+      set(ratio, true);
+    };
+    sp.addEventListener('pointermove', move);
+    sp.addEventListener('pointerup', end);
+    sp.addEventListener('pointercancel', end);
+  });
+  sp.addEventListener('keydown', (e) => {
+    const g = geo();
+    const r = keyRatio(e.key, e.shiftKey, ratio, g.total, ...g.min);
+    if (r == null) return;
+    e.preventDefault();
+    set(r, true);
+  });
+  sp.addEventListener('dblclick', () => { localStorage.removeItem(splitKey(id, stacked.matches)); load(); });
+}
+for (const sp of document.querySelectorAll('.splitter')) initSplitter(sp);
 
 // ---------- state ----------
 const state = { board: null, selected: null, sub: 'screen', view: 'board', screenTimer: null, histSelected: null };
@@ -196,25 +332,39 @@ function usageChips(u) {
     h('span', { text: `${kfmt(u.tokens_in)}/${kfmt(u.tokens_out)} tok` }));
 }
 
+/** Board groups (delegator · repo) collapsed to status dots, remembered per browser. */
+const shutGroups = new Set((() => { try { return JSON.parse(localStorage.getItem('hl-groups-shut') || '[]'); } catch { return []; } })());
+function toggleGroup(key) {
+  if (!shutGroups.delete(key)) shutGroups.add(key);
+  localStorage.setItem('hl-groups-shut', JSON.stringify([...shutGroups]));
+  renderBoard(state.board);
+  [...document.querySelectorAll('#board .gtoggle')].find(b => b.closest('.group').dataset.key === key)?.focus();
+}
 const ORDER = { blocked: 0, exited: 1, failed: 1, working: 2, spawning: 3, waiting: 4, queued: 5, done: 6 };
 function renderBoard(b) {
   const live = b.agents.filter(a => !a.ended);
   const recent = b.agents.filter(a => a.ended).sort((x, y) => (x.updated_at < y.updated_at ? 1 : -1));
   const groups = new Map();
   for (const a of live) {
-    const key = `${a.delegator}\u0000${a.repo}`;
+    const key = `${a.delegator}|${a.repo}`; // delegator ids have no |
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(a);
   }
   const out = [];
   if (!live.length) out.push(h('p', { class: 'empty', text: 'No active agents. Start Claude, Codex or agy and run /delegator.' }));
   for (const [key, list] of groups) {
-    const [d, repo] = key.split('\u0000');
+    const d = key.slice(0, key.indexOf('|')), repo = key.slice(key.indexOf('|') + 1);
     list.sort((x, y) => (ORDER[x.state] ?? 9) - (ORDER[y.state] ?? 9) || (x.created_at < y.created_at ? -1 : 1));
-    out.push(h('div', { class: 'group' }, h('h2', {}, h('span', { class: 'mono', text: repo }), ' · ', h('span', { class: 'mono', text: d })), list.map(card)));
+    const shut = shutGroups.has(key);
+    out.push(h('div', { class: `group${shut ? ' shut' : ''}`, 'data-key': key },
+      h('h2', {}, h('button', { class: 'gtoggle', type: 'button', 'aria-expanded': String(!shut), title: shut ? 'Show the cards' : 'Hide the cards (keep the status dots)', onclick: () => toggleGroup(key) },
+        h('span', { class: 'caret', 'aria-hidden': 'true', text: '▾' }), h('span', { class: 'mono', text: repo }), ' · ', h('span', { class: 'mono', text: d }), shut ? h('span', { class: 'count', text: ` (${list.length})` }) : null)),
+      shut
+        ? h('div', { class: 'dots' }, list.map(a => h('button', { type: 'button', class: `dotbtn${state.selected === a.id ? ' selected' : ''}`, title: `${a.id} · ${a.state}`, 'aria-label': `${a.id}, ${a.state}`, onclick: () => select(a.id) }, h('span', { class: `dot ${a.state}` }))))
+        : h('div', { class: 'cards' }, list.map(card))));
   }
   if (recent.length) {
-    const det = h('details', { class: 'recent', open: localStorage.getItem('hl-recent') === '1' }, h('summary', { text: `Recent, last 24 h (${recent.length})` }), recent.map(card));
+    const det = h('details', { class: 'recent', open: localStorage.getItem('hl-recent') === '1' }, h('summary', { text: `Recent, last 24 h (${recent.length})` }), h('div', { class: 'cards' }, recent.map(card)));
     det.addEventListener('toggle', () => localStorage.setItem('hl-recent', det.open ? '1' : '0'));
     out.push(det);
   }
