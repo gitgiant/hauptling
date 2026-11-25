@@ -73,6 +73,24 @@ test('dashboard auth: token → cookie, no cookie → 401, docker0 → 403, othe
   s.done();
 });
 
+test('dashboard lifecycle actions require POST and show the paused headline', async () => {
+  const s = await setup();
+  s.host.pauseWorker = async () => {};
+  s.host.unpauseWorker = async () => {};
+  s.host.restartWorker = async () => true;
+  const body = { agent: s.id };
+  for (const action of ['pause', 'unpause', 'restart']) {
+    const path = `/dash/do/${action}`;
+    assert.equal((await s.req(path)).code, 404);
+    assert.equal((await s.req(path, { method: 'POST', body })).code, 403);
+    assert.equal((await s.req(path, { method: 'POST', headers: { 'x-hauptling': '1' }, body })).code, 200);
+    const agent = (await s.req('/dash/board')).json.agents.find(a => a.id === s.id);
+    assert.equal(agent.state, action === 'pause' ? 'paused' : 'working');
+    if (action === 'pause') assert.equal(agent.headline, 'Paused by you');
+  }
+  s.done();
+});
+
 test('dashboard board, detail and actions', async () => {
   const s = await setup();
   const who = s.core.authenticate(s.db.prepare('SELECT token FROM agents WHERE id = ?').get(s.id).token, 'ADMIN');

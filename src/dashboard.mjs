@@ -16,7 +16,7 @@ import { buildBody, brokerFacts, fileIssue, issueRepo, originUrl, scrubText } fr
  *   GET  /dash/stream       Server-Sent Events: a board snapshot whenever it changes
  *   GET  /dash/agent/<id>/diff|events, /dash/history, /dash/db/tables, /dash/db/table
  *   POST /dash/db/query     ad-hoc read-only SQL
- *   POST /dash/do/<call>    actions (answer, reply, kill, merge, gpu.*), need `X-Hauptling: 1`
+ *   POST /dash/do/<call>    actions (answer, reply, pause, unpause, restart, kill, merge, gpu.*), need `X-Hauptling: 1`
  *   POST /dash/report/preview|send   F2 "Report an issue": the scrubbed body, and filing it with `gh issue create`
  * Only requests to 127.0.0.1 are served (containers reach the broker on docker0 through the
  * egress relay and get 403). Token and nonce values are masked in everything the explorer shows.
@@ -40,6 +40,8 @@ export function headline(a) {
   const pending = t && !t.status ? (t.state === 'running' ? `Running ${kind}` : t.position ? `${cap(kind)} queued, ${ordinal(t.position)} in line` : `Waiting to run ${kind}`) : null;
   const why = (a.status || '').replace(/^[a-z-]+:\s*/, '');
   switch (a.state) {
+    case 'paused': return 'Paused by you';
+    case 'restarting': return 'Restarting its session';
     case 'blocked': return a.ask ? `Needs your answer: ${a.ask.question}` : `Stuck${why ? `: ${why}` : ''}; attach or message it`;
     case 'queued': return 'Queued: waiting for a free worker slot';
     case 'waiting': return `Waiting for its spec tests${a.depends_on ? ` from ${a.depends_on}` : ''}`;
@@ -72,7 +74,7 @@ export function headline(a) {
   }
 }
 
-const ACTIONS = new Set(['answer', 'reply', 'kill', 'merge', 'delegator.set', 'gpu.pause', 'gpu.resume', 'test.run', 'models.prefer']);
+const ACTIONS = new Set(['answer', 'reply', 'pause', 'unpause', 'restart', 'kill', 'merge', 'delegator.set', 'gpu.pause', 'gpu.resume', 'test.run', 'models.prefer']);
 const COOKIE = 'hl_dash';
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml' };
 
@@ -270,7 +272,7 @@ export function createDashboard({ db, dbPath, core, host, log = () => {}, slotDi
     const signedIn = new Map(all.map(l => [`${l.slot}:${l.vendor}`, l.ok]));
     const keyOf = new Map(all.filter(l => l.key).map(l => [l.vendor, l.key]));
     const rows = db.prepare('SELECT * FROM slot_usage ORDER BY at DESC').all();
-    const busy = new Map(db.prepare("SELECT slot, id, vendor FROM agents WHERE slot IS NOT NULL AND state IN ('spawning','working','blocked','done')").all().map(r => [r.slot, r]));
+    const busy = new Map(db.prepare("SELECT slot, id, vendor FROM agents WHERE slot IS NOT NULL AND state IN ('spawning','restarting','paused','working','blocked','done')").all().map(r => [r.slot, r]));
     // One account per vendor (signed in on every slot, or one API key): the newest reading of each window, from any slot.
     const vendors = VENDOR_LIST.map(vendor => {
       const latest = new Map();
@@ -326,7 +328,7 @@ export function createDashboard({ db, dbPath, core, host, log = () => {}, slotDi
       try {
         const s = await terms.screen(sid);
         errors = 0;
-        if (s.text !== lastText) { lastText = s.text; send('frame', { text: s.text }); }
+        if (s.text !== null && s.text !== lastText) { lastText = s.text; send('frame', { text: s.text }); }
         const inp = JSON.stringify(terms.inputState(sid));
         if (inp !== lastInput) { lastInput = inp; send('input', JSON.parse(inp)); }
         if (!s.alive) {

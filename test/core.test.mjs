@@ -64,6 +64,116 @@ function setup(gh = fakeGithub()) {
   return { db, host, core, gh, toasts };
 }
 
+test('pause holds its slot, hooks, mail, and CPU and GPU jobs until unpause restores the state', async () => {
+  const { core, db, host } = setup();
+  await core.call('delegator.start', { repo: 'gitgiant/demo', max: 1 });
+  host.gpuAvailable = async () => true;
+  host.pauseWorker = async (slot, id) => host.calls.push(['pause', slot, id]);
+  host.unpauseWorker = async (slot, id) => host.calls.push(['unpause', slot, id]);
+  const { id } = await core.call('spawn', { brief: 'task', vendor: 'claude', mode: 'cheapest' });
+  await settle();
+  const row = () => db.prepare('SELECT * FROM agents WHERE id = ?').get(id);
+  const who = core.authenticate(row().token, 'ADMIN');
+  await core.call('ask', { question: 'Which approach?', choices: ['A', 'B'] }, who);
+  for (const action of ['pause', 'unpause', 'restart']) {
+    await assert.rejects(core.call(action, { agent: id }, who), /not allowed for workers/);
+  }
+  const cpu = await core.call('test.request', { agent: id, sha: 'abc' });
+  const gpu = await core.call('test.request', { agent: id, sha: 'abc', gpu: true });
+  const other = await core.call('test.request', { repo: 'gitgiant/other', sha: 'def' });
+  await core.call('pause', { agent: id });
+  assert.equal(row().state, 'paused');
+  assert.equal(row().slot, 'hl-w1');
+  assert.deepEqual(host.calls.at(-1), ['pause', 'hl-w1', id]);
+
+  const after = await core.call('spawn', { brief: 'next task', vendor: 'claude', mode: 'cheapest' });
+  assert.equal(after.state, 'queued');
+  let probes = 0;
+  host.tmuxAlive = async () => { probes++; return false; };
+  await core.watch(Date.now() + 3600e3);
+  assert.equal(probes, 0);
+  assert.equal(row().state, 'paused');
+  await core.call('mail.send', { from: 'user', to: id, text: 'stay queued' });
+  assert.deepEqual(await core.call('hook', { event: 'Stop' }, who), {});
+  assert.equal(host.typed.length, 0);
+  assert.equal(db.prepare('SELECT seen_at FROM mail WHERE recipient = ?').get(id).seen_at, null);
+  assert.equal((await core.call('test.claim', { wait: 0 })).job.id, other.id);
+  assert.equal((await core.call('test.claim', { wait: 0 })).job, null);
+  assert.equal((await core.call('test.claim', { gpu: true, wait: 0 })).job, null);
+  await assert.rejects(core.call('test.run', { id: cpu.id }), /paused/);
+
+  await core.call('unpause', { agent: id });
+  assert.equal(row().state, 'blocked');
+  assert.deepEqual(host.calls.at(-1), ['unpause', 'hl-w1', id]);
+  assert.equal((await core.call('test.claim', { wait: 0 })).job.id, cpu.id);
+  assert.equal((await core.call('test.claim', { gpu: true, wait: 0 })).job.id, gpu.id);
+  assert.deepEqual((await core.call('wait', { timeout: 0 })).events.map(e => e.kind), ['paused', 'resumed']);
+});
+
+test('a running merge gate can finish during pause and applies its result on resume', async () => {
+  const { core, db, host } = setup();
+  host.pauseWorker = async () => {};
+  host.unpauseWorker = async () => {};
+  await core.call('delegator.start', { repo: 'gitgiant/demo', automerge: false });
+  const { id } = await core.call('spawn', { brief: 'task', vendor: 'claude', mode: 'cheapest' });
+  await settle();
+  const agent = () => db.prepare('SELECT * FROM agents WHERE id = ?').get(id);
+  const who = core.authenticate(agent().token, 'ADMIN');
+  await core.call('report', { text: 'ready for tests' }, who);
+  await settle();
+  const { job } = await core.call('test.claim', { wait: 0 });
+  await core.call('pause', { agent: id });
+  await core.call('test.report', { id: job.id, report: { sha: job.sha, status: 'fail', passed: 0, failed: 1 } });
+  assert.equal(agent().state, 'paused');
+  assert.equal(agent().paused_state, 'done');
+  await core.call('unpause', { agent: id });
+  assert.equal(agent().state, 'working');
+  assert.ok((await core.call('wait', { timeout: 0 })).events.some(e => e.kind === 'gate-failed'));
+});
+
+test('restart resumes recorded Claude and Codex sessions and keeps a fresh launch ready', async () => {
+  for (const [vendor, sessionId, expected] of [
+    ['claude', 'claude-session', ['--resume', 'claude-session']],
+    ['codex', 'codex-session', ['resume', 'codex-session']],
+    ['agy', 'agy-session', null],
+    ['claude', null, null],
+  ]) {
+    const { core, db, host } = setup();
+    await core.call('delegator.start', { repo: 'gitgiant/demo' });
+    const { id } = await core.call('spawn', { brief: 'original task', vendor, mode: 'cheapest' });
+    await settle();
+    const agent = db.prepare('SELECT * FROM agents WHERE id = ?').get(id);
+    const who = core.authenticate(agent.token, 'ADMIN');
+    if (sessionId) await core.call('hook', { vendor, event: 'SessionStart', sessionId }, who);
+    await core.call('mail.send', { from: 'user', to: id, text: 'unread follow-up' });
+    host.calls.length = 0;
+    let options;
+    host.restartWorker = async opts => { options = opts; return vendor !== 'agy'; };
+    await core.call('restart', { agent: id });
+    assert.equal(options.dir, agent.dir);
+    assert.equal(options.slot, agent.slot);
+    assert.equal(options.env.HAUPTLING_TOKEN, agent.token);
+    assert.equal(options.argv[0], vendor);
+    const preamble = 'You were restarted; continue from the current state of the branch and working tree.';
+    assert.ok(options.argv.at(-1).startsWith(preamble));
+    assert.ok(host.state.input.startsWith(preamble));
+    assert.match(host.state.input, /original task/);
+    if (expected) {
+      assert.equal(options.resumeArgv[0], vendor);
+      assert.ok(options.resumeArgv.includes(expected[0]));
+      assert.equal(options.resumeArgv.at(-2), expected[1]);
+    } else assert.equal(options.resumeArgv, undefined);
+    assert.equal(host.calls.some(c => c.includes('clone') || c.includes('checkout') || c.includes('rm')), false);
+    assert.equal(host.calls.some(c => c[0] === 'tmux'), vendor === 'agy', 'a missing container reuses the existing clone');
+    assert.equal(db.prepare('SELECT seen_at FROM mail WHERE recipient = ?').get(id).seen_at, null);
+    const updated = db.prepare('SELECT state, branch FROM agents WHERE id = ?').get(id);
+    assert.equal(updated.state, 'working');
+    assert.equal(updated.branch, agent.branch);
+    assert.ok((await core.call('wait', { timeout: 0 })).events.some(e => e.kind === 'restarted'));
+    db.close();
+  }
+});
+
 test('spawn → hooks → mail wake → report → PR without required checks → gate test → merge → slot freed', async () => {
   const { db, host, core, gh } = setup();
   const { id: d } = await core.call('delegator.start', { repo: 'gitgiant/demo', cli: 'claude' });

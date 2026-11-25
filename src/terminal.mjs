@@ -43,12 +43,13 @@ export function createTerminals({ db, host, slotDir, log = () => {}, now = () =>
     const m = LOGIN_RE.exec(sid);
     if (m) return { kind: 'login', sid, slot: m[1], vendor: m[2] };
     const a = agentRow(sid);
-    if (!a || !a.slot || !['spawning', 'working', 'blocked', 'done'].includes(a.state)) throw new Error(`No live session ${sid}`);
-    return { kind: 'agent', sid, slot: a.slot, id: a.id };
+    if (!a || !a.slot || !['spawning', 'restarting', 'paused', 'working', 'blocked', 'done'].includes(a.state)) throw new Error(`No live session ${sid}`);
+    return { kind: 'agent', sid, slot: a.slot, id: a.id, state: a.state };
   }
 
   async function screen(sid) {
     const s = resolve(sid);
+    if (s.state === 'paused' || s.state === 'restarting') return { text: null, alive: true };
     if (s.kind === 'agent') return { text: await host.tmuxScreen(s.slot, s.id), alive: await host.tmuxAlive(s.slot, s.id) };
     const dead = await tmux(['display-message', '-p', '-t', `${sid}:`, '#{pane_dead}']).then(o => o.trim() === '1', () => null);
     if (dead === null) return { text: '', alive: false, gone: true };
@@ -56,11 +57,17 @@ export function createTerminals({ db, host, slotDir, log = () => {}, now = () =>
   }
 
   function input(sid, on) {
-    resolve(sid);
+    const s = resolve(sid);
+    if (on && ['paused', 'restarting'].includes(s.state)) throw new Error(`Session is ${s.state}`);
     if (on) inputUntil.set(sid, now() + INPUT_IDLE_MS); else inputUntil.delete(sid);
     return inputState(sid);
   }
   function inputState(sid) {
+    const state = agentRow(sid)?.state;
+    if (state === 'paused' || state === 'restarting') {
+      inputUntil.delete(sid);
+      return { input: false, until: null, state };
+    }
     const until = inputUntil.get(sid) || 0;
     if (until && until <= now()) inputUntil.delete(sid);
     return { input: until > now(), until: until > now() ? new Date(until).toISOString() : null };
@@ -81,7 +88,7 @@ export function createTerminals({ db, host, slotDir, log = () => {}, now = () =>
 
   /** Starts a vendor sign-in on the host in tmux, input on. Same env as `hauptling login`. */
   /** A worker of this vendor running on the slot: it refreshes the same credential file. */
-  const runningOn = (slot, vendor) => db.prepare("SELECT id FROM agents WHERE slot = ? AND vendor = ? AND state IN ('spawning','working','blocked','done')").get(slot, vendor)?.id || null;
+  const runningOn = (slot, vendor) => db.prepare("SELECT id FROM agents WHERE slot = ? AND vendor = ? AND state IN ('spawning','restarting','paused','working','blocked','done')").get(slot, vendor)?.id || null;
 
   async function startLogin(slot, vendor) {
     if (!/^hl-[\w-]+$/.test(slot) || !LOGIN[vendor]) throw new Error('slot and vendor (claude, codex, agy) are required');

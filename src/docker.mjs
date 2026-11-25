@@ -295,11 +295,31 @@ export function dockerHost({ log = () => {} } = {}) {
     });
   }
 
+  const cliCommand = ({ argv, resumeArgv }) => {
+    const fresh = `exec ${shellLine(argv)}`;
+    return resumeArgv ? `${shellLine(resumeArgv)} || ${fresh}` : fresh;
+  };
+
+  async function startTui(id, opts) {
+    await exec(id, ['tmux', 'new-session', '-d', '-s', 'main', '-x', '220', '-y', '50', '-c', '/work', cliCommand(opts)]);
+    await exec(id, ['tmux', 'set-option', '-t', 'main', 'remain-on-exit', 'on']).catch(() => {});
+  }
+
+  async function workerState(id) {
+    try {
+      const { stdout } = await docker(['container', 'inspect', '--format', '{{.State.Status}}', container(id)]);
+      return stdout.trim();
+    } catch (e) {
+      if (/No such (container|object)/i.test(e.message)) return 'missing';
+      throw e;
+    }
+  }
+
   return {
     kind: 'docker',
     workRoot,
     run,
-    async startWorker({ slot, id, dir, vendor, argv, env, apiKey = false, mcp = { mcpServers: {} }, codegraphCache = null }) {
+    async startWorker({ slot, id, dir, vendor, argv, resumeArgv, env, apiKey = false, mcp = { mcpServers: {} }, codegraphCache = null }) {
       await ensureNetwork({ log });
       const image = await imageFor(dir, { log });
       const c = config();
@@ -322,8 +342,24 @@ export function dockerHost({ log = () => {} } = {}) {
         try { await exec(id, codegraph.SETUP, { timeout: 1800e3 }); codegraph.save(dir, codegraphCache); log(`codegraph ${id}: index ready in ${Math.round((Date.now() - t0) / 1000)} s`); }
         catch (e) { log(`codegraph ${id}: ${e.message}`); }
       }
-      await exec(id, ['tmux', 'new-session', '-d', '-s', 'main', '-x', '220', '-y', '50', '-c', '/work', shellLine(argv)]);
-      await exec(id, ['tmux', 'set-option', '-t', 'main', 'remain-on-exit', 'on']).catch(() => {});
+      await startTui(id, { argv, resumeArgv });
+    },
+    pauseWorker: (_slot, id) => docker(['pause', container(id)], { timeout: 15e3 }),
+    async unpauseWorker(_slot, id) {
+      try { await docker(['unpause', container(id)], { timeout: 15e3 }); }
+      catch (e) { if (await workerState(id) !== 'running') throw e; }
+    },
+    async restartWorker(opts) {
+      const { id } = opts;
+      const state = await workerState(id);
+      if (state === 'paused') await docker(['unpause', container(id)]);
+      else if (state !== 'running') return false;
+      // Check the saved tmux session inside the container. If only tmux died, recreate it there.
+      const { stdout } = await exec(id, ['sh', '-c', 'tmux has-session -t main 2>/dev/null && echo yes || echo no']);
+      if (stdout.trim() === 'yes') {
+        await exec(id, ['tmux', 'respawn-pane', '-k', '-t', 'main:', '-c', '/work', cliCommand(opts)]);
+      } else await startTui(id, opts);
+      return true;
     },
     async tmuxAlive(_slot, id) {
       try { return (await exec(id, ['tmux', 'display-message', '-p', '-t', 'main:', '#{pane_dead}'], { timeout: 15e3 })).stdout.trim() === '0'; } catch { return false; }
@@ -344,7 +380,11 @@ export function dockerHost({ log = () => {} } = {}) {
       await new Promise(r => setTimeout(r, 300));
       await exec(id, ['tmux', 'send-keys', '-t', 'main:', 'Enter'], { timeout: 15e3 });
     },
-    async stopWorker(_slot, id) { await docker(['rm', '-f', container(id)]).catch(() => {}); rmSync(mcpPath(id), { force: true }); },
+    async stopWorker(_slot, id, { paused = false } = {}) {
+      if (paused) await docker(['unpause', container(id)]).catch(() => {});
+      await docker(['rm', '-f', container(id)]).catch(() => {});
+      rmSync(mcpPath(id), { force: true });
+    },
     attachArgv: (_slot, id) => dockerArgv(['exec', '-it', container(id), 'tmux', 'attach', '-t', 'main']),
 
     /** Runs one test job: checkout on the host, tests in a fresh container; returns the report. */
