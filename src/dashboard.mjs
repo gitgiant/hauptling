@@ -4,6 +4,7 @@ import { join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { kvGet, kvSet } from './db.mjs';
 import { readOnlyQuery } from './dbquery.mjs';
+import { createTerminals } from './terminal.mjs';
 import { token as newToken } from './util.mjs';
 
 /*
@@ -58,7 +59,8 @@ export function masker(db) {
   };
 }
 
-export function createDashboard({ db, dbPath, core, host, log = () => {} }) {
+export function createDashboard({ db, dbPath, core, host, log = () => {}, slotDir = () => { throw new Error('no slots'); }, logins = () => [] }) {
+  const terms = createTerminals({ db, host, slotDir, log });
   const json = (res, code, body) => { res.writeHead(code, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(body)); };
   const agentRow = (id) => db.prepare('SELECT * FROM agents WHERE id = ?').get(id);
   const pub = ({ token: _t, brief: _b, ...a }) => a;
@@ -80,6 +82,7 @@ export function createDashboard({ db, dbPath, core, host, log = () => {} }) {
       return {
         ...pub(a),
         ended: ENDED.includes(a.state),
+        usage: a.usage ? JSON.parse(a.usage) : null,
         status: db.prepare('SELECT text FROM status WHERE identity = ?').get(a.id)?.text || null,
         test: t ? { id: t.id, state: t.state, gpu: Boolean(t.gpu), purpose: t.purpose, status: r?.status || null, passed: r?.passed ?? null, failed: r?.failed ?? null, at: t.done_at || t.created_at } : null,
         ask: ask ? { id: ask.id, question: ask.question, choices: JSON.parse(ask.choices), at: ask.at } : null,
@@ -156,6 +159,84 @@ export function createDashboard({ db, dbPath, core, host, log = () => {} }) {
       AND (id LIKE ? OR title LIKE ? OR repo LIKE ? OR branch LIKE ? OR IFNULL(report, '') LIKE ?) ORDER BY updated_at DESC LIMIT 200`).all(like, like, like, like, like).map(pub);
   }
 
+  // ---------- usage: vendors panel + spend ----------
+  const VENDOR_LIST = ['claude', 'codex', 'agy'];
+  async function usage() {
+    await core.refreshUsage?.().catch(() => {});
+    const slotNames = await core.call('slots.get');
+    const signedIn = new Map(logins(slotNames, VENDOR_LIST).map(l => [`${l.slot}:${l.vendor}`, l.ok]));
+    const rows = db.prepare('SELECT * FROM slot_usage').all();
+    const busy = new Map(db.prepare("SELECT slot, id, vendor FROM agents WHERE slot IS NOT NULL AND state IN ('spawning','working','blocked','done')").all().map(r => [r.slot, r]));
+    const slots = slotNames.map(slot => ({
+      slot,
+      agent: busy.get(slot)?.id || null,
+      vendors: VENDOR_LIST.map(vendor => ({
+        vendor,
+        signed_in: Boolean(signedIn.get(`${slot}:${vendor}`)),
+        login: `hauptling login ${slot} ${vendor}`,
+        limits: rows.filter(r => r.slot === slot && r.vendor === vendor).map(r => ({ window: r.window, used_pct: r.used_pct, resets_at: r.resets_at, at: r.at })),
+      })),
+    }));
+    return { slots, spend: spend() };
+  }
+
+  /** Totals of agents' (final) usage per day, vendor and repo; API-equivalent where vendors don't report cost. */
+  function spend(days = 30) {
+    const since = new Date(Date.now() - days * 86400e3).toISOString();
+    const rows = db.prepare('SELECT id, vendor, repo, created_at, usage FROM agents WHERE usage IS NOT NULL AND created_at >= ?').all(since);
+    const add = (map, key, u) => {
+      const t = map.get(key) || { key, agents: 0, cost_usd: 0, unknown: 0, estimated: 0, tokens_in: 0, tokens_out: 0 };
+      t.agents++;
+      if (u.cost_usd == null) t.unknown++; else { t.cost_usd += u.cost_usd; if (u.cost_estimated) t.estimated++; }
+      t.tokens_in += u.tokens_in || 0;
+      t.tokens_out += u.tokens_out || 0;
+      map.set(key, t);
+    };
+    const byDay = new Map(); const byVendor = new Map(); const byRepo = new Map(); const total = new Map();
+    for (const r of rows) {
+      const u = JSON.parse(r.usage);
+      add(byDay, r.created_at.slice(0, 10), u); add(byVendor, r.vendor, u); add(byRepo, r.repo, u); add(total, 'all', u);
+    }
+    const list = (m) => [...m.values()].map(t => ({ ...t, cost_usd: Math.round(t.cost_usd * 100) / 100 }));
+    return { days, total: list(total)[0] || null, byDay: list(byDay).sort((a, b) => (a.key < b.key ? 1 : -1)), byVendor: list(byVendor), byRepo: list(byRepo).sort((a, b) => b.cost_usd - a.cost_usd) };
+  }
+
+  // ---------- web terminal ----------
+  /** SSE: a frame whenever the screen changes (polled ~5×/s while open), the input state, and `end`. */
+  function termStream(req, res, sid) {
+    terms.resolve(sid);
+    res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive' });
+    res.write('retry: 2000\n\n');
+    let lastText = null; let lastInput = ''; let closed = false; let busy = false; let errors = 0;
+    const send = (ev, data) => res.write(`event: ${ev}\ndata: ${JSON.stringify(data)}\n\n`);
+    const step = async () => {
+      if (closed || busy) return;
+      busy = true;
+      try {
+        const s = await terms.screen(sid);
+        errors = 0;
+        if (s.text !== lastText) { lastText = s.text; send('frame', { text: s.text }); }
+        const inp = JSON.stringify(terms.inputState(sid));
+        if (inp !== lastInput) { lastInput = inp; send('input', JSON.parse(inp)); }
+        if (!s.alive) {
+          if (sid.startsWith('login-')) {
+            await terms.stopLogin(sid);
+            const m = /^login-(.+)-(claude|codex|agy)$/.exec(sid);
+            send('end', { reason: 'sign-in finished', signed_in: Boolean(logins([m[1]], [m[2]])[0]?.ok) });
+          } else send('end', { reason: 'session exited' });
+          stop();
+        }
+      } catch (e) {
+        if (++errors >= 5) { send('end', { reason: e.message }); stop(); }
+      } finally { busy = false; }
+    };
+    const timer = setInterval(step, 200);
+    timer.unref?.();
+    const stop = () => { closed = true; clearInterval(timer); res.end(); };
+    req.on('close', () => { closed = true; clearInterval(timer); });
+    step();
+  }
+
   // ---------- SQLite explorer ----------
   const tables = () => db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all()
     .map(t => ({ name: t.name, rows: db.prepare(`SELECT COUNT(*) n FROM "${t.name}"`).get().n, columns: db.prepare(`PRAGMA table_info("${t.name}")`).all().map(c => c.name) }));
@@ -221,6 +302,9 @@ export function createDashboard({ db, dbPath, core, host, log = () => {} }) {
         if (p === '/dash/stream') { stream(req, res); return true; }
         if (p === '/dash/board') { json(res, 200, await snapshot()); return true; }
         if (p === '/dash/history') { json(res, 200, history(url.searchParams.get('q') || '')); return true; }
+        if (p === '/dash/usage') { json(res, 200, await usage()); return true; }
+        const ts = /^\/dash\/term\/([\w.-]+)\/stream$/.exec(p);
+        if (ts) { try { termStream(req, res, ts[1]); } catch (e) { json(res, 404, { error: e.message }); } return true; }
         if (p === '/dash/db/tables') { json(res, 200, tables()); return true; }
         if (p === '/dash/db/table') { json(res, 200, table(Object.fromEntries(url.searchParams))); return true; }
         const m = /^\/dash\/agent\/([\w.-]+)\/(screen|diff|events)$/.exec(p);
@@ -238,6 +322,14 @@ export function createDashboard({ db, dbPath, core, host, log = () => {} }) {
         if (origin && new URL(origin).host !== req.headers.host) { json(res, 403, { error: 'Cross-origin request' }); return true; }
         const body = await readBody(req);
         if (p === '/dash/db/query') { json(res, 200, await query(body.sql)); return true; }
+        if (p === '/dash/term/login') { json(res, 200, await terms.startLogin(body.slot, body.vendor)); return true; }
+        const tp = /^\/dash\/term\/([\w.-]+)\/(input|keys|stop)$/.exec(p);
+        if (tp) {
+          const [, sid, what] = tp;
+          const r = what === 'input' ? terms.input(sid, Boolean(body.on)) : what === 'keys' ? await terms.keys(sid, body.keys) : await terms.stopLogin(sid);
+          json(res, 200, r ?? { ok: true });
+          return true;
+        }
         const m = /^\/dash\/do\/([\w.]+)$/.exec(p);
         if (m && ACTIONS.has(m[1])) {
           const result = await core.call(m[1], body);
@@ -255,5 +347,5 @@ export function createDashboard({ db, dbPath, core, host, log = () => {} }) {
     return true;
   }
 
-  return { handle, snapshot, table, query, timeline, history };
+  return { handle, snapshot, table, query, timeline, history, usage, spend, terms };
 }

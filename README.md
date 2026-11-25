@@ -44,7 +44,9 @@ Then start Claude, Codex or agy in that Linux shell and run `/delegator`.
 - `src/platform/` — host seam (notifications).
 - `src/mail.mjs` — machine-wide mailbox (ported from nullpunkt).
 - `src/vendors.mjs` — user-level hooks and trust for each vendor, hook I/O formats.
-- `src/dashboard.mjs`, `src/dbquery.mjs`, `web/dashboard/` — the dashboard (`hauptling dashboard`): live board over SSE, agent screen/diff/events, actions, read-only SQLite explorer. Served by the broker on 127.0.0.1 only.
+- `src/dashboard.mjs`, `src/dbquery.mjs`, `web/dashboard/` — the dashboard (`hauptling dashboard`): live board over SSE, agent screen/terminal/diff/events, actions, Usage tab (accounts, sign-in, spend), read-only SQLite explorer. Served by the broker on 127.0.0.1 only.
+- `src/terminal.mjs` — web terminal sessions without a pty: `tmux capture-pane -e` frames, `send-keys` input (off by default, 10 min idle timeout); vendor sign-ins run in host tmux.
+- `src/usage.mjs` — usage normalizers: Claude/agy status line (`hauptling usage <vendor>`), Codex session logs.
 - `src/runner.mjs`, `src/detect.mjs`, `src/junit.mjs` — deterministic test jobs (inside a test container; GPU jobs get `--gpus all`, see `hauptling gpu status|pause|resume`).
 - `src/github.mjs` — PRs and merges via the host `gh` login.
 - `models.json` — shipped defaults; override in `~/.hauptling/models.json`.

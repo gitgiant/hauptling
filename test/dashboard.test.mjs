@@ -125,3 +125,46 @@ test('SQLite explorer: browse + read-only SQL, secrets masked even under an alia
 test('stripAnsi removes colours, cursor moves and OSC titles', () => {
   assert.equal(stripAnsi('\x1b[31mred\x1b[0m \x1b[2K\x1b]0;title\x07ok\r'), 'red ok');
 });
+
+test('web terminal: frames from the agent pane; input off until switched on, gated keys, idle timeout', async () => {
+  const s = await setup();
+  const sent = [];
+  s.host.tmuxScreen = async () => '\x1b[32mgreen\x1b[0m prompt> ';
+  s.host.tmuxKeys = async (slot, id, args) => sent.push(args);
+  const { checkKeys, createTerminals } = await import('../src/terminal.mjs');
+  assert.throws(() => checkKeys([{ t: 'key', v: 'rm -rf' }]), /Bad key/);
+  assert.throws(() => checkKeys([]), /1–200/);
+  let t = 1_000_000;
+  const terms = createTerminals({ db: s.db, host: s.host, slotDir: () => '/x', now: () => t });
+  assert.equal((await terms.screen(s.id)).text, '\x1b[32mgreen\x1b[0m prompt> ');
+  await assert.rejects(terms.keys(s.id, [{ t: 'lit', v: 'y' }]), /Input is off/);
+  terms.input(s.id, true);
+  await terms.keys(s.id, [{ t: 'lit', v: 'yes' }, { t: 'key', v: 'Enter' }, { t: 'key', v: 'C-c' }]);
+  assert.deepEqual(sent, [['-l', 'yes'], ['Enter'], ['C-c']]);
+  t += 9 * 60e3;
+  assert.equal(terms.inputState(s.id).input, true, 'typing extends the 10 min window');
+  t += 11 * 60e3;
+  assert.equal(terms.inputState(s.id).input, false, 'off after 10 min without typing');
+  assert.throws(() => terms.resolve('../../etc'), /No live session/);
+  await assert.rejects(terms.startLogin('hl-w1; rm', 'claude'), /slot and vendor/);
+  // Over HTTP: input + keys need the X-Hauptling header like every action.
+  const on = await s.req(`/dash/term/${s.id}/input`, { method: 'POST', headers: { 'x-hauptling': '1' }, body: { on: true } });
+  assert.equal(on.json.input, true);
+  assert.equal((await s.req(`/dash/term/${s.id}/keys`, { method: 'POST', body: { keys: [{ t: 'lit', v: 'x' }] } })).code, 403);
+  s.done();
+});
+
+test('usage panel and spend: slot × vendor limits, sign-in state, totals of final usage', async () => {
+  const s = await setup();
+  s.db.prepare("INSERT INTO slot_usage VALUES ('hl-w1', 'claude', '5h', 42, '2026-11-24T20:00:00Z', '2026-11-24T15:00:00Z')").run();
+  s.db.prepare('UPDATE agents SET usage = ? WHERE id = ?').run(JSON.stringify({ cost_usd: 1.5, cost_estimated: false, tokens_in: 1000, tokens_out: 100, limits: [] }), s.id);
+  const u = (await s.req('/dash/usage')).json;
+  const w1 = u.slots.find(x => x.slot === 'hl-w1');
+  assert.equal(w1.agent, s.id);
+  assert.deepEqual(w1.vendors.find(v => v.vendor === 'claude').limits.map(l => [l.window, l.used_pct]), [['5h', 42]]);
+  assert.equal(w1.vendors[0].login, 'hauptling login hl-w1 claude');
+  assert.equal(u.spend.total.cost_usd, 1.5);
+  assert.equal(u.spend.byVendor[0].key, 'claude');
+  assert.equal((await s.req('/dash/board')).json.agents[0].usage.cost_usd, 1.5);
+  s.done();
+});

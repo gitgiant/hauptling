@@ -12,6 +12,7 @@
   <h1>Hauptling</h1>
   <nav class="tabs" role="tablist">
     <button role="tab" data-view="board" aria-selected="true">Board</button>
+    <button role="tab" data-view="usage">Usage</button>
     <button role="tab" data-view="history">History</button>
     <button role="tab" data-view="db">Database</button>
   </nav>
@@ -22,6 +23,20 @@
 <main id="view-board" class="split">
   <section id="board" class="board" aria-label="Agents"></section>
   <section id="detail" class="detail" aria-label="Agent detail"><p class="empty">Pick an agent.</p></section>
+</main>
+
+<main id="view-usage" class="usage" hidden>
+  <section class="panel">
+    <h2>Accounts</h2>
+    <p class="empty">Each slot signs in to each vendor once. 5 h and weekly windows belong to the slot's account: at 90% you get a notification, at 100% new spawns of that vendor skip the slot until it resets.</p>
+    <div id="vendors"></div>
+  </section>
+  <section class="panel">
+    <h2>Spend, last 30 days</h2>
+    <p class="empty">API-equivalent estimates (~ marks costs estimated from models.json prices). Subscription plans are billed differently.</p>
+    <div id="spend"></div>
+  </section>
+  <section id="login-term" class="panel" hidden></section>
 </main>
 
 <main id="view-history" class="split" hidden>

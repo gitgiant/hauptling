@@ -7,7 +7,8 @@ import { openDb } from './db.mjs';
 import { createCore } from './core.mjs';
 import { createDashboard } from './dashboard.mjs';
 import { platform } from './platform/index.mjs';
-import { dockerHost, WORKER_BROKER_URL } from './docker.mjs';
+import { dockerHost, slotDir, WORKER_BROKER_URL } from './docker.mjs';
+import { logins } from './setup.mjs';
 import { networkInterfaces } from 'node:os';
 import * as github from './github.mjs';
 import { BROKER_PORT, home, token } from './util.mjs';
@@ -64,7 +65,7 @@ export async function runBroker({ port = BROKER_PORT } = {}) {
   const host = { ...dockerHost({ log }), hostGit };
   const base = `http://127.0.0.1:${port}`;
   const core = createCore({ db, host, github, notify: plat.notify, workerUrl: WORKER_BROKER_URL, publicUrl: base, runnerToken, log });
-  const dash = createDashboard({ db, dbPath, core, host, log });
+  const dash = createDashboard({ db, dbPath, core, host, log, slotDir, logins });
 
   const handler = async (req, res) => {
     const send = (code, body) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); };

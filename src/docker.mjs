@@ -242,6 +242,14 @@ export function dockerHost({ log = () => {} } = {}) {
     async tmuxCapture(_slot, id, lines = 20) {
       return (await exec(id, ['tmux', 'capture-pane', '-p', '-t', 'main:', '-S', `-${lines}`], { timeout: 15e3 })).stdout;
     },
+    /** Visible pane with colour codes (web terminal frames). */
+    async tmuxScreen(_slot, id) {
+      return (await exec(id, ['tmux', 'capture-pane', '-p', '-e', '-t', 'main:'], { timeout: 5e3 })).stdout;
+    },
+    /** Raw send-keys args (web terminal input): ['-l', text] or [keyName]. */
+    async tmuxKeys(_slot, id, args) {
+      await exec(id, ['tmux', 'send-keys', '-t', 'main:', ...args], { timeout: 5e3 });
+    },
     async tmuxType(_slot, id, text) {
       await exec(id, ['tmux', 'send-keys', '-t', 'main:', '-l', String(text).replace(/\s*\n\s*/g, ' ')], { timeout: 15e3 });
       await new Promise(r => setTimeout(r, 300));

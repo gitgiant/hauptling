@@ -1,4 +1,5 @@
-// Hauptling dashboard (phase 4a). Vanilla ES module; all data comes from the broker's /dash routes.
+// Hauptling dashboard (phase 4). Vanilla ES module; all data comes from the broker's /dash routes.
+import { ansiFragment } from './ansi.js';
 // Text from the store is always set with textContent (h() below), never parsed as HTML.
 
 const $ = (sel) => document.querySelector(sel);
@@ -64,8 +65,10 @@ for (const b of document.querySelectorAll('.tabs button')) {
 function show(view) {
   state.view = view;
   for (const b of document.querySelectorAll('.tabs button')) b.setAttribute('aria-selected', String(b.dataset.view === view));
-  for (const v of ['board', 'history', 'db']) $(`#view-${v}`).hidden = v !== view;
+  for (const v of ['board', 'usage', 'history', 'db']) $(`#view-${v}`).hidden = v !== view;
+  if (view !== 'board') closeTerm();
   if (view === 'history') loadHistory();
+  if (view === 'usage') loadUsage();
   if (view === 'db') loadTables();
   location.hash = view === 'board' ? (state.selected ? `agent=${state.selected}` : '') : view;
   syncScreenTimer();
@@ -120,6 +123,7 @@ function card(a) {
     a.gate ? h('span', { text: `gate: ${a.gate}` }) : null,
     a.ci_note ? h('span', { class: 'chip fail', text: `CI failed ${a.ci_note.slice(0, 7)}` }) : null,
     testChip(a.test),
+    usageChips(a.usage),
   ];
   const el = h('div', { class: `card ${a.state}${state.selected === a.id ? ' selected' : ''}`, role: 'button', tabindex: '0', onclick: () => select(a.id), onkeydown: (e) => e.key === 'Enter' && select(a.id) },
     h('span', { class: `dot ${a.state}`, title: a.state }),
@@ -136,6 +140,16 @@ function testChip(t) {
   const label = `${t.gpu ? 'GPU ' : ''}${t.purpose === 'gate' ? 'gate' : 'test'}`;
   if (!t.status) return h('span', { class: 'chip run', text: `${label} ${t.state}` });
   return h('span', { class: `chip ${t.status}`, title: `${t.id} ${clock(t.at)}`, text: `${label} ${t.status} ${t.passed ?? 0}/${(t.passed ?? 0) + (t.failed ?? 0)}` });
+}
+
+const kfmt = (n) => (n == null ? '?' : n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n));
+const money = (usd, estimated) => (usd == null ? '$?' : `${estimated ? '~' : ''}$${usd.toFixed(2)}`);
+function usageChips(u) {
+  if (!u) return null;
+  return h('span', { class: 'usagechips', title: `${kfmt(u.tokens_in)} in / ${kfmt(u.tokens_out)} out tokens${u.cost_estimated ? ' · cost estimated' : ''}` },
+    u.context_pct != null ? h('span', { text: `ctx ${Math.round(u.context_pct)}%` }) : null,
+    h('span', { text: money(u.cost_usd, u.cost_estimated) }),
+    h('span', { text: `${kfmt(u.tokens_in)}/${kfmt(u.tokens_out)} tok` }));
 }
 
 const ORDER = { blocked: 0, exited: 1, failed: 1, working: 2, spawning: 3, waiting: 4, queued: 5, done: 6 };
@@ -165,8 +179,9 @@ function renderBoard(b) {
 
 // ---------- detail ----------
 function select(id) {
+  closeTerm();
   state.selected = id;
-  location.hash = `agent=${id}`;
+  location.hash = `agent=${id}${state.sub !== 'screen' ? `/${state.sub}` : ''}`;
   const a = state.board?.agents.find(x => x.id === id);
   if (!a) return;
   renderBoard(state.board);
@@ -195,7 +210,8 @@ function renderDetailHead(a, el) {
       h('span', { class: 'mono', text: a.id }), h('span', { text: a.state }), h('span', { text: `${a.vendor} · ${a.model}` }),
       h('span', { class: 'mono', text: `${a.branch} → ${a.base}` }), h('span', { class: 'mono', text: a.repo }),
       a.pr_url ? h('a', { href: a.pr_url, target: '_blank', rel: 'noopener', text: `PR #${a.pr_number}` }) : null,
-      h('span', { text: `started ${clock(a.created_at)} (${ago(a.created_at)})` })),
+      h('span', { text: `started ${clock(a.created_at)} (${ago(a.created_at)})` }),
+      a.usage ? h('span', { text: `${a.usage.context_pct != null ? `context ${Math.round(a.usage.context_pct)}% · ` : ''}${money(a.usage.cost_usd, a.usage.cost_estimated)} · ${kfmt(a.usage.tokens_in)} in / ${kfmt(a.usage.tokens_out)} out` }) : null),
     a.ask ? h('div', { class: 'ask' }, h('p', { text: a.ask.question }),
       h('div', { class: 'choices' }, a.ask.choices.map((c, i) => h('button', { class: 'primary', onclick: () => act('answer', { ask: a.ask.id, choice: i }, `Answered: ${c}`) }, c)))) : null,
     a.report ? h('div', { class: 'report' }, h('b', { text: 'Report: ' }), a.report) : null,
@@ -210,13 +226,15 @@ function renderDetailHead(a, el) {
 
 function renderSub(el, a) {
   const tabs = el.querySelector('.subtabs');
-  const subs = [['screen', 'Screen'], ['diff', 'Diff'], ['events', 'Events']];
-  put(tabs, ...subs.map(([k, label]) => h('button', { 'aria-selected': String(state.sub === k), onclick: () => { state.sub = k; renderSub(el, a); } }, label)));
+  closeTerm();
+  const subs = [['screen', 'Screen'], ['terminal', 'Terminal'], ['diff', 'Diff'], ['events', 'Events']];
+  put(tabs, ...subs.map(([k, label]) => h('button', { 'aria-selected': String(state.sub === k), onclick: () => { state.sub = k; location.hash = `agent=${a.id}${k !== 'screen' ? `/${k}` : ''}`; renderSub(el, a); } }, label)));
   const body = el.querySelector('.body');
   put(body, h('p', { class: 'empty', text: 'Loading…' }));
   if (state.sub === 'screen') loadScreen(a.id, body);
   if (state.sub === 'diff') loadDiff(a.id, body);
   if (state.sub === 'events') loadEvents(a.id, body);
+  if (state.sub === 'terminal') state.term = openTerminal(body, a.id);
   syncScreenTimer();
 }
 
@@ -274,6 +292,131 @@ function timelineView(t) {
 async function loadEvents(id, body) {
   try { put(body, ...timelineView(await api.get(`/dash/agent/${encodeURIComponent(id)}/events`)).filter(Boolean)); }
   catch (e) { put(body, h('p', { class: 'empty', text: e.message })); }
+}
+
+// ---------- web terminal ----------
+const NAMED = { Enter: 'Enter', Backspace: 'BSpace', Escape: 'Escape', ArrowUp: 'Up', ArrowDown: 'Down', ArrowLeft: 'Left', ArrowRight: 'Right',
+  Home: 'Home', End: 'End', PageUp: 'PPage', PageDown: 'NPage', Delete: 'DC', Insert: 'IC' };
+
+/** A live terminal for an agent or login session inside `container`. Returns { close }. */
+function openTerminal(container, sid, { autoInput = false, onEnd } = {}) {
+  let inputOn = false; let queue = []; let flushing = null; let ended = false;
+  const box = h('input', { type: 'checkbox' });
+  const note = h('span');
+  const pre = h('pre', { class: 'term', tabindex: '0', 'aria-label': `Terminal ${sid}` }, 'connecting…');
+  const setInput = (st) => {
+    inputOn = st.input; box.checked = st.input;
+    pre.classList.toggle('live', st.input);
+    note.textContent = st.input ? `Input on until ${new Date(st.until).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} (extends while you type). Click the screen, then type or paste.` : 'Watch only. Switch input on to type into it.';
+  };
+  box.addEventListener('change', async () => {
+    try { setInput(await api.post(`/dash/term/${encodeURIComponent(sid)}/input`, { on: box.checked })); if (box.checked) pre.focus(); }
+    catch (e) { toast(e.message, true); box.checked = inputOn; }
+  });
+  put(container, h('div', { class: 'termbar' }, h('label', { class: 'switch' }, box, 'Enable input'), note), pre);
+  const flush = () => {
+    flushing = null;
+    if (!queue.length) return;
+    const keys = queue; queue = [];
+    api.post(`/dash/term/${encodeURIComponent(sid)}/keys`, { keys }).then(setInput, (e) => toast(e.message, true));
+  };
+  const send = (k) => {
+    const prev = queue[queue.length - 1];
+    if (k.t === 'lit' && prev?.t === 'lit') prev.v += k.v; else queue.push(k);
+    flushing ||= setTimeout(flush, 40);
+  };
+  pre.addEventListener('keydown', (e) => {
+    if (!inputOn || e.metaKey) return;
+    let k = null;
+    if (e.ctrlKey && /^[a-z]$/i.test(e.key)) k = { t: 'key', v: `C-${e.key.toLowerCase()}` };
+    else if (e.key === 'Tab') k = { t: 'key', v: e.shiftKey ? 'BTab' : 'Tab' };
+    else if (NAMED[e.key]) k = { t: 'key', v: NAMED[e.key] };
+    else if (e.key.length === 1 && !e.ctrlKey && !e.altKey) k = { t: 'lit', v: e.key };
+    if (!k) return;
+    e.preventDefault();
+    send(k);
+  });
+  pre.addEventListener('paste', (e) => { if (!inputOn) return; e.preventDefault(); const t = e.clipboardData.getData('text'); if (t) send({ t: 'lit', v: t.slice(0, 4000) }); });
+  const es = new EventSource(`/dash/term/${encodeURIComponent(sid)}/stream`);
+  es.addEventListener('frame', (e) => {
+    const atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 20;
+    pre.replaceChildren(ansiFragment(JSON.parse(e.data).text.replace(/\s+$/, '')));
+    if (atBottom) pre.scrollTop = pre.scrollHeight;
+  });
+  es.addEventListener('input', async (e) => {
+    const st = JSON.parse(e.data);
+    setInput(st);
+    if (autoInput && !st.input && !ended) { autoInput = false; box.checked = true; box.dispatchEvent(new Event('change')); }
+  });
+  es.addEventListener('end', (e) => {
+    ended = true; es.close();
+    const d = JSON.parse(e.data);
+    note.textContent = `Ended: ${d.reason}${d.signed_in === true ? ' — signed in ✓' : d.signed_in === false ? ' — still not signed in' : ''}`;
+    pre.classList.remove('live'); box.disabled = true;
+    onEnd?.(d);
+  });
+  es.onerror = () => { if (!ended) note.textContent = 'Reconnecting…'; };
+  return { sid, close() { ended = true; es.close(); clearTimeout(flushing); } };
+}
+function closeTerm() { state.term?.close(); state.term = null; }
+
+// ---------- usage ----------
+let usageTimer = null;
+function meter(l) {
+  const cls = l.used_pct >= 100 ? 'full' : l.used_pct >= 90 ? 'warn' : '';
+  const label = l.window === 'week' ? 'week' : l.window;
+  return h('div', { class: 'acct' },
+    h('div', { class: `meter ${cls}`, role: 'meter', 'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-valuenow': String(l.used_pct), 'aria-label': `${label} window used` },
+      h('span', { text: label }), h('span', { class: 'track' }, h('span', { class: 'fill', style: `width:${Math.min(100, l.used_pct)}%` })), h('span', { class: 'val', text: `${Math.round(l.used_pct)}%` })),
+    h('span', { class: 'resets', text: l.resets_at ? `resets ${clock(l.resets_at)}` : 'reset time unknown' }));
+}
+async function loadUsage() {
+  clearTimeout(usageTimer);
+  try {
+    const u = await api.get('/dash/usage');
+    const vendors = ['claude', 'codex', 'agy'];
+    put($('#vendors'), h('table', { class: 'accounts' },
+      h('thead', {}, h('tr', {}, h('th', { text: 'Slot' }), vendors.map(v => h('th', { text: v })))),
+      h('tbody', {}, u.slots.map(s => h('tr', {},
+        h('td', {}, h('b', { class: 'mono', text: s.slot }), h('div', { class: 'resets', text: s.agent ? `busy: ${s.agent}` : 'free' })),
+        s.vendors.map(v => h('td', {}, h('div', { class: 'acct' },
+          h('div', { class: 'who' }, v.signed_in ? h('span', { class: 'ok', text: '✓ signed in' }) : h('span', { class: 'no', text: '✗ not signed in' })),
+          v.limits.sort((a, b) => (a.window === '5h' ? -1 : 1)).map(meter),
+          v.signed_in && !v.limits.length ? h('span', { class: 'resets', text: 'no usage reported yet' }) : null,
+          h('div', { class: 'who' },
+            h('button', { onclick: () => startLogin(s.slot, v.vendor) }, v.signed_in ? 'Sign in again' : 'Sign in'),
+            h('code', { class: 'resets', title: 'Or run this in a terminal', text: v.login }))))))))));
+    renderSpend(u.spend);
+  } catch (e) { toast(e.message, true); }
+  if (state.view === 'usage') usageTimer = setTimeout(loadUsage, 15e3);
+}
+function spendTable(title, rows) {
+  if (!rows.length) return null;
+  return [h('h3', { text: title, style: 'font-size:13px;margin:1rem 0 .3rem' }),
+    h('table', { class: 'grid' }, h('thead', {}, h('tr', {}, h('th', { text: '' }), h('th', { class: 'num', text: 'agents' }), h('th', { class: 'num', text: 'cost' }), h('th', { class: 'num', text: 'tokens in' }), h('th', { class: 'num', text: 'tokens out' }))),
+      h('tbody', {}, rows.map(r => h('tr', {}, h('td', { class: 'mono', text: r.key }), h('td', { class: 'num', text: r.agents }),
+        h('td', { class: 'num', title: r.unknown ? `${r.unknown} agent(s) with unknown cost not included` : '', text: r.unknown === r.agents ? '$?' : `${money(r.cost_usd, r.estimated > 0)}${r.unknown ? ' +?' : ''}` }),
+        h('td', { class: 'num', text: kfmt(r.tokens_in) }), h('td', { class: 'num', text: kfmt(r.tokens_out) })))))];
+}
+function renderSpend(sp) {
+  if (!sp.total) { put($('#spend'), h('p', { class: 'empty', text: 'No usage recorded yet. Workers report it while they run.' })); return; }
+  const t = sp.total;
+  put($('#spend'),
+    h('div', { class: 'figure' }, money(t.cost_usd, t.estimated > 0), ' ', h('small', { text: `${t.agents} agents · ${kfmt(t.tokens_in)} in / ${kfmt(t.tokens_out)} out tokens${t.unknown ? ` · ${t.unknown} with unknown cost` : ''}` })),
+    spendTable('By vendor', sp.byVendor), spendTable('By repo', sp.byRepo), spendTable('By day', sp.byDay));
+}
+async function startLogin(slot, vendor) {
+  try {
+    const { sid } = await api.post('/dash/term/login', { slot, vendor });
+    const panel = $('#login-term');
+    panel.hidden = false;
+    const body = h('div');
+    const close = h('button', { onclick: async () => { state.loginTerm?.close(); await api.post(`/dash/term/${sid}/stop`).catch(() => {}); panel.hidden = true; loadUsage(); } }, 'Close');
+    put(panel, h('div', { class: 'termbar' }, h('b', { text: `Signing ${slot} in to ${vendor}` }), h('span', { text: 'Open the link it prints, approve, and paste the code back here if asked. It closes when the CLI exits.' }), close), body);
+    state.loginTerm?.close();
+    state.loginTerm = openTerminal(body, sid, { autoInput: true, onEnd: (d) => { toast(d.signed_in ? `${slot} signed in to ${vendor}` : `${slot} ${vendor}: still not signed in`, !d.signed_in); loadUsage(); } });
+    panel.scrollIntoView({ behavior: 'smooth' });
+  } catch (e) { toast(e.message, true); }
 }
 
 // ---------- history ----------
@@ -348,5 +491,9 @@ $('#db-query textarea').addEventListener('keydown', (e) => { if (e.key === 'Ente
 setInterval(() => { if (state.board && state.view === 'board') renderBoard(state.board); }, 30e3); // elapsed times
 const hash = location.hash.slice(1);
 connect();
-if (hash === 'history' || hash === 'db') show(hash);
-else if (hash.startsWith('agent=')) state.pending = decodeURIComponent(hash.slice(6));
+if (['usage', 'history', 'db'].includes(hash)) show(hash);
+else if (hash.startsWith('agent=')) {
+  const [id, sub] = decodeURIComponent(hash.slice(6)).split('/');
+  state.pending = id;
+  if (['screen', 'terminal', 'diff', 'events'].includes(sub)) state.sub = sub;
+}
