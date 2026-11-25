@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { homedir, release } from 'node:os';
@@ -89,8 +90,13 @@ export const issueArgv = (repo, title, { label = false } = {}) =>
  * if missing) and files without it if that fails. Returns the issue URL.
  * @param {{ gh: (args: string[], opts?: object) => Promise<string>, repo: string, title: string, body: string }} o
  */
-export async function fileIssue({ gh, repo, title, body }) {
+export async function fileIssue({ gh, repo, title, body, screenshot }) {
   if (!String(title || '').trim()) throw new Error('Title is required');
+  let note = '';
+  if (screenshot) {
+    try { body = `${body}\n\n![screenshot](${await uploadScreenshot({ gh, repo, image: screenshot })})`; }
+    catch (e) { note = `Screenshot not attached: ${e.message}`; body = `${body}\n\n_${note}_`; }
+  }
   let label = true;
   try { await gh(['label', 'create', ISSUE_LABEL, '-R', repo, '--description', 'Reported from the Hauptling dashboard', '--color', '0e8a16']); }
   catch (e) { if (!/already exists/i.test(e.message)) label = false; }
@@ -100,7 +106,38 @@ export async function fileIssue({ gh, repo, title, body }) {
   catch (e) { if (!label || !/label/i.test(e.message)) throw e; out = await create(false); }
   const url = /https:\/\/\S+/.exec(out)?.[0];
   if (!url) throw new Error(`gh returned no issue URL: ${out.slice(-200)}`);
-  return url;
+  return note ? { url, note } : url;
+}
+
+export const SCREENSHOT_BRANCH = 'issue-screenshots';
+export const SCREENSHOT_MAX = 5 * 1024 * 1024;
+
+/** Decodes a base64 image (optionally a data: URL); throws unless it is PNG or JPEG (magic bytes) and under 5 MB. */
+export function checkImage(b64) {
+  const raw = String(b64 || '').replace(/^data:[^,]*,/, '');
+  if (raw.length > Math.ceil(SCREENSHOT_MAX * 4 / 3) + 4) throw new Error('Screenshot is over 5 MB');
+  const buf = Buffer.from(raw, 'base64');
+  if (buf.length > SCREENSHOT_MAX) throw new Error('Screenshot is over 5 MB');
+  const png = buf.length > 8 && buf.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  const jpg = buf.length > 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff;
+  if (!png && !jpg) throw new Error('Screenshot is not a PNG or JPEG image');
+  return { buf, ext: png ? 'png' : 'jpg' };
+}
+
+const api = (gh, method, path, json) => gh(['api', '-X', method, path, '--input', '-'], { input: JSON.stringify(json) });
+
+/** Commits the image to the orphan `issue-screenshots` branch (made first if missing); returns the embeddable URL. */
+export async function uploadScreenshot({ gh, repo, image, now = new Date() }) {
+  const { buf, ext } = checkImage(image);
+  try { await gh(['api', `repos/${repo}/git/ref/heads/${SCREENSHOT_BRANCH}`]); }
+  catch {
+    const tree = JSON.parse(await api(gh, 'POST', `repos/${repo}/git/trees`, { tree: [{ path: 'README.md', mode: '100644', type: 'blob', content: 'Screenshots attached to issues filed from the Hauptling dashboard.\n' }] }));
+    const commit = JSON.parse(await api(gh, 'POST', `repos/${repo}/git/commits`, { message: 'Start issue-screenshots', tree: tree.sha, parents: [] }));
+    await api(gh, 'POST', `repos/${repo}/git/refs`, { ref: `refs/heads/${SCREENSHOT_BRANCH}`, sha: commit.sha });
+  }
+  const path = `${now.toISOString().slice(0, 7)}/${randomBytes(8).toString('hex')}.${ext}`;
+  await api(gh, 'PUT', `repos/${repo}/contents/${path}`, { message: 'Add screenshot', content: buf.toString('base64'), branch: SCREENSHOT_BRANCH });
+  return `https://github.com/${repo}/blob/${SCREENSHOT_BRANCH}/${path}?raw=true`;
 }
 
 export const originUrl = () => run('git', ['remote', 'get-url', 'origin']);

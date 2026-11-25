@@ -7,7 +7,7 @@ import { kvGet, kvSet } from './db.mjs';
 import { readOnlyQuery } from './dbquery.mjs';
 import { createTerminals } from './terminal.mjs';
 import { token as newToken } from './util.mjs';
-import { buildBody, brokerFacts, fileIssue, issueRepo, originUrl, scrubText } from './report.mjs';
+import { buildBody, checkImage, brokerFacts, fileIssue, issueRepo, originUrl, scrubText } from './report.mjs';
 
 /*
  * Dashboard (phase 4a), served by the broker:
@@ -388,9 +388,9 @@ export function createDashboard({ db, dbPath, core, host, log = () => {}, slotDi
   const SIGN_IN = `<!doctype html><meta charset="utf-8"><title>Hauptling</title><style>body{font:16px system-ui;max-width:36rem;margin:4rem auto;padding:0 1rem}</style>
 <h1>Hauptling dashboard</h1><p>Not signed in. Run <code>hauptling dashboard</code> in a terminal on this machine: it opens this page with a sign-in link.</p>`;
 
-  async function readBody(req) {
+  async function readBody(req, max = 64e3) {
     let raw = '';
-    for await (const c of req) { raw += c; if (raw.length > 64e3) throw new Error('Body too large'); }
+    for await (const c of req) { raw += c; if (raw.length > max) throw new Error('Body too large'); }
     return raw ? JSON.parse(raw) : {};
   }
 
@@ -437,7 +437,7 @@ export function createDashboard({ db, dbPath, core, host, log = () => {}, slotDi
         if (req.headers['x-hauptling'] !== '1') { json(res, 403, { error: 'Missing X-Hauptling header' }); return true; }
         const origin = req.headers.origin;
         if (origin && new URL(origin).host !== req.headers.host) { json(res, 403, { error: 'Cross-origin request' }); return true; }
-        const body = await readBody(req);
+        const body = await readBody(req, p === '/dash/report/send' ? 8e6 : 64e3);
         if (p === '/dash/db/query') { json(res, 200, await query(body.sql)); return true; }
         if (p === '/dash/term/login') { json(res, 200, await terms.startLogin(body.slot, body.vendor)); return true; }
         const tp = /^\/dash\/term\/([\w.-]+)\/(input|keys|stop)$/.exec(p);
@@ -451,8 +451,9 @@ export function createDashboard({ db, dbPath, core, host, log = () => {}, slotDi
           const b = await reportBody(body);
           if (p.endsWith('preview')) { json(res, 200, b); return true; }
           if (!String(body.title || '').trim()) throw new Error('Title is required');
-          const url = await fileIssue({ gh: report.gh, repo: b.repo, title: b.title, body: b.body });
-          json(res, 200, { ok: true, url });
+          if (body.screenshot) checkImage(body.screenshot); // reject a bad image before anything is filed
+          const r = await fileIssue({ gh: report.gh, repo: b.repo, title: b.title, body: b.body, screenshot: body.screenshot });
+          json(res, 200, typeof r === 'string' ? { ok: true, url: r } : { ok: true, ...r });
           return true;
         }
         const m = /^\/dash\/do\/([\w.]+)$/.exec(p);
