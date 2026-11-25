@@ -79,12 +79,20 @@ export function nextVendor(db, cfg) {
   return next;
 }
 
-/** argv for a vendor's TUI with a model entry and initial prompt. */
-export function launchArgv(cfg, vendor, entry, prompt) {
-  const tpl = cfg.vendors[vendor].launch;
-  const argv = tpl.map(a => a.replaceAll('{model}', entry.model || entry.id).replaceAll('{prompt}', prompt));
+/** Reasoning effort for a worker: spawn --effort, else the model entry's, else the tier default. null = vendor default. */
+export function effortFor(cfg, vendor, entry, override) {
+  const v = cfg.vendors[vendor];
+  if (override && !v.effortArgs) throw new Error(`${vendor} takes no --effort (its model ids carry the effort; pick another model)`);
+  return v.effortArgs ? override || entry.effort || cfg.effort?.[entry.tier] || null : null;
+}
+
+/** argv for a vendor's TUI with a model entry, initial prompt and optional effort. */
+export function launchArgv(cfg, vendor, entry, prompt, effort = null) {
+  const v = cfg.vendors[vendor];
+  const argv = v.launch.map(a => a.replaceAll('{model}', entry.model || entry.id).replaceAll('{prompt}', prompt));
+  const eff = effort && v.effortArgs ? v.effortArgs.map(a => a.replaceAll('{effort}', effort)) : [];
   // Extra model args go right after the binary so a trailing positional prompt stays last.
-  return [argv[0], ...(entry.args || []), ...argv.slice(1)];
+  return [argv[0], ...eff, ...(entry.args || []), ...argv.slice(1)];
 }
 
 export function table(cfg) {
@@ -92,7 +100,8 @@ export function table(cfg) {
   for (const v of enabledVendors(cfg)) {
     for (const m of cfg.vendors[v].models) {
       const price = m.usd_in == null ? 'price ?' : `$${m.usd_in}/$${m.usd_out} per Mtok`;
-      lines.push(`${v.padEnd(7)} ${m.id.padEnd(26)} tier ${m.tier}  ${price}${m.notes ? `  ${m.notes}` : ''}${m.tier > maxTier(cfg) ? '  (above prefer)' : ''}`);
+      const eff = effortFor(cfg, v, m);
+      lines.push(`${v.padEnd(7)} ${m.id.padEnd(26)} tier ${m.tier}  ${eff ? `effort ${eff}  ` : ''}${price}${m.notes ? `  ${m.notes}` : ''}${m.tier > maxTier(cfg) ? '  (above prefer)' : ''}`);
     }
   }
   return lines.join('\n');

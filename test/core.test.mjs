@@ -69,7 +69,10 @@ test('spawn → hooks → mail wake → report → PR without required checks �
   assert.equal(a.state, 'working');
   assert.equal(a.slot, 'hl-w1');
   const tmux = host.calls.find(c => c[0] === 'tmux');
-  assert.deepEqual(tmux[4].slice(0, 3), ['claude', '--model', 'claude-haiku-5-5']);
+  const argv = tmux[4];
+  assert.equal(argv[0], 'claude');
+  assert.equal(argv[argv.indexOf('--model') + 1], 'claude-haiku-5-5');
+  assert.equal(argv[argv.indexOf('--effort') + 1], 'low', 'tier 1 gets the tier-1 effort');
   assert.equal(tmux[5].HAUPTLING_AGENT, s.id);
   assert.ok(host.calls.some(c => c.includes('clone') && c.includes('https://github.com/gitgiant/demo.git')));
 

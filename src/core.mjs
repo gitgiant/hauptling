@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { kvDel, kvGet, kvSet, tx } from './db.mjs';
 import * as mail from './mail.mjs';
-import { checkTier, findModel, launchArgv, loadModels, nextVendor, pick, preferOf, setPrefer } from './models.mjs';
+import { checkTier, effortFor, findModel, launchArgv, loadModels, nextVendor, pick, preferOf, setPrefer } from './models.mjs';
 import { canInject } from './vendors.mjs';
 import { readFileSync } from 'node:fs';
 import { normalizeUsage, scrub, spendLine, statusText, windowSnapshot } from './usage.mjs';
@@ -22,6 +22,7 @@ const ENDED = ['merged', 'killed', 'closed', 'handed-off'];
 const AGENT_CALLS = new Set(['hook', 'report', 'ask', 'mail.send', 'mail.check', 'mail.status', 'mail.peers', 'test.request', 'test.wait', 'test.get', 'whoami', 'usage.report']);
 const RUNNER_CALLS = new Set(['test.claim', 'test.report', 'test.heartbeat']);
 
+const HANDOFF_PCT = 85;
 const WORKER_RULES = readFileSync(new URL('../prompts/worker-rules.md', import.meta.url), 'utf8').trim();
 
 export function createCore({ db, host, github, notify = () => false, models = loadModels, savePrefer = setPrefer, workerUrl, publicUrl = workerUrl, runnerToken, log = () => {}, stallMinutes = Number(process.env.HAUPTLING_STALL_MINUTES || 10), idleMinutes = Number(process.env.HAUPTLING_IDLE_MINUTES || 15) }) {
@@ -103,7 +104,7 @@ Hauptling worker notes (you are ${a.id}, branch ${a.branch}, base ${a.base}):
 ${common} Keep the session open afterwards: CI failures and review notes arrive as messages.`;
   }
 
-  async function spawn({ delegator, vendor, model, mode = 'suggest', difficulty = 'normal', repo, base, brief, title, testWriter = false, allowTier = false }) {
+  async function spawn({ delegator, vendor, model, mode = 'suggest', difficulty = 'normal', repo, base, brief, title, testWriter = false, allowTier = false, effort }) {
     const d = delegatorId(delegator);
     const drow = db.prepare('SELECT * FROM delegators WHERE id = ?').get(d);
     repo ||= drow.repo;
@@ -117,12 +118,13 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
       vendor ||= tried[0];
     }
     const entry = checkTier(cfg, vendor, model ? findModel(cfg, vendor, model) : pick(cfg, vendor, mode, difficulty), allowTier);
+    const eff = effortFor(cfg, vendor, entry, effort);
     if (!brief?.trim()) throw new Error('Brief is empty');
     const id = `${vendor}_${sanitizeModel(entry.id)}_${hex(3).slice(0, 5)}`;
     title ||= (brief.match(/^#+\s*(.+)$/m)?.[1] || brief.trim().split('\n')[0]).slice(0, 72);
     const insert = (row) => {
-      db.prepare(`INSERT INTO agents (id, delegator, vendor, model, repo, base, branch, brief, title, test_writer, state, token, created_at, updated_at, role, depends_on)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(row.id, d, row.vendor, row.model, repo, base || '', `hl/${id}`, brief, row.title, testWriter ? 1 : 0, row.state, token(), now(), now(), row.role, row.depends_on ?? null);
+      db.prepare(`INSERT INTO agents (id, delegator, vendor, model, repo, base, branch, brief, title, test_writer, state, token, created_at, updated_at, role, depends_on, effort)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(row.id, d, row.vendor, row.model, repo, base || '', `hl/${id}`, brief, row.title, testWriter ? 1 : 0, row.state, token(), now(), now(), row.role, row.depends_on ?? null, row.effort ?? null);
       mail.addIdentity(db, row.id, row.vendor, sanitizeModel(row.model), repo);
     };
     let tw = null;
@@ -130,13 +132,13 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
       // Tests first: the test writer (cheapest model unless chosen) commits spec tests on the task branch; the implementer waits.
       const twVendor = testWriter.vendor || nextVendor(db, cfg);
       const twEntry = testWriter.model ? findModel(cfg, twVendor, testWriter.model) : pick(cfg, twVendor, 'cheapest');
-      tw = { id: `${twVendor}_${sanitizeModel(twEntry.id)}_${hex(3).slice(0, 5)}`, vendor: twVendor, model: twEntry.id };
+      tw = { id: `${twVendor}_${sanitizeModel(twEntry.id)}_${hex(3).slice(0, 5)}`, vendor: twVendor, model: twEntry.id, effort: effortFor(cfg, twVendor, twEntry) };
     }
-    insert({ id, vendor, model: entry.id, title, state: tw ? 'waiting' : 'queued', role: 'impl', depends_on: tw?.id });
+    insert({ id, vendor, model: entry.id, effort: eff, title, state: tw ? 'waiting' : 'queued', role: 'impl', depends_on: tw?.id });
     if (tw) insert({ ...tw, title: `Spec tests: ${title}`.slice(0, 72), state: 'queued', role: 'tests' });
     const started = await startQueued(d);
     const state = (x) => (started.includes(x) ? 'spawning' : agentRow(x).state);
-    return { id, vendor, model: entry.id, state: state(id), ...(tw ? { testWriter: { id: tw.id, vendor: tw.vendor, model: tw.model, state: state(tw.id) } } : {}) };
+    return { id, vendor, model: entry.id, effort: eff, state: state(id), ...(tw ? { testWriter: { id: tw.id, vendor: tw.vendor, model: tw.model, state: state(tw.id) } } : {}) };
   }
 
   /** Starts queued agents while the delegator is under its limit and a slot is free. */
@@ -184,6 +186,20 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   const vendorUsable = (vendor) => !exhausted(vendor);
   function priceOf(a) { try { return findModel(models(), a.vendor, a.model); } catch { return null; } }
 
+  /**
+   * Token economy: active delegators running on this vendor's CLI get `[handoff-due]` once per window at 85%.
+   * Assumes the delegator's CLI is signed in to the same vendor account as the slots (one account per vendor).
+   */
+  function handoffDue(vendor, l) {
+    for (const d of db.prepare('SELECT id FROM delegators WHERE active = 1 AND cli = ?').all(vendor)) {
+      const key = `handoff:due:${d.id}:${l.window}:${l.resets_at || 'unknown'}`;
+      if (kvGet(db, key)) continue;
+      kvSet(db, key, now());
+      const when = l.resets_at ? `resets ${new Date(l.resets_at).toLocaleString()}` : 'reset time unknown';
+      emit(d.id, null, 'handoff-due', `${vendor} ${l.window} window at ${Math.round(l.used_pct)}% (${when}): write the handoff now (hauptling handoff --file <note>) and tell the user to start the next CLI`);
+    }
+  }
+
   /** Stores an agent's usage and its slot's limit windows; warns once per window at 90%. */
   function recordUsage(a, u) {
     update(a.id, { usage: JSON.stringify({ ...u, at: now() }) });
@@ -191,6 +207,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     for (const l of u.limits) {
       db.prepare(`INSERT INTO slot_usage (slot, vendor, window, used_pct, resets_at, at) VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT (slot, vendor, window) DO UPDATE SET used_pct = excluded.used_pct, resets_at = excluded.resets_at, at = excluded.at`).run(a.slot, a.vendor, l.window, l.used_pct, l.resets_at, now());
+      if (l.used_pct >= HANDOFF_PCT) handoffDue(a.vendor, l);
       if (l.used_pct < 90) continue;
       const key = `usage:warn:${a.vendor}:${l.window}:${l.resets_at || 'unknown'}`; // once per account window, whichever slot reports it
       if (kvGet(db, key)) continue;
@@ -240,7 +257,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     const withBase = { ...a, base };
     await host.run(a.slot, ['sh', '-c', 'mkdir -p "$(dirname "$0")" && cat > "$0" && echo .hauptling/ >> "$1/.git/info/exclude"', briefPath, a.dir], { input: briefText(withBase) });
     const prompt = 'Read your brief at .hauptling/brief.md and carry it out.';
-    await host.startWorker({ slot: a.slot, id: a.id, dir: a.dir, vendor: a.vendor, argv: launchArgv(cfg, a.vendor, entry, prompt),
+    await host.startWorker({ slot: a.slot, id: a.id, dir: a.dir, vendor: a.vendor, argv: launchArgv(cfg, a.vendor, entry, prompt, a.effort),
       env: { HAUPTLING_AGENT: a.id, HAUPTLING_TOKEN: a.token, HAUPTLING_BROKER: workerUrl } });
     update(a.id, { state: 'working', base, idle: 0, usage_start: JSON.stringify(windowSnapshot(db, a.vendor)) });
     mail.setStatus(db, a.id, `working: ${a.title}`.slice(0, STATUS_MAX));

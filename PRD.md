@@ -1,6 +1,6 @@
 # PRD: Hauptling agent delegator
 
-Status: design agreed 2026-11-20 (grill-me interview). Phases 1 and 2 done (decisions under Phases); phase 3 (GPU runner and lease) built and verified on the RTX 2070 SUPER 2026-11-24; phase 4a (dashboard) built 2026-11-24; 4b (usage, web terminal, vendors panel) built 2026-11-24. Codex model prices in `models.json` are still null (cost shows unknown). Living copy: https://claude.ai/artifact/YbwvdtdzM8JuvEagKG1Xh4 Token economy stage 1 built 2026-11-25 (stages 2–3 open).
+Status: design agreed 2026-11-20 (grill-me interview). Phases 1 and 2 done (decisions under Phases); phase 3 (GPU runner and lease) built and verified on the RTX 2070 SUPER 2026-11-24; phase 4a (dashboard) built 2026-11-24; 4b (usage, web terminal, vendors panel) built 2026-11-24. Codex model prices in `models.json` are still null (cost shows unknown). Living copy: https://claude.ai/artifact/YbwvdtdzM8JuvEagKG1Xh4 Token economy stages 1–2 built 2026-11-25 (stage 3 open).
 
 Hauptling delegates coding tasks to Claude, Codex and agy (Antigravity CLI) agents running in disposable containers, across any repo.
 
@@ -57,7 +57,7 @@ Hauptling delegates coding tasks to Claude, Codex and agy (Antigravity CLI) agen
 
 ## Usage and handoff
 
-- At **90% of a usage window**, you tell the delegator to hand off (manual for now); it runs `hauptling handoff`, you start the next CLI and run `hauptling resume`.
+- At **85% of the delegator's own vendor window** `wait` returns `[handoff-due]` (token economy stage 2; you can still ask earlier); it runs `hauptling handoff`, you start the next CLI and run `hauptling resume`.
 
 ## Dashboard
 
@@ -167,9 +167,9 @@ Goal: subscription usage windows last longer. Workers first, then the delegator;
   - **Test-round cap**: round 3 (not 4) blocks the worker with a question to the user.
   - **Cheaper-model preference**: `"prefer": "cheap" | "balanced" | "best"` in `~/.hauptling/models.json` (shipped default `best`, i.e. no change) caps the tier spawn may use at 1, 2 or 3. A model above the cap is refused unless the spawn passes `--allow-tier`; `--mode rule` clamps to the cap; `cheapest` and test writers are unaffected. Set with `hauptling models prefer <value>` or the Usage tab's toggle; `hauptling models` prints it first so suggest mode reasons with it.
 - **Stage 2**:
-  - **Effort per tier**: `models.json` `effort` per tier (1 low, 2 medium, 3 high), passed in each vendor's own way (Claude flag/env, Codex `model_reasoning_effort`; agy encodes it in the model id); `spawn --effort` overrides.
-  - **Events-only wait (Claude delegators only)**: the skill runs `hauptling wait` in the background and the CLI wakes on its exit; no empty-timeout turns. Codex and agy keep the ~4.5 min loop.
-  - **Auto handoff**: at 85% of the delegator's own vendor window `wait` returns a `[handoff-due]` event (once per window); the delegator writes the note.
+  - **Effort per tier**: `models.json` `effort` per tier (1 low, 2 medium, 3 high), passed through each vendor's `effortArgs` (Claude `--effort`, Codex `-c model_reasoning_effort="…"`; agy has none: its model ids carry it, and `--effort` for agy is refused). Precedence: `spawn --effort`, the model entry's `effort`, the tier default. Test writers get their model's default.
+  - **Events-only wait (Claude delegators only)**: `hauptling wait --until-event` loops broker waits inside the CLI process until an event arrives; the skill runs it as a background command and Claude Code wakes on its exit; no empty-timeout turns. Codex and agy keep the ~4.5 min loop.
+  - **Auto handoff**: at 85% of a window of the vendor the delegator's CLI runs on (`delegators.cli`), active delegators get one `[handoff-due]` event per window; the delegator writes the note. Assumes the host CLI is signed in to the same vendor account as the slots; readings come from workers, so a delegator with no worker of its own vendor running gets none.
 - **Stage 3**: **headroom-aware round robin**: skip vendors at ≥80% of any window (a reading whose `resets_at` has passed counts as free). All vendors ≥80%: new spawns stay queued with one notification; running workers continue.
 
 ## API keys (optional)

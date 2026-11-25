@@ -123,3 +123,18 @@ test('Codex usage comes from the session log via poll; a missing log leaves usag
   assert.equal(u.tokens_out, 1017);
   assert.equal(db.prepare("SELECT used_pct FROM slot_usage WHERE vendor = 'codex' AND window = 'week'").get().used_pct, 73);
 });
+
+test('handoff-due: once per window at 85%, only to delegators running on that vendor\'s CLI', async () => {
+  const { db, core } = setup();
+  const { id: dc } = await core.call('delegator.start', { repo: 'gitgiant/demo', cli: 'claude' });
+  const { id } = await core.call('spawn', { delegator: dc, brief: 'task', vendor: 'claude', mode: 'cheapest' });
+  const { id: dx } = await core.call('delegator.start', { repo: 'gitgiant/demo', cli: 'codex' });
+  await settle();
+  const who = core.authenticate(db.prepare('SELECT token FROM agents WHERE id = ?').get(id).token, 'ADMIN');
+  await core.call('usage.report', { vendor: 'claude', payload: CLAUDE }, who);
+  await core.call('usage.report', { vendor: 'claude', payload: CLAUDE }, who);
+  const due = (await core.call('wait', { delegator: dc, timeout: 0 })).events.filter(e => e.kind === 'handoff-due');
+  assert.equal(due.length, 1);
+  assert.match(due[0].text, /5h window at 92%.*hauptling handoff/);
+  assert.equal((await core.call('wait', { delegator: dx, timeout: 0 })).events.filter(e => e.kind === 'handoff-due').length, 0);
+});

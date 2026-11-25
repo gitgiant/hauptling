@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { openDb } from '../src/db.mjs';
 import * as mail from '../src/mail.mjs';
 import { githubSlug, identityFor, parseArgs, wslPath, shellLine } from '../src/util.mjs';
-import { checkTier, launchArgv, loadModels, nextVendor, pick, setPrefer, table } from '../src/models.mjs';
+import { checkTier, effortFor, launchArgv, loadModels, nextVendor, pick, setPrefer, table } from '../src/models.mjs';
 import { spendLine } from '../src/usage.mjs';
 import { detect, fill } from '../src/detect.mjs';
 import { parseJunit } from '../src/junit.mjs';
@@ -155,4 +155,17 @@ test('spend line: a window that reset mid-task or had no reading at launch shows
     rounds: 2,
   });
   assert.equal(line, '1.5M in/40k out tok · ~$1.20 · week +3 · 2 test rounds');
+});
+
+test('effort: spawn override > model entry > tier default; vendors without effortArgs refuse an override', () => {
+  const cfg = loadModels(join(tmpdir(), 'none.json'));
+  const sonnet = cfg.vendors.claude.models.find(m => m.tier === 2);
+  assert.equal(effortFor(cfg, 'claude', sonnet), 'medium');
+  assert.equal(effortFor(cfg, 'claude', { ...sonnet, effort: 'high' }), 'high');
+  assert.equal(effortFor(cfg, 'claude', sonnet, 'max'), 'max');
+  assert.equal(effortFor(cfg, 'agy', cfg.vendors.agy.models[0]), null);
+  assert.throws(() => effortFor(cfg, 'agy', cfg.vendors.agy.models[0], 'low'), /model ids carry the effort/);
+  const argv = launchArgv(cfg, 'codex', cfg.vendors.codex.models[0], 'go', 'low');
+  assert.ok(argv.includes('model_reasoning_effort="low"'));
+  assert.equal(argv.at(-1), 'go');
 });
