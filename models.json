@@ -114,15 +114,15 @@
           "id": "gemini-4-neon-medium",
           "model": "gemini-4-neon-medium",
           "tier": 2,
-          "usd_in": null,
-          "usd_out": null
+          "usd_in": 3,
+          "usd_out": 15
         },
         {
           "id": "gemini-4-neon-high",
           "model": "gemini-4-neon-high",
           "tier": 3,
-          "usd_in": null,
-          "usd_out": null
+          "usd_in": 3,
+          "usd_out": 15
         }
       ]
     }
