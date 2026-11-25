@@ -53,6 +53,8 @@ export function prepare(vendor, dir, home = homedir(), { env = process.env, run 
     // Hooks and the status line are managed (baked into the image by managedFiles()); drop copies older versions wrote here.
     for (const e of Object.keys(s.hooks || {})) s.hooks[e] = s.hooks[e].filter(h => !ours(h));
     if (JSON.stringify(s.statusLine || '').includes('hauptling usage')) delete s.statusLine;
+    // Bare worker (token economy): plugins the slot picked up stay installed but off. MCP: managed-mcp.json (src/codegraph.mjs).
+    if (s.enabledPlugins) s.enabledPlugins = Object.fromEntries(Object.keys(s.enabledPlugins).map(k => [k, false]));
     writeJson(settingsPath, s);
     // Skip the first-run folder trust dialog for this clone.
     const statePath = env.CLAUDE_CONFIG_DIR ? join(configDir, '.claude.json') : join(home, '.claude.json');

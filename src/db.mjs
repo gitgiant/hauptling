@@ -47,6 +47,12 @@ CREATE TABLE IF NOT EXISTS slot_usage (
   slot TEXT NOT NULL, vendor TEXT NOT NULL, window TEXT NOT NULL, used_pct REAL NOT NULL,
   resets_at TEXT, at TEXT NOT NULL, PRIMARY KEY (slot, vendor, window)
 );
+-- The host CLI's own windows (a delegator's status line or ~/.codex log; token economy); latest reading only.
+-- Kept apart from slot_usage: the host may be signed in to another account than the slots.
+CREATE TABLE IF NOT EXISTS host_usage (
+  vendor TEXT NOT NULL, window TEXT NOT NULL, used_pct REAL NOT NULL, resets_at TEXT, at TEXT NOT NULL,
+  PRIMARY KEY (vendor, window)
+);
 `;
 
 /** Opens (and migrates) the store. Only the broker process calls this. */
@@ -58,7 +64,8 @@ export function openDb(path) {
   // Columns added after phase 1 shipped; ALTER fails harmlessly when they exist.
   // usage: latest normalized usage JSON (src/usage.mjs); kept as the final total once the agent ends.
   // billing: 'api' (the vendor's API key) or 'plan' (the slot's sign-in), fixed when the agent starts.
-  for (const col of ["role TEXT NOT NULL DEFAULT 'impl'", 'depends_on TEXT', 'start_from TEXT', 'usage TEXT', 'billing TEXT']) {
+  // usage_start: the vendor's window readings at launch (src/usage.mjs windowSnapshot), for per-task deltas.
+  for (const col of ["role TEXT NOT NULL DEFAULT 'impl'", 'depends_on TEXT', 'start_from TEXT', 'usage TEXT', 'billing TEXT', 'usage_start TEXT', 'effort TEXT']) {
     try { db.exec(`ALTER TABLE agents ADD COLUMN ${col}`); } catch {}
   }
   try { db.exec('ALTER TABLE asks ADD COLUMN nonce TEXT'); } catch {}

@@ -1,6 +1,6 @@
 # PRD: Hauptling agent delegator
 
-Status: design agreed 2026-11-20 (grill-me interview). Phases 1 and 2 done (decisions under Phases); phase 3 (GPU runner and lease) built and verified on the RTX 2070 SUPER 2026-11-24; phase 4a (dashboard) built 2026-11-24; 4b (usage, web terminal, vendors panel) built 2026-11-24. Model prices recorded 2026-11-25 from official standard API rates: OpenAI https://developers.openai.com/api/docs/pricing and https://developers.openai.com/api/docs/models/gpt-6-luna; Anthropic https://platform.claude.com/docs/en/about-claude/pricing; Google https://aistudio.google.com/docs/pricing. OpenAI cached-input rates are separate; Anthropic cached-input rates are separate and Haiku 5.5 costs more for prompts over 100k tokens; Google cached-input and storage rates are separate. Gemini 3.8 Flash rises from $0.75/$3.75 to $1.50/$7.50 per million input/output tokens on 2027-01-01; both Gemini 4 Neon models are $3/$15 per million tokens. Living copy: https://claude.ai/artifact/YbwvdtdzM8JuvEagKG1Xh4
+Status: design agreed 2026-11-20 (grill-me interview). Phases 1 and 2 done (decisions under Phases); phase 3 (GPU runner and lease) built and verified on the RTX 2070 SUPER 2026-11-24; phase 4a (dashboard) built 2026-11-24; 4b (usage, web terminal, vendors panel) built 2026-11-24. Token economy stages 1–2 built 2026-11-25 (stage 3 open). Model prices recorded 2026-11-25 from official standard API rates: OpenAI https://developers.openai.com/api/docs/pricing and https://developers.openai.com/api/docs/models/gpt-6-luna; Anthropic https://platform.claude.com/docs/en/about-claude/pricing; Google https://aistudio.google.com/docs/pricing. OpenAI cached-input rates are separate; Anthropic cached-input rates are separate and Haiku 5.5 costs more for prompts over 100k tokens; Google cached-input and storage rates are separate. Gemini 3.8 Flash rises from $0.75/$3.75 to $1.50/$7.50 per million input/output tokens on 2027-01-01; both Gemini 4 Neon models are $3/$15 per million tokens. Living copy: https://claude.ai/artifact/YbwvdtdzM8JuvEagKG1Xh4
 
 Hauptling delegates coding tasks to Claude, Codex and agy (Antigravity CLI) agents running in disposable containers, across any repo.
 
@@ -48,7 +48,7 @@ Hauptling delegates coding tasks to Claude, Codex and agy (Antigravity CLI) agen
 - `hauptling test report <req_id> report.json`.
 - Request: `{id, from, sha, branch, selector, gpu, artifacts[], timeout_s, round}`.
 - Report: `{id, sha, status: pass|fail|error|timeout, passed, failed, skipped, duration_s, failures:[{test_id, loc, message ≤300, excerpt ≤20 lines}], artifacts, log_path, notes ≤300}`.
-- Reports for a different sha are rejected. Round 4 sets the agent to `blocked`.
+- Reports for a different sha are rejected. Round 3 sets the agent to `blocked` (was 4; token economy, 2026-11-25).
 - **GPU tests run deterministically, no LLM**, in a fresh `--gpus all` test container, one at a time on their own queue (phase 3; an earlier design used a host worktree).
 
 ### Merge gate / test jobs (2026-11-25)
@@ -66,7 +66,7 @@ Hauptling delegates coding tasks to Claude, Codex and agy (Antigravity CLI) agen
 
 ## Usage and handoff
 
-- At **90% of a usage window**, you tell the delegator to hand off (manual for now); it runs `hauptling handoff`, you start the next CLI and run `hauptling resume`.
+- At **85% of the delegator's own vendor window** `wait` returns `[handoff-due]` (token economy stage 2; you can still ask earlier); it runs `hauptling handoff`, you start the next CLI and run `hauptling resume`.
 
 ## Dashboard
 
@@ -190,6 +190,21 @@ Phases 2–4 get their own grill at phase start.
 - **Repo MCP servers**: workers load only Hauptling's MCP servers (CodeGraph) by default, like hooks: a repo's `.mcp.json` usually points at host paths, and in a fresh clone it prompts for approval. `"mcp": ["name", …]` in `hauptling.json` allowlists repo servers known to work in a container.
 - **Wiring, Claude**: `/etc/claude-code/managed-mcp.json`, which takes exclusive control: Claude loads only the servers it lists and ignores the repo's `.mcp.json` (no prompt; `claude mcp add` and `--mcp-config` are refused). The broker writes it per agent at spawn (CodeGraph, plus the repo servers named in `"mcp"`, their definitions copied from the repo's `.mcp.json`) and mounts it read-only into the agent's container, which is created per agent. Not baked into the image, since it differs per repo. Verified in a worker container (2026-11-25): no approval prompt, `claude mcp list` shows only CodeGraph (Connected), a repo `.mcp.json` server is ignored.
 - **Codex and agy**: use the CLI (`codegraph explore`, `codegraph node` print what the MCP tools return), named in the brief line. No MCP wiring for them yet; whether either can exclude a repo's own MCP servers is still to check.
+### Token economy decisions (2026-11-25)
+
+Goal: subscription usage windows last longer. Workers first, then the delegator; hauptling's own mechanisms only (no conventions imposed on target repos). Measure alongside the first fixes.
+
+- **Stage 1** (measurement + cheap fixes):
+  - **Per-task totals**: at launch the agent stores its vendor's window readings (`usage_start`); its final tokens are already kept. The `[report]` event and the dashboard's agent detail add one line: tokens in/out, cost, how many points each window rose during the task (a window that reset mid-task shows no delta), test rounds used.
+  - **Worker preamble**: `prompts/worker-rules.md`, put in front of every brief by the broker: read files in ranges, search before reading, keep command output short (`| tail`, `-q`), run only the tests touched, reports stay ≤300 chars.
+  - **Bare worker CLI**: workers load no user MCP servers or plugins, only hauptling's hooks. Claude: the per-agent `managed-mcp.json` (see "CodeGraph in workers"; it already admits only Hauptling's servers, so the branch's `--strict-mcp-config` was dropped in the 2026-11-25 merge, as it could shut CodeGraph out) and every `enabledPlugins` entry set false in the slot's settings; hooks and status line stay managed in the image (see Workers). Codex: `-c mcp_servers={}` in its launch template. agy: unknown, open.
+  - **Test-round cap**: round 3 (not 4) blocks the worker with a question to the user.
+  - **Cheaper-model preference**: `"prefer": "cheap" | "balanced" | "best"` in `~/.hauptling/models.json` (shipped default `best`, i.e. no change) caps the tier spawn may use at 1, 2 or 3. A model above the cap is refused unless the spawn passes `--allow-tier`; `--mode rule` clamps to the cap; `cheapest` and test writers are unaffected. Set with `hauptling models prefer <value>` or the Usage tab's toggle; `hauptling models` prints it first so suggest mode reasons with it.
+- **Stage 2**:
+  - **Effort per tier**: `models.json` `effort` per tier (1 low, 2 medium, 3 high), passed through each vendor's `effortArgs` (Claude `--effort`, Codex `-c model_reasoning_effort="…"`; agy has none: its model ids carry it, and `--effort` for agy is refused). Precedence: `spawn --effort`, the model entry's `effort`, the tier default. Test writers get their model's default.
+  - **Events-only wait (Claude delegators only)**: `hauptling wait --until-event` loops broker waits inside the CLI process until an event arrives; the skill runs it as a background command and Claude Code wakes on its exit; no empty-timeout turns. Codex and agy keep the ~4.5 min loop.
+  - **Auto handoff**: at 85% of a window of the vendor the delegator's CLI runs on (`delegators.cli`), active delegators get one `[handoff-due]` event per window; the delegator writes the note. Readings come from the delegator's own CLI: `hauptling setup` points the host's Claude and agy status lines at `hauptling usage <vendor> --host` (the previous status-line command is kept in `~/.hauptling/statusline-prev.json` and chained, so its output still shows); a Codex delegator's windows come from the host's `~/.codex` session log. Host readings live in `host_usage`, apart from the slots' (the host may use another account) and don't affect routing. Until the host has reported for a vendor, slot readings of that vendor stand in (same-account assumption).
+- **Stage 3**: **headroom-aware round robin**: skip vendors at ≥80% of any window (a reading whose `resets_at` has passed counts as free). All vendors ≥80%: new spawns stay queued with one notification; running workers continue.
 
 ## API keys (optional)
 

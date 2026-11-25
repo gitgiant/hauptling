@@ -225,3 +225,4 @@ table.grid td.num, table.grid th.num { text-align: right; font-variant-numeric: 
 .card .aid .mono { overflow-wrap: anywhere; }
 .term { white-space: pre-wrap; overflow-wrap: anywhere; }
 .term.nowrap { white-space: pre; overflow-wrap: normal; }
+.prefer { display: block; margin: 0 0 12px; }

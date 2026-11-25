@@ -6,7 +6,8 @@ import { join } from 'node:path';
 import { openDb } from '../src/db.mjs';
 import * as mail from '../src/mail.mjs';
 import { githubSlug, identityFor, parseArgs, wslPath, shellLine } from '../src/util.mjs';
-import { launchArgv, loadModels, nextVendor, pick } from '../src/models.mjs';
+import { checkTier, effortFor, launchArgv, loadModels, nextVendor, pick, setPrefer, table } from '../src/models.mjs';
+import { spendLine } from '../src/usage.mjs';
 import { detect, fill } from '../src/detect.mjs';
 import { parseJunit } from '../src/junit.mjs';
 import { hookOutput, managedFiles, prepare } from '../src/vendors.mjs';
@@ -141,4 +142,42 @@ test('egress allowlist: exact hosts, *.subdomains, comments', async () => {
   assert.equal(allowed(rules, 'anthropic.com'), false);
   assert.equal(allowed(rules, 'evilanthropic.com'), false);
   assert.equal(allowed(rules, 'example.com'), false);
+});
+
+test('prefer caps the worker tier: above it only with allowTier; rule mode clamps; cheapest unaffected', () => {
+  const file = join(mkdtempSync(join(tmpdir(), 'hl-')), 'models.json');
+  writeFileSync(file, JSON.stringify({ order: ['claude'] }));
+  setPrefer('cheap', file);
+  assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')).order, ['claude'], 'other overrides kept');
+  const cfg = loadModels(file);
+  const opus = cfg.vendors.claude.models.find(m => m.tier === 3);
+  assert.throws(() => checkTier(cfg, 'claude', opus), /--allow-tier/);
+  assert.equal(checkTier(cfg, 'claude', opus, true), opus);
+  assert.equal(pick(cfg, 'claude', 'rule', 'hard').tier, 1);
+  assert.equal(pick(cfg, 'claude', 'cheapest').tier, 1);
+  assert.match(table(cfg).split('\n')[0], /prefer: cheap/);
+  assert.throws(() => setPrefer('free', file), /prefer must be/);
+});
+
+test('spend line: a window that reset mid-task or had no reading at launch shows no delta', () => {
+  const line = spendLine({
+    usage: { tokens_in: 1.5e6, tokens_out: 4e4, cost_usd: 1.2, cost_estimated: true },
+    start: { '5h': { used_pct: 10, resets_at: 'A' }, week: { used_pct: 50, resets_at: 'W' } },
+    now: { '5h': { used_pct: 3, resets_at: 'B' }, week: { used_pct: 53.4, resets_at: 'W' }, day: { used_pct: 9, resets_at: 'D' } },
+    rounds: 2,
+  });
+  assert.equal(line, '1.5M in/40k out tok · ~$1.20 · week +3 · 2 test rounds');
+});
+
+test('effort: spawn override > model entry > tier default; vendors without effortArgs refuse an override', () => {
+  const cfg = loadModels(join(tmpdir(), 'none.json'));
+  const sonnet = cfg.vendors.claude.models.find(m => m.tier === 2);
+  assert.equal(effortFor(cfg, 'claude', sonnet), 'medium');
+  assert.equal(effortFor(cfg, 'claude', { ...sonnet, effort: 'high' }), 'high');
+  assert.equal(effortFor(cfg, 'claude', sonnet, 'max'), 'max');
+  assert.equal(effortFor(cfg, 'agy', cfg.vendors.agy.models[0]), null);
+  assert.throws(() => effortFor(cfg, 'agy', cfg.vendors.agy.models[0], 'low'), /model ids carry the effort/);
+  const argv = launchArgv(cfg, 'codex', cfg.vendors.codex.models[0], 'go', 'low');
+  assert.ok(argv.includes('model_reasoning_effort="low"'));
+  assert.equal(argv.at(-1), 'go');
 });
