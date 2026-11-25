@@ -85,30 +85,29 @@ test('usage.report: stored on the agent and its slot; 90% warns once per window;
     { slot: 'hl-w1', vendor: 'claude', window: '5h', used_pct: 91.5 }, { slot: 'hl-w1', vendor: 'claude', window: 'week', used_pct: 40 }]);
   await core.call('usage.report', { vendor: 'claude', payload: CLAUDE }, who);
   assert.equal(toasts.length, 1, 'one warning per window and reset');
-  assert.match(toasts[0].title, /claude usage 92% on hl-w1/);
+  assert.match(toasts[0].title, /claude usage 92%/);
   const ev = (await core.call('wait', { timeout: 0 })).events.find(e => e.kind === 'usage-high');
-  assert.match(ev.text, /hl-w1 claude 5h window at 92%/);
+  assert.match(ev.text, /claude 5h window at 92%/);
   await assert.rejects(core.call('usage.report', { vendor: 'codex', payload: {} }, who), /from a claude worker/);
   await assert.rejects(core.call('usage.report', { vendor: 'claude', payload: CLAUDE }), /status line/);
 });
 
-test('100% on a slot: that vendor skips the slot for new spawns until the reset; others still start', async () => {
+test('100% of a vendor account (reported from any slot): new spawns of that vendor wait for the reset; other vendors start', async () => {
   const { db, core } = setup();
   await core.call('delegator.start', { repo: 'gitgiant/demo', max: 5 });
   const future = new Date(Date.now() + 3600e3).toISOString();
-  for (const slot of ['hl-w1', 'hl-w2']) db.prepare("INSERT INTO slot_usage VALUES (?, 'claude', '5h', 100, ?, ?)").run(slot, future, future);
+  db.prepare("INSERT INTO slot_usage VALUES ('hl-w2', 'claude', '5h', 100, ?, ?)").run(future, future);
   const c = await core.call('spawn', { brief: 'a', vendor: 'claude', mode: 'cheapest' });
+  const x = await core.call('spawn', { brief: 'b', vendor: 'codex', mode: 'cheapest' });
   await settle();
-  assert.equal(db.prepare('SELECT slot FROM agents WHERE id = ?').get(c.id).slot, 'hl-w3', 'only hl-w3 has claude quota left');
-  const c2 = await core.call('spawn', { brief: 'b', vendor: 'claude', mode: 'cheapest' });
-  const x = await core.call('spawn', { brief: 'c', vendor: 'codex', mode: 'cheapest' });
-  await settle();
-  assert.equal(db.prepare('SELECT state FROM agents WHERE id = ?').get(c2.id).state, 'queued', 'claude waits for a reset');
+  assert.equal(db.prepare('SELECT state FROM agents WHERE id = ?').get(c.id).state, 'queued', 'one account: hl-w1 and hl-w3 are just as exhausted');
   assert.equal(db.prepare('SELECT slot FROM agents WHERE id = ?').get(x.id).slot, 'hl-w1', 'codex is not blocked by claude limits');
-  db.prepare("UPDATE slot_usage SET resets_at = ? WHERE slot = 'hl-w2'").run(new Date(Date.now() - 1000).toISOString());
+  const rr = await core.call('spawn', { brief: 'c', mode: 'cheapest' });
+  assert.notEqual(rr.vendor, 'claude', 'round robin skips the exhausted vendor');
+  db.prepare("UPDATE slot_usage SET resets_at = ? WHERE vendor = 'claude'").run(new Date(Date.now() - 1000).toISOString());
   await core.poll();
   await settle();
-  assert.equal(db.prepare('SELECT slot FROM agents WHERE id = ?').get(c2.id).slot, 'hl-w2', 'starts once the window has reset');
+  assert.ok(db.prepare('SELECT slot FROM agents WHERE id = ?').get(c.id).slot, 'starts once the window has reset');
 });
 
 test('Codex usage comes from the session log via poll; a missing log leaves usage unknown', async () => {

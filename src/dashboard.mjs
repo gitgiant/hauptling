@@ -167,21 +167,25 @@ export function createDashboard({ db, dbPath, core, host, log = () => {}, slotDi
     const all = logins(slotNames, VENDOR_LIST);
     const signedIn = new Map(all.map(l => [`${l.slot}:${l.vendor}`, l.ok]));
     const keyOf = new Map(all.filter(l => l.key).map(l => [l.vendor, l.key]));
-    const rows = db.prepare('SELECT * FROM slot_usage').all();
+    const rows = db.prepare('SELECT * FROM slot_usage ORDER BY at DESC').all();
     const busy = new Map(db.prepare("SELECT slot, id, vendor FROM agents WHERE slot IS NOT NULL AND state IN ('spawning','working','blocked','done')").all().map(r => [r.slot, r]));
-    const slots = slotNames.map(slot => ({
-      slot,
-      agent: busy.get(slot)?.id || null,
-      vendors: VENDOR_LIST.map(vendor => ({
+    // One account per vendor (signed in on every slot, or one API key): the newest reading of each window, from any slot.
+    const vendors = VENDOR_LIST.map(vendor => {
+      const latest = new Map();
+      for (const r of rows) if (r.vendor === vendor && !latest.has(r.window)) latest.set(r.window, { window: r.window, used_pct: r.used_pct, resets_at: r.resets_at, at: r.at, slot: r.slot });
+      return {
         vendor,
-        signed_in: Boolean(signedIn.get(`${slot}:${vendor}`)),
-        login: `hauptling login ${slot} ${vendor}`,
         key: keyOf.get(vendor) || null,
-        busy: busy.get(slot)?.vendor === vendor ? busy.get(slot).id : null,
-        limits: rows.filter(r => r.slot === slot && r.vendor === vendor).map(r => ({ window: r.window, used_pct: r.used_pct, resets_at: r.resets_at, at: r.at })),
-      })),
-    }));
-    return { slots, spend: spend() };
+        limits: [...latest.values()],
+        slots: slotNames.map(slot => ({
+          slot,
+          signed_in: Boolean(signedIn.get(`${slot}:${vendor}`)),
+          busy: busy.get(slot)?.vendor === vendor ? busy.get(slot).id : null,
+          login: `hauptling login ${slot} ${vendor}`,
+        })),
+      };
+    });
+    return { vendors, spend: spend() };
   }
 
   /** Totals of agents' (final) usage per day, vendor and repo; API-equivalent where vendors don't report cost. */

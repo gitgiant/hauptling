@@ -374,20 +374,21 @@ async function loadUsage() {
   clearTimeout(usageTimer);
   try {
     const u = await api.get('/dash/usage');
-    const vendors = ['claude', 'codex', 'agy'];
-    put($('#vendors'), h('table', { class: 'accounts' },
-      h('thead', {}, h('tr', {}, h('th', { text: 'Slot' }), vendors.map(v => h('th', { text: v })))),
-      h('tbody', {}, u.slots.map(s => h('tr', {},
-        h('td', {}, h('b', { class: 'mono', text: s.slot }), h('div', { class: 'resets', text: s.agent ? `busy: ${s.agent}` : 'free' })),
-        s.vendors.map(v => h('td', {}, h('div', { class: 'acct' },
-          h('div', { class: 'who' }, v.key ? h('span', { class: 'ok', title: 'Every slot uses this key; billed per token. hauptling key rm ' + v.vendor + ' switches back to sign-ins.', text: `✓ API key ${v.key}` })
-            : v.signed_in ? h('span', { class: 'ok', text: '✓ signed in' }) : h('span', { class: 'no', text: '✗ not signed in' })),
-          v.limits.sort((a, b) => (a.window === '5h' ? -1 : 1)).map(meter),
-          v.signed_in && !v.limits.length ? h('span', { class: 'resets', text: 'no usage reported yet' }) : null,
-          v.key ? null : h('div', { class: 'who' },
-            h('button', { disabled: Boolean(v.busy), title: v.busy ? `${v.busy} is using this sign-in` : null, onclick: () => startLogin(s.slot, v.vendor) }, v.signed_in ? 'Sign in again' : 'Sign in'),
-            v.busy ? h('span', { class: 'resets', text: `Locked while ${v.busy} runs: refresh tokens rotate, so a second sign-in could sign it out mid-task.` }) : null,
-            h('code', { class: 'resets', title: 'Or run this in a terminal', text: v.login }))))))))));
+    put($('#vendors'), h('div', { class: 'vendors' }, u.vendors.map(v => {
+      const signed = v.slots.filter(s => s.signed_in).length;
+      return h('section', { class: 'vendor' },
+        h('h3', { text: v.vendor }),
+        v.key ? h('div', { class: 'ok', title: `Every slot uses this key; billed per token. hauptling key rm ${v.vendor} switches back to sign-ins.`, text: `✓ API key ${v.key}` })
+          : h('div', { class: signed === v.slots.length ? 'ok' : 'no', text: `${signed === v.slots.length ? '✓' : '✗'} signed in on ${signed}/${v.slots.length} slots` }),
+        v.limits.length ? v.limits.sort((a) => (a.window === '5h' ? -1 : 1)).map(meter) : h('p', { class: 'resets', text: 'No usage reported yet; workers report it while they run.' }),
+        v.key ? null : h('details', { class: 'slots', open: signed < v.slots.length },
+          h('summary', { text: 'Slot sign-ins' }),
+          v.slots.map(s => h('div', { class: 'slotrow' },
+            h('span', { class: 'mono', text: s.slot }),
+            s.signed_in ? h('span', { class: 'ok', text: '✓' }) : h('span', { class: 'no', text: '✗' }),
+            h('button', { disabled: Boolean(s.busy), title: s.busy ? `Locked while ${s.busy} runs: refresh tokens rotate, so a second sign-in could sign it out mid-task.` : s.login, onclick: () => startLogin(s.slot, v.vendor) }, s.signed_in ? 'Sign in again' : 'Sign in'),
+            s.busy ? h('span', { class: 'resets', text: `locked: ${s.busy} running` }) : null))));
+    })));
     renderSpend(u.spend);
   } catch (e) { toast(e.message, true); }
   if (state.view === 'usage') usageTimer = setTimeout(loadUsage, 15e3);

@@ -4,7 +4,6 @@ All four PRD phases plus the sign-in lock and API keys are on `main`. `npm test`
 
 ## Needs a real worker run to confirm (costs tokens)
 
-- A worker reporting usage through its status line (only workers started after phase 4b have it).
 - "Sign in" on the Usage tab (vendor login in host tmux).
 - The Terminal tab live in a browser (parts tested; headless screenshots fire too early).
 - A worker on an API key: Claude's TUI should show API billing; for agy, whether `GEMINI_API_KEY` or its OAuth sign-in wins is unknown.

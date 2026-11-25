@@ -139,13 +139,9 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
         if (active >= max) return null;
         const used = new Set(db.prepare(`SELECT slot FROM agents WHERE slot IS NOT NULL AND state IN (${ACTIVE.map(() => '?').join(',')})`).all(...ACTIVE).map(r => r.slot));
         const free = slots().filter(s => !used.has(s));
-        // First queued agent with a free slot whose account isn't at 100% for its vendor; the rest wait.
-        let a = null;
-        let slot = null;
-        for (const q of db.prepare("SELECT * FROM agents WHERE delegator = ? AND state = 'queued' ORDER BY created_at").all(d)) {
-          slot = free.find(s => !exhausted(q.vendor, s));
-          if (slot) { a = q; break; }
-        }
+        // First queued agent whose vendor account isn't at 100%; agents of an exhausted vendor wait for the reset.
+        const a = free.length ? db.prepare("SELECT * FROM agents WHERE delegator = ? AND state = 'queued' ORDER BY created_at").all(d).find(q => !exhausted(q.vendor)) : null;
+        const slot = free[0];
         if (!slot || !a) return null;
         const dir = `${host.workRoot}/${a.id}`;
         db.prepare("UPDATE agents SET state = 'spawning', slot = ?, dir = ?, updated_at = ? WHERE id = ?").run(slot, dir, now(), a.id);
@@ -163,11 +159,14 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
 
   // ---------- usage (phase 4b) ----------
   const live = (at) => !at || Date.parse(at) > Date.now();
-  /** The slot's account is at 100% of some window for this vendor (until it resets). */
-  function exhausted(vendor, slot) {
-    return db.prepare('SELECT used_pct, resets_at FROM slot_usage WHERE slot = ? AND vendor = ? AND used_pct >= 100').all(slot, vendor).some(r => live(r.resets_at));
+  /**
+   * The vendor's account is at 100% of some window (until it resets). One account per vendor, signed
+   * in on every slot (or one API key): a reading from any slot speaks for all of them.
+   */
+  function exhausted(vendor) {
+    return db.prepare('SELECT used_pct, resets_at FROM slot_usage WHERE vendor = ? AND used_pct >= 100').all(vendor).some(r => live(r.resets_at));
   }
-  const vendorUsable = (vendor) => slots().some(s => !exhausted(vendor, s));
+  const vendorUsable = (vendor) => !exhausted(vendor);
   function priceOf(a) { try { return findModel(models(), a.vendor, a.model); } catch { return null; } }
 
   /** Stores an agent's usage and its slot's limit windows; warns once per window at 90%. */
@@ -178,14 +177,14 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
       db.prepare(`INSERT INTO slot_usage (slot, vendor, window, used_pct, resets_at, at) VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT (slot, vendor, window) DO UPDATE SET used_pct = excluded.used_pct, resets_at = excluded.resets_at, at = excluded.at`).run(a.slot, a.vendor, l.window, l.used_pct, l.resets_at, now());
       if (l.used_pct < 90) continue;
-      const key = `usage:warn:${a.slot}:${a.vendor}:${l.window}:${l.resets_at || 'unknown'}`;
+      const key = `usage:warn:${a.vendor}:${l.window}:${l.resets_at || 'unknown'}`; // once per account window, whichever slot reports it
       if (kvGet(db, key)) continue;
       kvSet(db, key, now());
       const when = l.resets_at ? `resets ${new Date(l.resets_at).toLocaleString()}` : 'reset time unknown';
       const full = l.used_pct >= 100;
-      const text = `${a.slot} ${a.vendor} ${l.window} window at ${Math.round(l.used_pct)}% (${when})${full ? `; new ${a.vendor} spawns skip ${a.slot} until then` : ''}`;
+      const text = `${a.vendor} ${l.window} window at ${Math.round(l.used_pct)}% (${when})${full ? `; new ${a.vendor} spawns wait until then` : ''}`;
       emit(a.delegator, a.id, 'usage-high', text);
-      notify({ title: `${a.vendor} usage ${Math.round(l.used_pct)}% on ${a.slot}`, body: text, choices: [], links: null, dashboard: `${publicUrl}/#usage` });
+      notify({ title: `${a.vendor} usage ${Math.round(l.used_pct)}%`, body: text, choices: [], links: null, dashboard: `${publicUrl}/#usage` });
       log(`usage-high ${text}`);
     }
     return u;
