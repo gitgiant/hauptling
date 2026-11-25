@@ -23,7 +23,7 @@ const TITLES = ['Dashboard: resizable panes, hideable header, any aspect ratio',
 function agent(i, delegator, repo) {
   const st = STATES[i % STATES.length];
   return {
-    id: `claude_opus-5-5_${(0xe9583 + i * 7919).toString(16).slice(0, 5)}`, vendor: i % 3 ? 'claude' : 'codex', model: i % 3 ? 'claude-opus-5-5' : 'gpt-5.5-codex',
+    id: `claude_opus-5-5_${(0xe9583 + i * 7919).toString(16).slice(0, 5)}`, vendor: ['claude', 'codex', 'agy'][i % 3], model: ['claude-opus-5-5', 'gpt-5.5-codex', 'gemini-3.8-flash'][i % 3],
     state: st, ended: false, title: TITLES[i % TITLES.length], headline: i % 2 ? `Step ${i}: ${TITLES[(i + 3) % TITLES.length].toLowerCase()}` : null,
     repo, delegator, branch: `hl/agent_${i}`, base: 'main', slot: `hl-w${(i % 3) + 1}`, created_at: ago(5 + i * 17), updated_at: ago(i),
     pr_url: i % 2 ? `https://github.com/example/${repo.split('/').pop()}/pull/${40 + i}` : null, pr_number: 40 + i,

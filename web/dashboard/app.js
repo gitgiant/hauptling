@@ -1,5 +1,6 @@
 // Hauptling dashboard (phase 4). Vanilla ES module; all data comes from the broker's /dash routes.
 import { ansiFragment } from './ansi.js';
+import { vendorBadge } from './vendors.js';
 import { STACKED_QUERY, STRIP_PX, DRAG_IGNORE, clampRatio, parseRatio, defaultRatio, splitKey, keyRatio, collapseAfterDrag } from './layout.js';
 // Text from the store is always set with textContent (h() below), never parsed as HTML.
 
@@ -54,6 +55,11 @@ const ago = (iso) => {
   return `${Math.floor(s / 86400)}d`;
 };
 const clock = (iso) => new Date(iso).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+/** Small vendor badge for before an agent id. */
+function vbadge(vendor) {
+  const b = vendorBadge(vendor);
+  return h('span', { class: `vbadge v-${b.key}`, role: 'img', title: b.label, 'aria-label': b.label, text: b.glyph });
+}
 const isLocal = (a) => a.repo.startsWith('/');
 
 // ---------- theme: dark by default, light on request, remembered per browser ----------
@@ -298,7 +304,7 @@ function renderGpu(g) {
 
 function card(a) {
   const meta = [
-    h('span', { class: 'mono', title: `${a.vendor} · ${a.model} · ${a.branch}`, text: a.id }),
+    h('span', { class: 'aid', title: `${a.vendor} · ${a.model} · ${a.branch}` }, vbadge(a.vendor), h('span', { class: 'mono', text: a.id })),
     a.pr_url ? h('a', { href: a.pr_url, target: '_blank', rel: 'noopener', onclick: (e) => e.stopPropagation(), text: `PR #${a.pr_number}` }) : null,
     a.gate ? h('span', { text: `gate: ${a.gate}` }) : null,
     a.ci_note ? h('span', { class: 'chip fail', text: `CI failed ${a.ci_note.slice(0, 7)}` }) : null,
@@ -402,7 +408,7 @@ function renderDetailHead(a, el) {
     h('h2', { text: a.headline || a.title }),
     a.headline ? h('p', { class: 'prompt', title: 'Prompt (spawn title)', text: a.title }) : null,
     h('div', { class: 'meta' },
-      h('span', { class: 'mono', text: a.id }), h('span', { text: a.state }), h('span', { text: `${a.vendor} · ${a.model}${a.billing ? ` · ${a.billing === 'api' ? 'API' : 'plan'}` : ''}` }),
+      h('span', { class: 'aid' }, vbadge(a.vendor), h('span', { class: 'mono', text: a.id })), h('span', { text: a.state }), h('span', { text: `${a.vendor} · ${a.model}${a.billing ? ` · ${a.billing === 'api' ? 'API' : 'plan'}` : ''}` }),
       h('span', { class: 'mono', text: `${a.branch} → ${a.base}` }), h('span', { class: 'mono', text: a.repo }),
       a.pr_url ? h('a', { href: a.pr_url, target: '_blank', rel: 'noopener', text: `PR #${a.pr_number}` }) : null,
       h('span', { text: `started ${clock(a.created_at)} (${ago(a.created_at)})` }),
@@ -499,17 +505,21 @@ function openTerminal(container, sid, { autoInput = false, onEnd } = {}) {
   let inputOn = false; let queue = []; let flushing = null; let ended = false;
   const box = h('input', { type: 'checkbox' });
   const note = h('span');
+  const wrapBox = h('input', { type: 'checkbox' });
   const pre = h('pre', { class: 'term', tabindex: '0', 'aria-label': `Terminal ${sid}` }, 'connecting…');
   const setInput = (st) => {
     inputOn = st.input; box.checked = st.input;
     pre.classList.toggle('live', st.input);
-    note.textContent = st.input ? `Input on until ${new Date(st.until).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} (extends while you type). Click the screen, then type or paste.` : 'Watch only. Switch input on to type into it.';
+    note.textContent = st.input ? `Input on until ${new Date(st.until).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} (extends while you type). Click the screen, then type or paste.` : '';
   };
+  const setWrap = (on) => { wrapBox.checked = on; pre.classList.toggle('nowrap', !on); };
+  setWrap(localStorage.getItem('hl-term-wrap') !== '0');
+  wrapBox.addEventListener('change', () => { localStorage.setItem('hl-term-wrap', wrapBox.checked ? '1' : '0'); setWrap(wrapBox.checked); });
   box.addEventListener('change', async () => {
     try { setInput(await api.post(`/dash/term/${encodeURIComponent(sid)}/input`, { on: box.checked })); if (box.checked) pre.focus(); }
     catch (e) { toast(e.message, true); box.checked = inputOn; }
   });
-  put(container, h('div', { class: 'termbar' }, h('label', { class: 'switch' }, box, 'Enable input'), note), pre);
+  put(container, h('div', { class: 'termbar' }, h('label', { class: 'switch' }, box, 'Enable input'), h('label', { class: 'switch' }, wrapBox, 'Word wrap'), note), pre);
   const flush = () => {
     flushing = null;
     if (!queue.length) return;
@@ -659,7 +669,7 @@ async function loadHistory() {
       el.onclick = async () => {
         const det = $('#history-detail');
         put(det, h('div', { class: 'dhead' }, h('h2', { text: a.headline || a.title }), h('p', { class: 'prompt', text: a.title }),
-          h('div', { class: 'meta' }, h('span', { class: 'mono', text: a.id }), h('span', { text: a.state }), h('span', { text: a.model }), h('span', { class: 'mono', text: a.repo }),
+          h('div', { class: 'meta' }, h('span', { class: 'aid' }, vbadge(a.vendor), h('span', { class: 'mono', text: a.id })), h('span', { text: a.state }), h('span', { text: a.model }), h('span', { class: 'mono', text: a.repo }),
             a.pr_url ? h('a', { href: a.pr_url, target: '_blank', rel: 'noopener', text: `PR #${a.pr_number}` }) : null, h('span', { text: `ended ${clock(a.updated_at)}` })),
           a.report ? h('div', { class: 'report' }, h('b', { text: 'Report: ' }), a.report) : null));
         try { det.append(...timelineView(await api.get(`/dash/agent/${encodeURIComponent(a.id)}/events`)).filter(Boolean)); } catch (e) { det.append(h('p', { class: 'empty', text: e.message })); }

@@ -75,6 +75,7 @@ Hauptling delegates coding tasks to Claude, Codex and agy (Antigravity CLI) agen
 - **Hideable header**: drag it up past about a third of its height (or flick it up) to collapse it to a slim strip with a grab tab; click the tab or drag it down to bring the header back. A small ⌃ button does the same by keyboard. Drags never start on buttons, links or inputs. Collapsed state is in `localStorage`. `--header-h` (set from a ResizeObserver; the header wraps on narrow screens) is what the layout uses. No slide animation under `prefers-reduced-motion`.
 - **Narrow header**: usage chips and the host/GPU line wrap instead of overflowing; card meta wraps, titles ellipsize.
 - **Ultrawide**: board cards flow into columns (min 24rem each) instead of stretching; long text in the detail is capped at 110ch; the Usage view is capped at 110rem and centred.
+- **Vendor badges**: a small own-design badge (coloured tile, letter C / X / G; grey "?" if unknown) sits before every agent id on Board cards, the detail title meta and History; table in `web/dashboard/vendors.js`, colours are CSS variables per theme.
 - **Collapsible Board groups**: each delegator group heading (delegator · repo) is a toggle (`aria-expanded`, a large caret). Collapsed, the group shows only its agents' status dots (tooltip = id and state; click selects). Remembered per group in `localStorage` (`hl-groups-shut`).
 - Pure logic (clamping, keyboard steps, collapse threshold) lives in `web/dashboard/layout.js`, unit-tested with `node:test`.
 
