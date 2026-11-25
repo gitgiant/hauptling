@@ -15,6 +15,7 @@ COPY hauptling /opt/hauptling
 RUN chmod 0755 /usr/local/bin/agy /opt/hauptling/bin/hauptling.mjs \
  && chmod -R a+rX /opt/hauptling \
  && ln -s /opt/hauptling/bin/hauptling.mjs /usr/local/bin/hauptling \
+ && node -e "import('/opt/hauptling/src/vendors.mjs').then(m => m.writeManagedFiles())" \
  && git config --system safe.directory '*' \
  && mkdir -p /home/worker /work && chmod 1777 /home/worker /work \
  && ln -s /home/worker/.vendor/gemini /home/worker/.gemini

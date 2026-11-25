@@ -9,7 +9,7 @@ import { githubSlug, identityFor, parseArgs, wslPath, shellLine } from '../src/u
 import { launchArgv, loadModels, nextVendor, pick } from '../src/models.mjs';
 import { detect, fill } from '../src/detect.mjs';
 import { parseJunit } from '../src/junit.mjs';
-import { hookOutput, prepare } from '../src/vendors.mjs';
+import { hookOutput, managedFiles, prepare } from '../src/vendors.mjs';
 import { toastXml } from '../src/platform/toast.mjs';
 import { collectArtifacts } from '../src/runner.mjs';
 
@@ -91,13 +91,23 @@ test('vendors: hook output shapes and prepare is idempotent', (t) => {
   t.after(() => { for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k]; else process.env[k] = v; });
   const home = mkdtempSync(join(tmpdir(), 'hlh-'));
   mkdirSync(join(home, '.claude'));
-  writeFileSync(join(home, '.claude', 'settings.json'), JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'mine' }] }] } }));
+  writeFileSync(join(home, '.claude', 'settings.json'), JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'mine' }] }, { hooks: [{ type: 'command', command: 'hauptling hook claude Stop' }] }] }, statusLine: { type: 'command', command: 'hauptling usage claude' } }));
+  mkdirSync(join(home, '.codex'));
+  writeFileSync(join(home, '.codex', 'hooks.json'), JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'hauptling hook codex Stop' }] }] } }));
   for (const v of ['claude', 'codex', 'agy']) { prepare(v, '/w/x', home); prepare(v, '/w/x', home); }
   const s = JSON.parse(readFileSync(join(home, '.claude', 'settings.json'), 'utf8'));
-  assert.equal(s.hooks.Stop.length, 2);
+  assert.deepEqual(s.hooks.Stop, [{ hooks: [{ type: 'command', command: 'mine' }] }], 'old Hauptling hooks removed, the user\'s kept');
+  assert.equal(s.statusLine, undefined);
   assert.equal(JSON.parse(readFileSync(join(home, '.claude.json'), 'utf8')).projects['/w/x'].hasTrustDialogAccepted, true);
   assert.equal(readFileSync(join(home, '.codex', 'config.toml'), 'utf8').match(/trust_level/g).length, 1);
-  assert.equal(JSON.parse(readFileSync(join(home, '.codex', 'hooks.json'), 'utf8')).hooks.SessionStart.length, 1);
+  assert.deepEqual(JSON.parse(readFileSync(join(home, '.codex', 'hooks.json'), 'utf8')).hooks.Stop, []);
+  const m = managedFiles();
+  const claude = JSON.parse(m['/etc/claude-code/managed-settings.json']);
+  assert.equal(claude.allowManagedHooksOnly, true);
+  assert.equal(claude.hooks.Stop[0].hooks[0].command, 'hauptling hook claude Stop');
+  assert.equal(claude.statusLine.command, 'hauptling usage claude');
+  assert.equal(JSON.parse(m['/etc/codex/hooks.json']).hooks.PostToolUse[0].hooks[0].command, 'hauptling hook codex PostToolUse');
+  assert.match(m['/etc/codex/requirements.toml'], /^allow_managed_hooks_only = true$/m);
   const agy = JSON.parse(readFileSync(join(home, '.gemini', 'config', 'hooks.json'), 'utf8'));
   assert.equal(agy['hauptling-Stop'].Stop[0].command, 'hauptling hook agy Stop');
   assert.deepEqual(JSON.parse(readFileSync(join(home, '.gemini', 'antigravity-cli', 'settings.json'), 'utf8')).permissions.allow, ['command(hauptling)']);

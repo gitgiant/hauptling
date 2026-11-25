@@ -62,7 +62,6 @@
         "danger-full-access",
         "--ask-for-approval",
         "never",
-        "--dangerously-bypass-hook-trust",
         "{prompt}"
       ],
       "models": [

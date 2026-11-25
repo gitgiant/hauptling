@@ -6,6 +6,7 @@ import { homedir } from 'node:os';
 /*
  * Worker-side vendor setup, run inside the task container right before its TUI starts
  * (`hauptling prepare <vendor> /work`). User-level only: target repos are never touched.
+ * Claude and Codex hooks are managed files in the image instead (managedFiles()).
  * Hook formats: Claude $CLAUDE_CONFIG_DIR/settings.json, Codex $CODEX_HOME/hooks.json,
  * agy ~/.gemini/config/hooks.json (agy has no UserPromptSubmit; PreInvocation runs before each model call).
  */
@@ -21,19 +22,37 @@ const writeJson = (p, v) => { mkdirSync(dirname(p), { recursive: true }); writeF
 const cmd = (vendor, event) => `hauptling hook ${vendor} ${event}`;
 const ours = (h) => JSON.stringify(h).includes('hauptling hook');
 
+/**
+ * Files baked into the worker image (as root) so workers run only Hauptling's hooks: the repo's own
+ * `.claude/settings.json` and `.codex/hooks.json` hooks are ignored (they'd run the repo's own tooling,
+ * often with host paths). Claude: managed settings with allowManagedHooksOnly; Codex: system-layer
+ * hooks (managed, so no trust review) plus allow_managed_hooks_only in requirements.toml.
+ * @returns {Record<string, string>} absolute path → content
+ */
+export function managedFiles() {
+  const hooks = (vendor) => Object.fromEntries(HOOK_EVENTS[vendor].map(e => [e, [{ hooks: [{ type: 'command', command: cmd(vendor, e), timeout: 10 }] }]]));
+  const json = (v) => JSON.stringify(v, null, 2) + '\n';
+  return {
+    // Usage (context %, cost, 5h/weekly limits) reaches the broker through the status line; no model tokens.
+    '/etc/claude-code/managed-settings.json': json({ allowManagedHooksOnly: true, hooks: hooks('claude'), statusLine: { type: 'command', command: 'hauptling usage claude' } }),
+    '/etc/codex/hooks.json': json({ hooks: hooks('codex') }),
+    '/etc/codex/requirements.toml': 'allow_managed_hooks_only = true\n',
+  };
+}
+
+export function writeManagedFiles() {
+  for (const [p, c] of Object.entries(managedFiles())) { mkdirSync(dirname(p), { recursive: true }); writeFileSync(p, c); }
+}
+
 export function prepare(vendor, dir, home = homedir(), { env = process.env, run = spawnSync } = {}) {
   if (vendor === 'claude') {
     // Containers set CLAUDE_CONFIG_DIR (the slot's credentials dir); .claude.json then lives inside it.
     const configDir = env.CLAUDE_CONFIG_DIR || join(home, '.claude');
     const settingsPath = join(configDir, 'settings.json');
     const s = readJson(settingsPath);
-    s.hooks ||= {};
-    for (const e of HOOK_EVENTS.claude) {
-      s.hooks[e] = (s.hooks[e] || []).filter(h => !ours(h));
-      s.hooks[e].push({ hooks: [{ type: 'command', command: cmd('claude', e), timeout: 10 }] });
-    }
-    // Usage (context %, cost, 5h/weekly limits) reaches the broker through the status line; no model tokens.
-    s.statusLine = { type: 'command', command: 'hauptling usage claude' };
+    // Hooks and the status line are managed (baked into the image by managedFiles()); drop copies older versions wrote here.
+    for (const e of Object.keys(s.hooks || {})) s.hooks[e] = s.hooks[e].filter(h => !ours(h));
+    if (JSON.stringify(s.statusLine || '').includes('hauptling usage')) delete s.statusLine;
     writeJson(settingsPath, s);
     // Skip the first-run folder trust dialog for this clone.
     const statePath = env.CLAUDE_CONFIG_DIR ? join(configDir, '.claude.json') : join(home, '.claude.json');
@@ -59,14 +78,13 @@ export function prepare(vendor, dir, home = homedir(), { env = process.env, run 
         if (r.status !== 0) throw new Error(`codex login --with-api-key failed: ${(r.stderr || r.stdout || '').trim().slice(-300)}`);
       }
     }
+    // Hooks are managed (/etc/codex, see managedFiles()); drop copies older versions wrote here.
     const hooksPath = join(codexHome, 'hooks.json');
-    const h = readJson(hooksPath);
-    h.hooks ||= {};
-    for (const e of HOOK_EVENTS.codex) {
-      h.hooks[e] = (h.hooks[e] || []).filter(x => !ours(x));
-      h.hooks[e].push({ hooks: [{ type: 'command', command: cmd('codex', e), timeout: 10 }] });
+    if (existsSync(hooksPath)) {
+      const h = readJson(hooksPath);
+      for (const e of Object.keys(h.hooks || {})) h.hooks[e] = h.hooks[e].filter(x => !ours(x));
+      writeJson(hooksPath, h);
     }
-    writeJson(hooksPath, h);
     const configPath = join(codexHome, 'config.toml');
     const header = `[projects."${dir}"]`;
     const config = existsSync(configPath) ? readFileSync(configPath, 'utf8') : '';

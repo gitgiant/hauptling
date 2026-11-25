@@ -28,7 +28,7 @@ Hauptling delegates coding tasks to Claude, Codex and agy (Antigravity CLI) agen
 
 ## Workers
 
-- **Interactive TUI inside tmux** in the container, so you can attach (`docker exec -it … tmux attach`). Status comes from hooks (all three CLIs have SessionStart, PostToolUse, Stop).
+- **Interactive TUI inside tmux** in the container, so you can attach (`docker exec -it … tmux attach`). Status comes from hooks (all three CLIs have SessionStart, PostToolUse, Stop). **Workers run only Hauptling's hooks** (2026-11-25): the image bakes them in as managed config, Claude `/etc/claude-code/managed-settings.json` with `allowManagedHooksOnly` (status line too) and Codex `/etc/codex/hooks.json` plus `allow_managed_hooks_only` in `/etc/codex/requirements.toml`, so a repo's own `.claude`/`.codex` hooks (its own mailbox, host paths) never run in a worker. Codex no longer gets `--dangerously-bypass-hook-trust`: managed hooks need no trust review. The repo's permissions, CLAUDE.md/AGENTS.md and skills still apply.
 - Auto mode on in the container (default).
 - **Blocked agents ask you directly**: `hauptling ask "q" --choice A --choice B` sets status `blocked: <question>` and notifies you (a Windows toast on WSL, `notify-send` elsewhere) with up to 4 choice buttons plus "Other…". Buttons open the broker's local answer page (nonce-keyed, has a free-text box). The dashboard blinks; `hauptling reply` and `hauptling attach` also work. The delegator only gets the 300-char final report.
 - **No tester agent.** The implementer writes and fixes its own tests; deterministic test jobs run them. Opt-in `--test-writer` per task adds a spec-based test writer for settled areas (protocol, save format, invariants).

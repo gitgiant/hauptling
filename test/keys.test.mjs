@@ -54,6 +54,5 @@ test('prepare in key mode: Claude key pre-approved + onboarding skipped; Codex k
   assert.equal(calls.length, 1, 'same key: no second login');
   prepare('codex', '/work', HOME, { env: { CODEX_HOME: codexHome, OPENAI_API_KEY: 'sk-proj-key2' }, run });
   assert.equal(calls.length, 2, 'changed key: login again');
-  assert.ok(readFileSync(join(codexHome, 'hooks.json'), 'utf8').includes('hauptling hook codex'));
   assert.throws(() => prepare('codex', '/work', HOME, { env: { CODEX_HOME: codexHome, OPENAI_API_KEY: 'sk-proj-key3' }, run: () => ({ status: 1, stderr: 'bad key' }) }), /bad key/);
 });
