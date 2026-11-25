@@ -1,10 +1,11 @@
 # Handoff — 2026-11-24
 
-All four PRD phases, the sign-in lock, API keys, the per-vendor Usage tab and the egress-proxy race fix are on `main`. `npm test` (38) and `hauptling doctor` pass.
+All four PRD phases, the sign-in lock, API keys, the per-vendor Usage tab and the egress-proxy race fix are on `main`. `npm test` (39 on `cli-fixes`) and `hauptling doctor` pass.
 
 ## Needs a real run to confirm
 
 - "Sign in" on the Usage tab (vendor login in host tmux).
+- Header CPU/Mem (branch `cli-fixes`) in a real browser; the SSE stream sends it, layout unseen.
 - The Terminal tab live in a browser (parts tested; headless screenshots fire before data arrives).
 - A worker on an API key: Claude's TUI should show API billing; for agy, whether `GEMINI_API_KEY` or its OAuth sign-in wins is unknown.
 - GPU `pause --now`, the VRAM wait and `gateGpu` on the real GPU (unit-tested only).
@@ -14,9 +15,6 @@ All four PRD phases, the sign-in lock, API keys, the per-vendor Usage tab and th
 - Codex prices in `models.json` are `null`, so Codex cost shows "unknown".
 - agy's own sign-in token rotation is unconfirmed (PRD "Open").
 - macOS / Ubuntu install untested; only WSL so far.
-- `hauptling broker status` fails with `Unknown call tunnel.status` (`bin/hauptling.mjs`, leftover from the dropped SSH-tunnel design); drop the tunnel part. The broker itself runs fine.
-- `hauptling test request` with an empty `--sha` swallows the next flag as the sha and fails later at checkout; validate up front.
-- `hauptling dashboard --print` always prints the `127.0.0.1` link; a `--host` flag would help over Tailscale.
 - Merged branches to delete: `phase-1`, `phase-3`, `phase-4`, `phase-4b`, `signin-guard`, `api-keys`, `handoff-rule`, `usage-per-vendor`, `egress-race`.
 
 ## This machine now

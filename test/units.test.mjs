@@ -18,6 +18,8 @@ const SID = '3f9a2c1e-0000-4000-8000-000000000001';
 test('identities and args', () => {
   assert.equal(identityFor('claude', 'claude-haiku-5-5', SID), 'claude_haiku-5-5_3f9a2');
   assert.equal(identityFor('codex', 'gpt-5.5', SID), 'codex_gpt-5.5_3f9a2c1e000040008000000000000001');
+  assert.throws(() => parseArgs(['--sha', '--gpu'], { bool: ['gpu'] }), /--sha needs a value/);
+  assert.deepEqual(parseArgs(['--x=--y']), { _: [], x: '--y' });
   assert.deepEqual(parseArgs(['a', '--choice', 'x', '--choice', 'y', '--test-writer', '--model=m'], { repeat: ['choice'], bool: ['test-writer'] }),
     { _: ['a'], choice: ['x', 'y'], testWriter: true, model: 'm' });
   assert.equal(wslPath('C:\\Users\\g\\repo'), '/mnt/c/Users/g/repo');

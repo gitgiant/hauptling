@@ -1,6 +1,7 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { join, normalize } from 'node:path';
+import { cpus, freemem, totalmem } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { kvGet, kvSet } from './db.mjs';
 import { readOnlyQuery } from './dbquery.mjs';
@@ -72,6 +73,17 @@ export function createDashboard({ db, dbPath, core, host, log = () => {}, slotDi
     return gpuCache.value;
   }
 
+  // Host load: CPU % since the previous sample (summed over cores), memory % in use.
+  const cpuTimes = () => cpus().reduce((t, c) => { const v = c.times; t.idle += v.idle; t.all += v.user + v.nice + v.sys + v.idle + v.irq; return t; }, { idle: 0, all: 0 });
+  let cpuPrev = cpuTimes();
+  function hostLoad() {
+    const now = cpuTimes();
+    const all = now.all - cpuPrev.all;
+    const cpu = all > 0 ? Math.round(100 * (1 - (now.idle - cpuPrev.idle) / all)) : null;
+    cpuPrev = now;
+    return { cpu, mem: Math.round(100 * (1 - freemem() / totalmem())) };
+  }
+
   async function snapshot() {
     const since = new Date(Date.now() - 24 * 3600e3).toISOString();
     const rows = db.prepare(`SELECT * FROM agents WHERE state NOT IN (${ENDED.map(s => `'${s}'`).join(',')}) OR updated_at >= ? ORDER BY created_at`).all(since);
@@ -95,8 +107,11 @@ export function createDashboard({ db, dbPath, core, host, log = () => {}, slotDi
   // One ticker for all open streams; it only runs while someone is watching.
   const clients = new Set();
   let last = '';
+  let lastHost = '';
   let timer = null;
   async function tick() {
+    const h = JSON.stringify(hostLoad());
+    if (h !== lastHost) { lastHost = h; for (const res of clients) res.write(`event: host\ndata: ${h}\n\n`); }
     try {
       const body = JSON.stringify(await snapshot());
       if (body !== last) { last = body; for (const res of clients) res.write(`event: board\ndata: ${body}\n\n`); }
@@ -108,8 +123,9 @@ export function createDashboard({ db, dbPath, core, host, log = () => {}, slotDi
     res.write('retry: 3000\n\n');
     clients.add(res);
     if (last) res.write(`event: board\ndata: ${last}\n\n`);
+    if (lastHost) res.write(`event: host\ndata: ${lastHost}\n\n`);
     if (!timer) { timer = setInterval(tick, 2000); timer.unref?.(); tick(); }
-    req.on('close', () => { clients.delete(res); if (!clients.size) { clearInterval(timer); timer = null; last = ''; } });
+    req.on('close', () => { clients.delete(res); if (!clients.size) { clearInterval(timer); timer = null; last = ''; lastHost = ''; } });
   }
 
   // ---------- agent detail ----------
@@ -355,5 +371,5 @@ export function createDashboard({ db, dbPath, core, host, log = () => {}, slotDi
     return true;
   }
 
-  return { handle, snapshot, table, query, timeline, history, usage, spend, terms };
+  return { handle, snapshot, hostLoad, table, query, timeline, history, usage, spend, terms };
 }

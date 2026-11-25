@@ -16,7 +16,7 @@ Delegator (host):
   models                                   models.json table (suggest mode reasons over this)
   attach AGENT | reply AGENT <text> | kill AGENT | merge AGENT
   test request --sha S [--selector X] [--gpu] [--timeout S] | test wait ID | test get ID | test report ID FILE
-  dashboard [--print] [--new-token]        open the dashboard in your browser (--print: show the sign-in link)
+  dashboard [--print] [--host H] [--new-token]  open the dashboard (--print: show the sign-in link; --host: link via H, e.g. your Tailscale name)
   gpu status | gpu pause [--now] | gpu resume   hold the GPU test queue (--now kills and requeues the running job)
 Worker (inside a slot; HAUPTLING_AGENT is set):
   report <≤300 chars>                      finish: hauptling pushes, opens the PR, gates the merge
@@ -55,7 +55,7 @@ async function main() {
       if (sub === 'start') { const i = await ensureBroker(); return out(`broker ${i.pid} on 127.0.0.1:${i.port}`); }
       const info = readBrokerFile();
       const up = info && await fetch(`http://127.0.0.1:${info.port}/health`).then(r => r.ok, () => false);
-      if (sub === 'status') return out(up ? `running: pid ${info.pid}, port ${info.port}, tunnel: ${(await call('tunnel.status')).state}` : 'not running');
+      if (sub === 'status') return out(up ? `running: pid ${info.pid}, port ${info.port}` : 'not running');
       if (sub === 'stop') {
         if (!up) return out('not running');
         await fetch(`http://127.0.0.1:${info.port}/api/shutdown`, { method: 'POST', headers: { authorization: `Bearer ${info.adminToken}` } });
@@ -134,6 +134,7 @@ async function main() {
     case 'test': {
       const [sub, id, file] = args._;
       if (sub === 'request') {
+        if (!/^[0-9a-f]{4,40}$/i.test(args.sha || '')) throw new Error(`test request needs --sha <commit> (got ${JSON.stringify(args.sha ?? '')})`);
         const r = await call('test.request', { sha: args.sha, selector: args.selector || '', gpu: Boolean(args.gpu), artifacts: args.artifacts || [], timeout_s: Number(args.timeout || 1800), repo: args.repo && normalizeRepo(args.repo) });
         return out(`${r.id} (round ${r.round})`);
       }
@@ -144,12 +145,13 @@ async function main() {
     }
     case 'dashboard': {
       const { token: t, url } = await call('dashboard.token', { rotate: Boolean(args.newToken) });
-      const link = `${url}/?k=${t}`;
+      const base = args.host ? (/^https?:\/\//.test(args.host) ? args.host : `https://${args.host}`).replace(/\/+$/, '') : url;
+      const link = `${base}/?k=${t}`;
       if (args.newToken) console.error('New dashboard token: browsers signed in with the old one must open this link again.');
       if (args.print) return out(link);
       const { platform } = await import('../src/platform/index.mjs');
       (await platform()).openUrl(link);
-      return out(`Opening ${url}/ (sign-in link: hauptling dashboard --print)`);
+      return out(`Opening ${base}/ (sign-in link: hauptling dashboard --print)`);
     }
     case 'gpu': {
       const sub = args._[0];

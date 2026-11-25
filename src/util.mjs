@@ -55,7 +55,7 @@ export function parseArgs(argv, { repeat = [], bool = [] } = {}) {
     const key = k.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
     if (bool.includes(k) && inline === undefined) { out[key] = true; continue; }
     const v = inline ?? argv[++i];
-    if (v === undefined) throw new Error(`--${k} needs a value`);
+    if (v === undefined || (inline === undefined && v.startsWith('--'))) throw new Error(`--${k} needs a value`);
     if (repeat.includes(k)) (out[key] ||= []).push(v); else out[key] = v;
   }
   return out;

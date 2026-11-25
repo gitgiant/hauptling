@@ -82,6 +82,12 @@ function connect() {
     render();
     if (state.pending) { const id = state.pending; state.pending = null; select(id); }
   });
+  es.addEventListener('host', (e) => {
+    const { cpu, mem } = JSON.parse(e.data);
+    put($('#sys'),
+      h('span', { title: 'Host CPU in use (all cores, last 2 s)' }, 'CPU ', h('b', { text: cpu == null ? '?' : `${cpu}%` })),
+      h('span', { title: 'Host memory in use' }, 'Mem ', h('b', { text: `${mem}%` })));
+  });
   es.onopen = () => { $('#conn').className = 'conn live'; $('#conn').textContent = 'live'; };
   es.onerror = () => { $('#conn').className = 'conn down'; $('#conn').textContent = 'reconnecting…'; };
 }

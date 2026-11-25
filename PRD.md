@@ -102,7 +102,7 @@ Phases 2–4 get their own grill at phase start.
 - **Actions**: answer a blocked question inline, reply, kill (with confirm), merge local-only repos, `gpu pause | pause --now | resume`. No spawning (that's the delegator's job).
 - **Agent detail**: read-only tmux screen mirror (last ~300 lines, escape codes stripped, refreshed every 2 s only while open); diff tab (`base...HEAD` plus uncommitted, stat + per file); events tab (events, mail, asks, test jobs).
 - **SQLite explorer**: browse with paging, sort and filter, plus ad-hoc `SELECT` on a read-only connection (1000 rows, 2 s). `token` and `nonce` values are masked wherever they appear, so aliases don't leak them.
-- **Board**: active agents of all delegators grouped by delegator and repo; blocked first and blinking, count in the tab title; collapsible "recent" (24 h) and a searchable history tab; GPU queue panel. Rows show branch, PR/CI, last test report, elapsed time, model.
+- **Board**: active agents of all delegators grouped by delegator and repo; blocked first and blinking, count in the tab title; collapsible "recent" (24 h) and a searchable history tab; GPU queue panel. Host CPU % and memory % sit beside the GPU panel in the header, from Node's `os` (on WSL that is the WSL VM, where the containers run), pushed as their own `host` SSE event every 2 s so the board doesn't re-render. Rows show branch, PR/CI, last test report, elapsed time, model.
 - **Notifications**: the answer page stays the one-click path; it and notifications gain an "Open dashboard" link. `hauptling dashboard [--print]` opens or prints the URL; `doctor` checks it's served.
 - **Layout**: board on the left, agent detail on the right; stacks on a phone.
 

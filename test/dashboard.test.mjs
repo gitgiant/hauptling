@@ -173,3 +173,13 @@ test('usage panel and spend: slot × vendor limits, sign-in state, totals of fin
   assert.equal((await s.req('/dash/board')).json.agents[0].usage.cost_usd, 1.5);
   s.done();
 });
+
+test('host load: CPU and memory as whole percents', async () => {
+  const { dash, done } = await setup();
+  try {
+    for (let i = 0; i < 1e6; i++); // some CPU between samples
+    const { cpu, mem } = dash.hostLoad();
+    for (const v of [cpu, mem]) assert.ok(v === null || (Number.isInteger(v) && v >= 0 && v <= 100), `got ${v}`);
+    assert.ok(mem > 0);
+  } finally { done(); }
+});
