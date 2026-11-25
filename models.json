@@ -1,5 +1,6 @@
 {
-  "_doc": "Shipped default. Override any part in ~/.hauptling/models.json (deep-merged). tier: 1 cheap, 2 mid, 3 top. Prices are USD per million tokens; null means unknown (cost shows as unknown). Codex keeps its workspace-write sandbox (network on so it reaches the broker); it cannot write .git, so hauptling commits for it on report/test request. Workers run in disposable containers with an egress allowlist; the container is the sandbox (Codex's own bubblewrap sandbox cannot run inside Docker, so Codex uses danger-full-access there, chosen 2026-11-21).",
+  "_doc": "Shipped default. prefer (cheap|balanced|best) caps the tier workers may use (1|2|3; spawn --allow-tier overrides). Workers load no user MCP servers (Claude --strict-mcp-config, Codex -c mcp_servers={}). Override any part in ~/.hauptling/models.json (deep-merged). tier: 1 cheap, 2 mid, 3 top. Prices are USD per million tokens; null means unknown (cost shows as unknown). Codex keeps its workspace-write sandbox (network on so it reaches the broker); it cannot write .git, so hauptling commits for it on report/test request. Workers run in disposable containers with an egress allowlist; the container is the sandbox (Codex's own bubblewrap sandbox cannot run inside Docker, so Codex uses danger-full-access there, chosen 2026-11-21).",
+  "prefer": "best",
   "rules": {
     "easy": 1,
     "normal": 2,
@@ -19,6 +20,7 @@
         "{model}",
         "--permission-mode",
         "auto",
+        "--strict-mcp-config",
         "{prompt}"
       ],
       "models": [
@@ -63,6 +65,8 @@
         "--ask-for-approval",
         "never",
         "--dangerously-bypass-hook-trust",
+        "-c",
+        "mcp_servers={}",
         "{prompt}"
       ],
       "models": [

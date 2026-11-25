@@ -34,6 +34,8 @@ export function prepare(vendor, dir, home = homedir(), { env = process.env, run 
     }
     // Usage (context %, cost, 5h/weekly limits) reaches the broker through the status line; no model tokens.
     s.statusLine = { type: 'command', command: 'hauptling usage claude' };
+    // Bare worker (token economy): plugins the slot picked up stay installed but off. MCP: --strict-mcp-config in models.json.
+    if (s.enabledPlugins) s.enabledPlugins = Object.fromEntries(Object.keys(s.enabledPlugins).map(k => [k, false]));
     writeJson(settingsPath, s);
     // Skip the first-run folder trust dialog for this clone.
     const statePath = env.CLAUDE_CONFIG_DIR ? join(configDir, '.claude.json') : join(home, '.claude.json');

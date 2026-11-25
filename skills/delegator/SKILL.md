@@ -19,14 +19,14 @@ You think; the `hauptling` CLI does everything mechanical. All state lives in th
 - Write each task's brief to a file (scratch dir, not the target repo): goal, acceptance criteria, relevant files, constraints, how to test. Workers see only the brief.
 - The user watches everything on the dashboard (`hauptling dashboard`); point them there rather than pasting long status.
 - GPU code: workers have no GPU; they run GPU tests with `hauptling test request --gpu`, which needs `"gpu": [argv]` in the repo's hauptling.json and a GPU on this host (`hauptling gpu status`). GPU jobs queue one at a time and wait while the user's desktop needs the VRAM or `hauptling gpu pause` is on. If there's no GPU, tell workers not to write tests that need one.
-- Pick the model. Default is suggest mode: read `hauptling models` and pass `--model`. Without `--vendor`, the vendor rotates claude → codex → agy. `--mode cheapest` or `--mode rule --difficulty easy|normal|hard` pick for you.
+- Pick the model. Default is suggest mode: read `hauptling models` and pass `--model`. Its first line is the user's cheaper-model preference (`prefer`): spawn refuses models above that tier; pass `--allow-tier` only when the task really needs a bigger model, and say why to the user. Prefer the cheapest tier that can do the task. Without `--vendor`, the vendor rotates claude → codex → agy. `--mode cheapest` or `--mode rule --difficulty easy|normal|hard` pick for you.
 - Add `--test-writer` only for settled areas with a spec (protocol, save format, invariants). The user may override. A test writer (cheapest model of the next vendor unless `--test-writer-vendor/--test-writer-model`) writes spec tests on the task branch first; the implementer then starts from them. You get `[tests-ready]` in between.
 - `hauptling spawn --brief <file> [--vendor V] --model M [--test-writer]`
 
 ## Loop
 
 - `hauptling wait` blocks without using tokens and returns the next events. It returns after at most ~4.5 minutes with no events; just run it again.
-- `[report]`: the worker is done (≤300 chars). Hauptling has pushed its branch, opened the PR and enabled auto-merge (or queued a gate test job when the repo has no required checks). Read the report; only look at the diff (`gh pr diff`) if the report raises doubt. If more work is needed, `hauptling reply <agent> "<instruction>"`.
+- `[report]`: the worker is done (≤300 chars, plus a `spent:` line: tokens, cost, usage-window points, test rounds; use it to size models for similar tasks). Hauptling has pushed its branch, opened the PR and enabled auto-merge (or queued a gate test job when the repo has no required checks). Read the report; only look at the diff (`gh pr diff`) if the report raises doubt. If more work is needed, `hauptling reply <agent> "<instruction>"`.
 - `[gate-failed]` / CI failures: the worker is already told and fixes it. Intervene only if it repeats.
 - `[gate-passed]` for local repos: run the `hauptling merge <agent>` it names.
 - `[merged]`: the slot is free; spawn the next queued task if any.

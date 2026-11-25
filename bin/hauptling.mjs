@@ -10,10 +10,11 @@ Delegator (host):
   resume [--delegator ID] [--cli C]        state + handoff for a new CLI
   handoff <text|--file F>                  store a handoff note
   spawn --brief FILE [--vendor V] [--model M | --mode cheapest|rule] [--difficulty easy|normal|hard]
-        [--repo R] [--base B] [--title T] [--test-writer [--test-writer-vendor V] [--test-writer-model M]]
+        [--repo R] [--base B] [--title T] [--allow-tier] [--test-writer [--test-writer-vendor V] [--test-writer-model M]]
   wait [--timeout 270]                     block until the next event (max 280 s; run again on timeout)
   status [--all]                           agents of the current delegator
   models                                   models.json table (suggest mode reasons over this)
+  models prefer [cheap|balanced|best]      show or set the highest tier workers may use (spawn --allow-tier overrides)
   attach AGENT | reply AGENT <text> | kill AGENT | merge AGENT
   test request --sha S [--selector X] [--gpu] [--timeout S] | test wait ID | test get ID | test report ID FILE
   dashboard [--print] [--new-token]        open the dashboard in your browser (--print: show the sign-in link)
@@ -41,7 +42,7 @@ const [cmd, ...rest] = process.argv.slice(2);
 
 async function main() {
   const { call } = await import('../src/client.mjs');
-  const args = parseArgs(rest, { repeat: ['choice', 'artifacts'], bool: ['test-writer', 'all', 'gpu', 'force', 'no-host', 'no-login', 'now', 'print', 'new-token'] });
+  const args = parseArgs(rest, { repeat: ['choice', 'artifacts'], bool: ['test-writer', 'allow-tier', 'all', 'gpu', 'force', 'no-host', 'no-login', 'now', 'print', 'new-token'] });
   const text = () => args._.join(' ');
   switch (cmd) {
     case undefined: case 'help': case '--help': case '-h': return out(USAGE);
@@ -86,7 +87,7 @@ async function main() {
       if (!args.brief) throw new Error('--brief FILE is required');
       const r = await call('spawn', {
         delegator: args.delegator, vendor: args.vendor, model: args.model, mode: args.mode, difficulty: args.difficulty,
-        repo: args.repo && normalizeRepo(args.repo), base: args.base, title: args.title,
+        repo: args.repo && normalizeRepo(args.repo), base: args.base, title: args.title, allowTier: args.allowTier,
         testWriter: args.testWriter || args.testWriterModel ? { vendor: args.testWriterVendor, model: args.testWriterModel } : false,
         brief: readFileSync(args.brief, 'utf8'),
       });
@@ -99,7 +100,10 @@ async function main() {
       return out(r.events.length ? r.events.map(e => `[${e.kind}] ${e.text}`).join('\n') : 'No events yet (timed out). Run `hauptling wait` again.');
     }
     case 'status': return out(board(await call('agents', { delegator: args.delegator, all: args.all })));
-    case 'models': { const { loadModels, table } = await import('../src/models.mjs'); return out(table(loadModels())); }
+    case 'models': {
+      if (args._[0] === 'prefer') return out(`prefer: ${await call('models.prefer', { value: args._[1] })}`);
+      const { loadModels, table } = await import('../src/models.mjs'); return out(table(loadModels()));
+    }
     case 'attach': {
       const { argv } = await call('attach', { agent: args._[0] });
       out(`Attaching to ${args._[0]} (detach: Ctrl-b d)…`);

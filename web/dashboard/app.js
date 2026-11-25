@@ -215,6 +215,7 @@ function renderDetailHead(a, el) {
     a.ask ? h('div', { class: 'ask' }, h('p', { text: a.ask.question }),
       h('div', { class: 'choices' }, a.ask.choices.map((c, i) => h('button', { class: 'primary', onclick: () => act('answer', { ask: a.ask.id, choice: i }, `Answered: ${c}`) }, c)))) : null,
     a.report ? h('div', { class: 'report' }, h('b', { text: 'Report: ' }), a.report) : null,
+    a.spend ? h('div', { class: 'resets', title: 'Tokens, cost, usage-window points this task used, test rounds', text: `Spent: ${a.spend}` }) : null,
     a.ended ? null : reply,
     a.ended ? null : h('div', { class: 'actions' },
       canMerge ? h('button', { class: 'primary', onclick: () => act('merge', { agent: a.id }, `${a.id} merged into ${a.base}`) }, `Merge into ${a.base}`) : null,
@@ -374,7 +375,9 @@ async function loadUsage() {
   clearTimeout(usageTimer);
   try {
     const u = await api.get('/dash/usage');
-    put($('#vendors'), h('div', { class: 'vendors' }, u.vendors.map(v => {
+    const prefer = h('select', { 'aria-label': 'Cheaper-model preference', onchange: (e) => act('models.prefer', { value: e.target.value }, `New workers: ${e.target.value}`) },
+      [['cheap', 'cheap (tier 1)'], ['balanced', 'balanced (up to tier 2)'], ['best', 'best (any tier)']].map(([v, t]) => h('option', { value: v, selected: v === u.prefer, text: t })));
+    put($('#vendors'), h('label', { class: 'prefer', title: 'Highest model tier new workers may use; the delegator can still pass --allow-tier' }, 'Model preference ', prefer), h('div', { class: 'vendors' }, u.vendors.map(v => {
       const signed = v.slots.filter(s => s.signed_in).length;
       return h('section', { class: 'vendor' },
         h('h3', { text: v.vendor }),

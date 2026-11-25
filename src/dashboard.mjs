@@ -22,7 +22,7 @@ import { token as newToken } from './util.mjs';
 const WEB = fileURLToPath(new URL('../web/dashboard/', import.meta.url));
 const ENDED = ['merged', 'killed', 'closed', 'handed-off'];
 const NO_SESSION = [...ENDED, 'failed', 'queued', 'waiting'];
-const ACTIONS = new Set(['answer', 'reply', 'kill', 'merge', 'gpu.pause', 'gpu.resume']);
+const ACTIONS = new Set(['answer', 'reply', 'kill', 'merge', 'gpu.pause', 'gpu.resume', 'models.prefer']);
 const COOKIE = 'hl_dash';
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml' };
 const ANSI = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(\x07|\x1b\\)|\x1b[@-Z\\-_]/g;
@@ -83,6 +83,7 @@ export function createDashboard({ db, dbPath, core, host, log = () => {}, slotDi
         ...pub(a),
         ended: ENDED.includes(a.state),
         usage: a.usage ? JSON.parse(a.usage) : null,
+        spend: a.usage_start != null && core.spend ? core.spend(a) : null,
         status: db.prepare('SELECT text FROM status WHERE identity = ?').get(a.id)?.text || null,
         test: t ? { id: t.id, state: t.state, gpu: Boolean(t.gpu), purpose: t.purpose, status: r?.status || null, passed: r?.passed ?? null, failed: r?.failed ?? null, at: t.done_at || t.created_at } : null,
         ask: ask ? { id: ask.id, question: ask.question, choices: JSON.parse(ask.choices), at: ask.at } : null,
@@ -185,7 +186,7 @@ export function createDashboard({ db, dbPath, core, host, log = () => {}, slotDi
         })),
       };
     });
-    return { vendors, spend: spend() };
+    return { vendors, spend: spend(), prefer: await core.call('models.prefer') };
   }
 
   /** Totals of agents' (final) usage per day, vendor and repo; API-equivalent where vendors don't report cost. */

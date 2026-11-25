@@ -1,9 +1,13 @@
-# Handoff — 2026-11-24
+# Handoff — 2026-11-25
 
-All four PRD phases, the sign-in lock, API keys, the per-vendor Usage tab and the egress-proxy race fix are on `main`. `npm test` (38) and `hauptling doctor` pass.
+Token economy stage 1 is on branch `claude/beautiful-dirac-t0hx3x` (not yet on `main`); PRD "Token economy decisions" has all three stages. `npm test` (40) passes; nothing run on the real host yet.
 
 ## Needs a real run to confirm
 
+- Stage 1 changed `src/vendors.mjs` (Claude plugins turned off in the slot): run `hauptling image`, then `hauptling broker stop`.
+- Claude worker starts with `--strict-mcp-config` and no MCP servers; Codex with `-c mcp_servers={}` actually drops servers from the slot's `config.toml` (may merge instead of replace).
+- The `spent:` line on a real `[report]` (window deltas need status-line readings at launch and at report).
+- Usage tab "Model preference" select writes `prefer` to `~/.hauptling/models.json`.
 - "Sign in" on the Usage tab (vendor login in host tmux).
 - The Terminal tab live in a browser (parts tested; headless screenshots fire before data arrives).
 - A worker on an API key: Claude's TUI should show API billing; for agy, whether `GEMINI_API_KEY` or its OAuth sign-in wins is unknown.
@@ -11,6 +15,7 @@ All four PRD phases, the sign-in lock, API keys, the per-vendor Usage tab and th
 
 ## Open
 
+- Token economy stages 2 (effort per tier, events-only wait for Claude delegators, `[handoff-due]` at 85%) and 3 (headroom routing at 80%): not started. agy's bare-config (MCP off) is unknown.
 - Codex prices in `models.json` are `null`, so Codex cost shows "unknown".
 - agy's own sign-in token rotation is unconfirmed (PRD "Open").
 - macOS / Ubuntu install untested; only WSL so far.
@@ -21,6 +26,6 @@ All four PRD phases, the sign-in lock, API keys, the per-vendor Usage tab and th
 
 ## This machine now
 
-- Slots `hl-w1..3` signed in to claude, codex and agy; no API keys set. Workers from a terrain task were running at handoff time (see the dashboard).
+- Slots `hl-w1..3` signed in to claude, codex and agy; no API keys set.
 - Tailscale serve is on: `https://old.tailff0f31.ts.net/` → the dashboard. Off: `"/mnt/c/Program Files/Tailscale/tailscale.exe" serve --https=443 off`.
 - GPU jobs wait for 6144 MiB free; with the desktop open about 6.2–6.7 GB is free, so they may queue.

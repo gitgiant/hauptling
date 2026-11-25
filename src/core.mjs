@@ -1,9 +1,10 @@
 import { EventEmitter } from 'node:events';
 import { kvDel, kvGet, kvSet, tx } from './db.mjs';
 import * as mail from './mail.mjs';
-import { findModel, launchArgv, loadModels, nextVendor, pick } from './models.mjs';
+import { checkTier, findModel, launchArgv, loadModels, nextVendor, pick, preferOf, setPrefer } from './models.mjs';
 import { canInject } from './vendors.mjs';
-import { normalizeUsage, scrub, statusText } from './usage.mjs';
+import { readFileSync } from 'node:fs';
+import { normalizeUsage, scrub, spendLine, statusText, windowSnapshot } from './usage.mjs';
 import { dashToken } from './dashboard.mjs';
 import { MAIL_MAX, STATUS_MAX, bounded, githubSlug, hex, isFamily, now, sanitizeModel, token, wslPath } from './util.mjs';
 
@@ -21,7 +22,9 @@ const ENDED = ['merged', 'killed', 'closed', 'handed-off'];
 const AGENT_CALLS = new Set(['hook', 'report', 'ask', 'mail.send', 'mail.check', 'mail.status', 'mail.peers', 'test.request', 'test.wait', 'test.get', 'whoami', 'usage.report']);
 const RUNNER_CALLS = new Set(['test.claim', 'test.report', 'test.heartbeat']);
 
-export function createCore({ db, host, github, notify = () => false, models = loadModels, workerUrl, publicUrl = workerUrl, runnerToken, log = () => {}, stallMinutes = Number(process.env.HAUPTLING_STALL_MINUTES || 10), idleMinutes = Number(process.env.HAUPTLING_IDLE_MINUTES || 15) }) {
+const WORKER_RULES = readFileSync(new URL('../prompts/worker-rules.md', import.meta.url), 'utf8').trim();
+
+export function createCore({ db, host, github, notify = () => false, models = loadModels, savePrefer = setPrefer, workerUrl, publicUrl = workerUrl, runnerToken, log = () => {}, stallMinutes = Number(process.env.HAUPTLING_STALL_MINUTES || 10), idleMinutes = Number(process.env.HAUPTLING_IDLE_MINUTES || 15) }) {
   const bus = new EventEmitter();
   bus.setMaxListeners(0);
   const agentRow = (id) => db.prepare('SELECT * FROM agents WHERE id = ?').get(id);
@@ -79,11 +82,18 @@ Tests for behaviour that doesn't exist yet are expected to fail now: make sure t
 ${a.brief.trim()}
 
 ---
+${WORKER_RULES}
+
+---
 Hauptling worker notes (you are ${a.id}, branch ${a.branch}, base ${a.base}):
 - Work only in this clone. Do not push.
 ${common}`;
     }
-    return `${a.brief.trim()}
+    return `${WORKER_RULES}
+
+---
+
+${a.brief.trim()}
 
 ---
 Hauptling worker notes (you are ${a.id}, branch ${a.branch}, base ${a.base}):
@@ -93,7 +103,7 @@ Hauptling worker notes (you are ${a.id}, branch ${a.branch}, base ${a.base}):
 ${common} Keep the session open afterwards: CI failures and review notes arrive as messages.`;
   }
 
-  async function spawn({ delegator, vendor, model, mode = 'suggest', difficulty = 'normal', repo, base, brief, title, testWriter = false }) {
+  async function spawn({ delegator, vendor, model, mode = 'suggest', difficulty = 'normal', repo, base, brief, title, testWriter = false, allowTier = false }) {
     const d = delegatorId(delegator);
     const drow = db.prepare('SELECT * FROM delegators WHERE id = ?').get(d);
     repo ||= drow.repo;
@@ -106,7 +116,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
       for (let i = 0; i < 3 && !vendor; i++) { const v = nextVendor(db, cfg); tried.push(v); if (vendorUsable(v)) vendor = v; }
       vendor ||= tried[0];
     }
-    const entry = model ? findModel(cfg, vendor, model) : pick(cfg, vendor, mode, difficulty);
+    const entry = checkTier(cfg, vendor, model ? findModel(cfg, vendor, model) : pick(cfg, vendor, mode, difficulty), allowTier);
     if (!brief?.trim()) throw new Error('Brief is empty');
     const id = `${vendor}_${sanitizeModel(entry.id)}_${hex(3).slice(0, 5)}`;
     title ||= (brief.match(/^#+\s*(.+)$/m)?.[1] || brief.trim().split('\n')[0]).slice(0, 72);
@@ -158,6 +168,11 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   }
 
   // ---------- usage (phase 4b) ----------
+  /** Per-task totals line (token economy): tokens, cost, window points since launch, test rounds. */
+  function spend(a) {
+    const rounds = db.prepare("SELECT COUNT(*) n FROM tests WHERE agent = ? AND purpose = 'agent'").get(a.id).n;
+    return spendLine({ usage: a.usage ? JSON.parse(a.usage) : null, start: a.usage_start ? JSON.parse(a.usage_start) : null, now: windowSnapshot(db, a.vendor), rounds });
+  }
   const live = (at) => !at || Date.parse(at) > Date.now();
   /**
    * The vendor's account is at 100% of some window (until it resets). One account per vendor, signed
@@ -227,7 +242,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     const prompt = 'Read your brief at .hauptling/brief.md and carry it out.';
     await host.startWorker({ slot: a.slot, id: a.id, dir: a.dir, vendor: a.vendor, argv: launchArgv(cfg, a.vendor, entry, prompt),
       env: { HAUPTLING_AGENT: a.id, HAUPTLING_TOKEN: a.token, HAUPTLING_BROKER: workerUrl } });
-    update(a.id, { state: 'working', base, idle: 0 });
+    update(a.id, { state: 'working', base, idle: 0, usage_start: JSON.stringify(windowSnapshot(db, a.vendor)) });
     mail.setStatus(db, a.id, `working: ${a.title}`.slice(0, STATUS_MAX));
   }
 
@@ -307,7 +322,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     }
     update(a.id, { state: 'done', report: body, sha, idle: 0 });
     mail.setStatus(db, a.id, `done: ${a.title}`.slice(0, STATUS_MAX));
-    emit(a.delegator, a.id, 'report', `${a.id}: ${body}`);
+    emit(a.delegator, a.id, 'report', `${a.id}: ${body}\n  spent: ${spend(a)}`);
     if (ahead) gate(a.id).catch(e => { emit(a.delegator, a.id, 'gate-error', `${a.id}: ${e.message}`); });
     else update(a.id, { gate: 'none' });
     return { sha, pushed: Boolean(ahead), branch: a.branch, committed };
@@ -395,7 +410,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     const id = `t_${hex(4)}`;
     db.prepare(`INSERT INTO tests (id, agent, requester, repo, sha, branch, selector, gpu, artifacts, timeout_s, round, purpose, state, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)`).run(id, a?.id ?? null, requester, repo || a.repo, sha, branch || a?.branch || null, selector, gpu ? 1 : 0, JSON.stringify(artifacts), Number(timeout_s), round, purpose, now());
-    if (a && round >= 4) {
+    if (a && round >= 3) {
       const q = `${a.id} is on test round ${round}. Keep iterating?`;
       update(a.id, { state: 'blocked' });
       mail.setStatus(db, a.id, `blocked: test round ${round}`);
@@ -769,6 +784,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     'usage.report': (a, who) => usageReport(who, a),
     'dashboard.token': ({ rotate = false }) => ({ token: dashToken(db, { rotate }), url: publicUrl }),
     'gpu.pause': gpuPause, 'gpu.resume': gpuResume, 'gpu.status': gpuStatus,
+    'models.prefer': ({ value }) => (value ? savePrefer(value) : preferOf(models())),
     'slots.get': () => slots(),
     'slots.set': ({ slots: s }) => { kvSet(db, 'slots', JSON.stringify(s)); return s; },
   };
@@ -790,5 +806,5 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     return null;
   }
 
-  return { call, authenticate, poll, watch, startQueued, bus, askForPage, answer, pump, recover, gpuReady, refreshUsage, recordUsage };
+  return { call, authenticate, spend, poll, watch, startQueued, bus, askForPage, answer, pump, recover, gpuReady, refreshUsage, recordUsage };
 }

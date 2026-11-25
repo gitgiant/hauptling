@@ -144,3 +144,5 @@ table.grid td.num, table.grid th.num { text-align: right; font-variant-numeric: 
   .detail { position: static; max-height: none; }
   .gpu { margin-left: 0; width: 100%; }
 }
+
+.prefer { display: block; margin: 0 0 12px; }

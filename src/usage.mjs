@@ -94,3 +94,33 @@ export function statusText(u) {
   for (const l of u.limits) parts.push(`${l.window} ${Math.round(l.used_pct)}%`);
   return `hauptling · ${parts.join(' · ') || 'usage pending'}`;
 }
+
+/** Newest reading of each of a vendor's account windows, from any slot: { [window]: { used_pct, resets_at } }. */
+export function windowSnapshot(db, vendor) {
+  const out = {};
+  for (const r of db.prepare('SELECT window, used_pct, resets_at FROM slot_usage WHERE vendor = ? ORDER BY at DESC').all(vendor)) {
+    out[r.window] ||= { used_pct: r.used_pct, resets_at: r.resets_at };
+  }
+  return out;
+}
+
+const kfmt = (n) => (n == null ? '?' : n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n));
+
+/**
+ * One line of what a task spent: tokens, cost, points each window rose since launch, test rounds.
+ * A window that had no reading at launch, or whose reset time changed (it reset mid-task), shows no delta.
+ */
+export function spendLine({ usage, start, now, rounds }) {
+  const parts = [];
+  if (usage) {
+    parts.push(`${kfmt(usage.tokens_in)} in/${kfmt(usage.tokens_out)} out tok`);
+    if (usage.cost_usd != null) parts.push(`${usage.cost_estimated ? '~' : ''}$${usage.cost_usd.toFixed(2)}`);
+  }
+  for (const [w, n] of Object.entries(now || {})) {
+    const s = start?.[w];
+    if (!s || s.resets_at !== n.resets_at) continue;
+    parts.push(`${w} +${Math.max(0, Math.round(n.used_pct - s.used_pct))}`);
+  }
+  parts.push(`${rounds} test round${rounds === 1 ? '' : 's'}`);
+  return parts.join(' · ');
+}

@@ -1,5 +1,5 @@
-import { readFileSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { home } from './util.mjs';
 import { kvGet, kvSet } from './db.mjs';
@@ -31,6 +31,27 @@ export function findModel(cfg, vendor, id) {
   return m;
 }
 
+/** Cheaper-model preference → highest tier spawn may use without --allow-tier. */
+export const PREFER = { cheap: 1, balanced: 2, best: 3 };
+export const preferOf = (cfg) => (cfg.prefer in PREFER ? cfg.prefer : 'best');
+export const maxTier = (cfg) => PREFER[preferOf(cfg)];
+
+/** Writes `prefer` into the user's override file, keeping everything else in it. */
+export function setPrefer(value, override = join(home(), 'models.json')) {
+  if (!(value in PREFER)) throw new Error(`prefer must be ${Object.keys(PREFER).join(', ')}; got "${value}"`);
+  const cur = existsSync(override) ? JSON.parse(readFileSync(override, 'utf8') || '{}') : {};
+  cur.prefer = value;
+  mkdirSync(dirname(override), { recursive: true });
+  writeFileSync(override, JSON.stringify(cur, null, 2) + '\n');
+  return value;
+}
+
+/** Throws when a model is above the preference cap and the spawn didn't pass --allow-tier. */
+export function checkTier(cfg, vendor, entry, allowTier = false) {
+  if (allowTier || entry.tier <= maxTier(cfg)) return entry;
+  throw new Error(`prefer=${preferOf(cfg)} caps workers at tier ${maxTier(cfg)}; ${vendor} ${entry.id} is tier ${entry.tier}. Pick a cheaper model or pass --allow-tier.`);
+}
+
 /**
  * Picks a model for a vendor. cheapest: lowest tier. rule: tier from rules[difficulty].
  * suggest: no pick; the delegator reasons over `hauptling models` and passes --model.
@@ -40,8 +61,9 @@ export function pick(cfg, vendor, mode = 'suggest', difficulty = 'normal') {
   if (!models.length) throw new Error(`No models for ${vendor}`);
   if (mode === 'cheapest') return [...models].sort((a, b) => a.tier - b.tier)[0];
   if (mode === 'rule') {
-    const tier = cfg.rules?.[difficulty];
-    if (!tier) throw new Error(`No rule for difficulty "${difficulty}" (have: ${Object.keys(cfg.rules || {}).join(', ')})`);
+    const ruled = cfg.rules?.[difficulty];
+    if (!ruled) throw new Error(`No rule for difficulty "${difficulty}" (have: ${Object.keys(cfg.rules || {}).join(', ')})`);
+    const tier = Math.min(ruled, maxTier(cfg)); // the preference caps rule mode
     return models.find(m => m.tier === tier) || [...models].sort((a, b) => Math.abs(a.tier - tier) - Math.abs(b.tier - tier))[0];
   }
   throw new Error('Suggest mode: choose a model from `hauptling models` and pass --model (or use --mode cheapest|rule)');
@@ -66,11 +88,11 @@ export function launchArgv(cfg, vendor, entry, prompt) {
 }
 
 export function table(cfg) {
-  const lines = [];
+  const lines = [`prefer: ${preferOf(cfg)} (workers up to tier ${maxTier(cfg)}; above it only with --allow-tier). Change: hauptling models prefer cheap|balanced|best`];
   for (const v of enabledVendors(cfg)) {
     for (const m of cfg.vendors[v].models) {
       const price = m.usd_in == null ? 'price ?' : `$${m.usd_in}/$${m.usd_out} per Mtok`;
-      lines.push(`${v.padEnd(7)} ${m.id.padEnd(26)} tier ${m.tier}  ${price}${m.notes ? `  ${m.notes}` : ''}`);
+      lines.push(`${v.padEnd(7)} ${m.id.padEnd(26)} tier ${m.tier}  ${price}${m.notes ? `  ${m.notes}` : ''}${m.tier > maxTier(cfg) ? '  (above prefer)' : ''}`);
     }
   }
   return lines.join('\n');

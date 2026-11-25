@@ -97,6 +97,7 @@ test('spawn → hooks → mail wake → report → PR without required checks �
   assert.deepEqual(gh.log[0], ['create', 'gitgiant/demo', `hl/${s.id}`, 'main', 'Add thing']);
   const ev = await core.call('wait', { timeout: 1 });
   assert.equal(ev.events[0].kind, 'report');
+  assert.match(ev.events[0].text, /spent: .*test round/, 'the delegator sees what the task spent');
 
   const runner = core.authenticate('RUN', 'ADMIN');
   const { job } = await core.call('test.claim', { wait: 0 }, runner);
@@ -112,7 +113,7 @@ test('spawn → hooks → mail wake → report → PR without required checks �
   assert.ok(d);
 });
 
-test('required checks → auto-merge; queue beyond 3; ask → toast → answer; round 4 blocks', async () => {
+test('required checks → auto-merge; queue beyond 3; ask → toast → answer; round 3 blocks', async () => {
   const { db, core, gh, host, toasts } = setup(fakeGithub({ required: ['ci'] }));
   await core.call('delegator.start', { repo: 'gitgiant/demo' });
   const ids = [];
@@ -135,9 +136,11 @@ test('required checks → auto-merge; queue beyond 3; ask → toast → answer; 
   await core.call('answer', { ask: q.ask, choice: 1 });
   assert.match(host.typed.at(-1)[1], /\[user .*Which DB\?": postgres/);
 
-  for (let i = 1; i <= 4; i++) await core.call('test.request', { selector: 'x' }, who);
+  for (let i = 1; i <= 2; i++) await core.call('test.request', { selector: 'x' }, who);
+  assert.equal(db.prepare('SELECT state FROM agents WHERE id = ?').get(ids[0]).state, 'working', 'two rounds run freely');
+  await core.call('test.request', { selector: 'x' }, who);
   assert.equal(db.prepare('SELECT state FROM agents WHERE id = ?').get(ids[0]).state, 'blocked');
-  assert.match(toasts.at(-1).body, /round 4/);
+  assert.match(toasts.at(-1).body, /round 3/);
 
   await core.call('report', { text: 'ok' }, who);
   await settle();
