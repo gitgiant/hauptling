@@ -3,11 +3,13 @@
   color-scheme: dark;
   --bg: #161615; --panel: #1f1f1d; --line: #33322f; --text: #e8e7e3; --muted: #9a9993;
   --accent: #7ea2ff; --ok: #5cc28a; --bad: #ff7a6b; --warn: #f0b04a; --idle: #7d7c77; --on-accent: #10131c;
+  --v-claude-bg: #d98a5f; --v-claude-fg: #1c1209; --v-codex-bg: #5cc2b4; --v-codex-fg: #07201c; --v-agy-bg: #a98bf0; --v-agy-fg: #170d33; --v-unknown-bg: #5e5d59; --v-unknown-fg: #f2f1ed;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 :root[data-theme=light] {
   color-scheme: light;
   --bg: #f6f6f4; --panel: #ffffff; --line: #e3e2de; --text: #1d1d1b; --muted: #6b6a66;
+  --v-claude-bg: #b4532a; --v-claude-fg: #fff; --v-codex-bg: #0f7a6c; --v-codex-fg: #fff; --v-agy-bg: #6f48d0; --v-agy-fg: #fff; --v-unknown-bg: #6e6d68; --v-unknown-fg: #fff;
   --accent: #2f5fd0; --ok: #2e7d4f; --bad: #c0392b; --warn: #b26b00; --idle: #8a8984; --on-accent: #fff;
 }
 * { box-sizing: border-box; }
@@ -213,3 +215,14 @@ table.grid td.num, table.grid th.num { text-align: right; font-variant-numeric: 
   .sys { flex: none; }
   .gpu:not(.sys) { flex: 1 1 100%; }
 }
+
+/* Vendor badge before an agent id: fixed size so cards stay aligned. */
+.aid { display: inline-flex; align-items: center; gap: .3rem; min-width: 0; }
+.vbadge { flex: none; display: inline-grid; place-items: center; width: 15px; height: 15px; border-radius: 4px; font: 700 10px/1 system-ui, sans-serif; user-select: none; }
+.v-claude { background: var(--v-claude-bg); color: var(--v-claude-fg); }
+.v-codex { background: var(--v-codex-bg); color: var(--v-codex-fg); }
+.v-agy { background: var(--v-agy-bg); color: var(--v-agy-fg); }
+.v-unknown { background: var(--v-unknown-bg); color: var(--v-unknown-fg); }
+.card .aid .mono { overflow-wrap: anywhere; }
+.term { white-space: pre-wrap; overflow-wrap: anywhere; }
+.term.nowrap { white-space: pre; overflow-wrap: normal; }
