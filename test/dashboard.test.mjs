@@ -106,7 +106,7 @@ test('dashboard board includes idle active delegators and drops them when ended'
   const board = async () => (await s.req('/dash/board')).json;
   const initial = await board();
   assert.ok(!initial.agents.some(a => a.delegator === id));
-  const idle = { id, repo: 'gitgiant/docs', cli: 'codex', created_at, handoff_waiting: false };
+  const idle = { id, repo: 'gitgiant/docs', cli: 'codex', gate: true, automerge: true, created_at, handoff_waiting: false };
   assert.deepEqual(initial.delegators.find(d => d.id === id), idle);
 
   await s.core.call('handoff', { delegator: id, text: 'Work can resume later.' });
