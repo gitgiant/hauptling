@@ -30,6 +30,7 @@ Setup:
                                            everything: skill, Docker, worker image, egress proxy, broker, sign-ins, doctor
   doctor                                   check tools, Docker, image, egress, broker and sign-ins
   image                                    build the worker image if hauptling changed
+  key set VENDOR | key rm VENDOR | key list   API key instead of slot sign-ins (one key for all slots; billed per token)
   login SLOT VENDOR [--force]              sign one slot in to claude|codex|agy (refused while a worker of that vendor runs on the slot)
   init [DIR]                               write the detected hauptling.json
   broker start|stop|status|run
@@ -213,6 +214,19 @@ async function main() {
       return;
     }
     case 'doctor': { const { doctor } = await import('../src/setup.mjs'); if (!await doctor({ vendors: args.vendors ? args.vendors.split(',') : undefined })) process.exitCode = 1; return; }
+    case 'key': {
+      const keys = await import('../src/keys.mjs');
+      const [sub, vendor] = args._;
+      if (sub === 'list' || !sub) return out(Object.entries(keys.keyHints()).map(([v, h]) => `${v.padEnd(7)} ${h ? `API key ${h} (all slots, billed per token)` : 'slot sign-ins (subscription)'}`).join('\n'));
+      if (sub === 'rm') { const r = keys.removeKey(vendor); return out(r.removed ? `${vendor}: key removed; new workers use the slots' sign-ins again.` : `${vendor}: no key was set.`); }
+      if (sub === 'set') {
+        // Read the key from stdin (pipe) or a hidden prompt; never from argv, so it stays out of shell history.
+        const key = process.stdin.isTTY ? await hiddenPrompt(`${keys.KEY_ENV[vendor] || 'API key'} for ${vendor}: `) : (await (async () => { let s = ''; for await (const c of process.stdin) s += c; return s; })());
+        const r = keys.setKey(vendor, key);
+        return out(`${vendor}: API key ${r.hint} stored (~/.hauptling/keys/${vendor}, mode 600).\nNew ${vendor} workers on every slot now use it and are billed per token by the API, not your subscription. Running workers are unchanged.\nSwitch back: hauptling key rm ${vendor}`);
+      }
+      throw new Error('key set VENDOR (reads the key from stdin or a hidden prompt) | key rm VENDOR | key list');
+    }
     case 'login': { const { login } = await import('../src/setup.mjs'); return login(args._[0], args._[1], { force: Boolean(args.force) }); }
     default: throw new Error(`Unknown command ${cmd}\n\n${USAGE}`);
   }
@@ -260,3 +274,24 @@ async function hook(vendor, event, call) {
 }
 
 main().catch((e) => { console.error(`hauptling: ${e.message}`); process.exitCode = 1; });
+
+/** Reads a line from the terminal without echoing it. */
+function hiddenPrompt(question) {
+  return new Promise((resolve, reject) => {
+    process.stderr.write(question);
+    const stdin = process.stdin;
+    stdin.setRawMode(true);
+    stdin.resume();
+    stdin.setEncoding('utf8');
+    let value = '';
+    const onData = (ch) => {
+      for (const c of ch) {
+        if (c === '\r' || c === '\n') { done(); return resolve(value); }
+        if (c === '\u0003') { done(); return reject(new Error('cancelled')); }
+        if (c === '\u007f' || c === '\b') value = value.slice(0, -1); else value += c;
+      }
+    };
+    const done = () => { stdin.setRawMode(false); stdin.pause(); stdin.off('data', onData); process.stderr.write('\n'); };
+    stdin.on('data', onData);
+  });
+}

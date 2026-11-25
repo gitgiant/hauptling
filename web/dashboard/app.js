@@ -380,10 +380,11 @@ async function loadUsage() {
       h('tbody', {}, u.slots.map(s => h('tr', {},
         h('td', {}, h('b', { class: 'mono', text: s.slot }), h('div', { class: 'resets', text: s.agent ? `busy: ${s.agent}` : 'free' })),
         s.vendors.map(v => h('td', {}, h('div', { class: 'acct' },
-          h('div', { class: 'who' }, v.signed_in ? h('span', { class: 'ok', text: '✓ signed in' }) : h('span', { class: 'no', text: '✗ not signed in' })),
+          h('div', { class: 'who' }, v.key ? h('span', { class: 'ok', title: 'Every slot uses this key; billed per token. hauptling key rm ' + v.vendor + ' switches back to sign-ins.', text: `✓ API key ${v.key}` })
+            : v.signed_in ? h('span', { class: 'ok', text: '✓ signed in' }) : h('span', { class: 'no', text: '✗ not signed in' })),
           v.limits.sort((a, b) => (a.window === '5h' ? -1 : 1)).map(meter),
           v.signed_in && !v.limits.length ? h('span', { class: 'resets', text: 'no usage reported yet' }) : null,
-          h('div', { class: 'who' },
+          v.key ? null : h('div', { class: 'who' },
             h('button', { disabled: Boolean(v.busy), title: v.busy ? `${v.busy} is using this sign-in` : null, onclick: () => startLogin(s.slot, v.vendor) }, v.signed_in ? 'Sign in again' : 'Sign in'),
             v.busy ? h('span', { class: 'resets', text: `Locked while ${v.busy} runs: refresh tokens rotate, so a second sign-in could sign it out mid-task.` }) : null,
             h('code', { class: 'resets', title: 'Or run this in a terminal', text: v.login }))))))))));

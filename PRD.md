@@ -156,6 +156,12 @@ Phases 2–4 get their own grill at phase start.
 - **Vendor autonomy**: Claude `--permission-mode auto`; Codex `--sandbox danger-full-access --ask-for-approval never` inside the container (phase 2: the container is the sandbox, bubblewrap can't run in Docker; phase 1 used `workspace-write` + network). `report`/`test request` commit leftover changes for any worker; agy `--mode auto` with only `command(hauptling)` pre-approved. Workers run `hauptling report` as a command on its own.
 - **Paths**: clones live on the Linux filesystem; hauptling on PATH links to the checkout; containers get their own copy baked into the image (`hauptling image` rebuilds when it changes). Local-only repos merge via `hauptling merge` after the test job passes.
 
+## API keys (optional)
+
+- `hauptling key set <vendor>` (key from stdin or a hidden prompt, never argv) stores one key in `~/.hauptling/keys/<vendor>` (600). It switches that vendor to API billing for **every** slot: keys don't rotate, so one key serves all slots and no per-slot sign-in is needed. `hauptling key rm <vendor>` switches back to the slots' sign-ins. Running workers keep what they started with.
+- Claude: `ANTHROPIC_API_KEY`, pre-approved in the slot's `.claude.json` (`customApiKeyResponses`), onboarding marked done. Codex: `OPENAI_API_KEY` stored by `codex login --with-api-key` in a separate `CODEX_HOME` (`<slot>/codex-key`) so the slot's ChatGPT sign-in stays intact. agy: `GEMINI_API_KEY` (untested here which wins when an OAuth sign-in is also present).
+- Usage tab and `doctor` show "API key …abcd" for that vendor instead of per-slot sign-ins.
+
 ## Turnkey deployment (goal)
 
 After phase 1–4 work, standing up Hauptling on a **new host is one command**: clone, run the installer, sign in when asked, `doctor` passes. Hosts may be **Windows, Ubuntu or macOS**; only Windows is available for testing now.

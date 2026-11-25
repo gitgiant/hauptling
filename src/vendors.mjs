@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 
@@ -20,10 +21,10 @@ const writeJson = (p, v) => { mkdirSync(dirname(p), { recursive: true }); writeF
 const cmd = (vendor, event) => `hauptling hook ${vendor} ${event}`;
 const ours = (h) => JSON.stringify(h).includes('hauptling hook');
 
-export function prepare(vendor, dir, home = homedir()) {
+export function prepare(vendor, dir, home = homedir(), { env = process.env, run = spawnSync } = {}) {
   if (vendor === 'claude') {
     // Containers set CLAUDE_CONFIG_DIR (the slot's credentials dir); .claude.json then lives inside it.
-    const configDir = process.env.CLAUDE_CONFIG_DIR || join(home, '.claude');
+    const configDir = env.CLAUDE_CONFIG_DIR || join(home, '.claude');
     const settingsPath = join(configDir, 'settings.json');
     const s = readJson(settingsPath);
     s.hooks ||= {};
@@ -35,13 +36,29 @@ export function prepare(vendor, dir, home = homedir()) {
     s.statusLine = { type: 'command', command: 'hauptling usage claude' };
     writeJson(settingsPath, s);
     // Skip the first-run folder trust dialog for this clone.
-    const statePath = process.env.CLAUDE_CONFIG_DIR ? join(configDir, '.claude.json') : join(home, '.claude.json');
+    const statePath = env.CLAUDE_CONFIG_DIR ? join(configDir, '.claude.json') : join(home, '.claude.json');
     const st = readJson(statePath);
     st.projects ||= {};
     st.projects[dir] = { ...st.projects[dir], hasTrustDialogAccepted: true };
+    if (env.ANTHROPIC_API_KEY) {
+      // API key mode (`hauptling key set claude`): pre-approve the key (the TUI asks once otherwise) and skip first-run onboarding.
+      const tail = env.ANTHROPIC_API_KEY.slice(-20);
+      const r = st.customApiKeyResponses || {};
+      st.customApiKeyResponses = { approved: [...new Set([...(r.approved || []), tail])], rejected: (r.rejected || []).filter(x => x !== tail) };
+      st.hasCompletedOnboarding = true;
+    }
     writeJson(statePath, st);
   } else if (vendor === 'codex') {
-    const codexHome = process.env.CODEX_HOME || join(home, '.codex');
+    const codexHome = env.CODEX_HOME || join(home, '.codex');
+    if (env.OPENAI_API_KEY) {
+      // API key mode: CODEX_HOME is the slot's separate codex-key dir; store the key there once (or when it changed).
+      mkdirSync(codexHome, { recursive: true });
+      const auth = readJson(join(codexHome, 'auth.json'));
+      if (auth.OPENAI_API_KEY !== env.OPENAI_API_KEY) {
+        const r = run('codex', ['login', '--with-api-key'], { input: env.OPENAI_API_KEY, env: { ...env, CODEX_HOME: codexHome }, encoding: 'utf8' });
+        if (r.status !== 0) throw new Error(`codex login --with-api-key failed: ${(r.stderr || r.stdout || '').trim().slice(-300)}`);
+      }
+    }
     const hooksPath = join(codexHome, 'hooks.json');
     const h = readJson(hooksPath);
     h.hooks ||= {};

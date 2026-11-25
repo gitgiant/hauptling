@@ -164,7 +164,9 @@ export function createDashboard({ db, dbPath, core, host, log = () => {}, slotDi
   async function usage() {
     await core.refreshUsage?.().catch(() => {});
     const slotNames = await core.call('slots.get');
-    const signedIn = new Map(logins(slotNames, VENDOR_LIST).map(l => [`${l.slot}:${l.vendor}`, l.ok]));
+    const all = logins(slotNames, VENDOR_LIST);
+    const signedIn = new Map(all.map(l => [`${l.slot}:${l.vendor}`, l.ok]));
+    const keyOf = new Map(all.filter(l => l.key).map(l => [l.vendor, l.key]));
     const rows = db.prepare('SELECT * FROM slot_usage').all();
     const busy = new Map(db.prepare("SELECT slot, id, vendor FROM agents WHERE slot IS NOT NULL AND state IN ('spawning','working','blocked','done')").all().map(r => [r.slot, r]));
     const slots = slotNames.map(slot => ({
@@ -174,6 +176,7 @@ export function createDashboard({ db, dbPath, core, host, log = () => {}, slotDi
         vendor,
         signed_in: Boolean(signedIn.get(`${slot}:${vendor}`)),
         login: `hauptling login ${slot} ${vendor}`,
+        key: keyOf.get(vendor) || null,
         busy: busy.get(slot)?.vendor === vendor ? busy.get(slot).id : null,
         limits: rows.filter(r => r.slot === slot && r.vendor === vendor).map(r => ({ window: r.window, used_pct: r.used_pct, resets_at: r.resets_at, at: r.at })),
       })),

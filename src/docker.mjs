@@ -4,6 +4,7 @@ import { closeSync, cpSync, existsSync, mkdirSync, openSync, readFileSync, readS
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BROKER_PORT, home, shellLine } from './util.mjs';
+import { workerKeyEnv } from './keys.mjs';
 
 /*
  * Where workers run: a fresh Docker container per task.
@@ -197,7 +198,7 @@ const proxyEnv = () => ['HTTPS_PROXY', 'HTTP_PROXY', 'https_proxy', 'http_proxy'
 
 export function slotDir(slot) {
   const d = join(home(), 'slots', slot);
-  for (const v of ['claude', 'codex', 'gemini']) mkdirSync(join(d, v), { recursive: true });
+  for (const v of ['claude', 'codex', 'codex-key', 'gemini']) mkdirSync(join(d, v), { recursive: true });
   return d;
 }
 
@@ -230,7 +231,7 @@ export function dockerHost({ log = () => {} } = {}) {
       await docker(['run', '-d', '--name', container(id), '--init', '--user', uid(), '--network', NET,
         '--memory', String(c.memory), '--cpus', String(c.cpus), '--label', `hauptling.agent=${id}`, '--label', `hauptling.slot=${slot}`,
         '-v', `${dir}:/work`, '-v', `${slotDir(slot)}:/home/worker/.vendor`, ...proxyEnv(),
-        ...Object.entries({ ...env, GIT_AUTHOR_NAME: `hauptling ${slot}`, GIT_AUTHOR_EMAIL: `${slot}@hauptling.local`, GIT_COMMITTER_NAME: `hauptling ${slot}`, GIT_COMMITTER_EMAIL: `${slot}@hauptling.local` }).flatMap(([k, v]) => ['-e', `${k}=${v}`]),
+        ...Object.entries({ ...env, ...workerKeyEnv(vendor), GIT_AUTHOR_NAME: `hauptling ${slot}`, GIT_AUTHOR_EMAIL: `${slot}@hauptling.local`, GIT_COMMITTER_NAME: `hauptling ${slot}`, GIT_COMMITTER_EMAIL: `${slot}@hauptling.local` }).flatMap(([k, v]) => ['-e', `${k}=${v}`]),
         image, 'sleep', 'infinity']);
       await exec(id, ['hauptling', 'prepare', vendor, '/work']);
       await exec(id, ['tmux', 'new-session', '-d', '-s', 'main', '-x', '220', '-y', '50', '-c', '/work', shellLine(argv)]);
@@ -296,13 +297,16 @@ export function dockerHost({ log = () => {} } = {}) {
     gpuAvailable, gpuFreeMB,
     /** Last `token_count` payload of the newest Codex session log in the slot written since `since` (ISO), or null. */
     async codexUsage(slot, since) {
-      const root = join(slotDir(slot), 'codex', 'sessions');
-      if (!existsSync(root)) return null;
       const t0 = Date.parse(since || 0) || 0;
       let newest = null;
       const days = [];
-      for (const y of readdirSync(root).sort().reverse().slice(0, 2)) for (const m of readdirSync(join(root, y)).sort().reverse().slice(0, 2)) for (const d of readdirSync(join(root, y, m)).sort().reverse().slice(0, 3)) days.push(join(root, y, m, d));
-      for (const dir of days.slice(0, 3)) {
+      // codex: subscription sign-in; codex-key: API key mode (separate CODEX_HOME).
+      for (const root of ['codex', 'codex-key'].map(h => join(slotDir(slot), h, 'sessions')).filter(existsSync)) {
+        const mine = [];
+        for (const y of readdirSync(root).sort().reverse().slice(0, 2)) for (const m of readdirSync(join(root, y)).sort().reverse().slice(0, 2)) for (const d of readdirSync(join(root, y, m)).sort().reverse().slice(0, 3)) mine.push(join(root, y, m, d));
+        days.push(...mine.slice(0, 3));
+      }
+      for (const dir of days) {
         for (const f of readdirSync(dir)) {
           if (!f.startsWith('rollout-') || !f.endsWith('.jsonl')) continue;
           const st = statSync(join(dir, f));
