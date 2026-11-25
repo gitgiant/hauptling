@@ -12,7 +12,7 @@ import { detect, fill } from '../src/detect.mjs';
 import { parseJunit } from '../src/junit.mjs';
 import { hookOutput, managedFiles, prepare } from '../src/vendors.mjs';
 import { toastXml } from '../src/platform/toast.mjs';
-import { collectArtifacts } from '../src/runner.mjs';
+import { collectArtifacts, execTests, heartbeat } from '../src/runner.mjs';
 
 const SID = '3f9a2c1e-0000-4000-8000-000000000001';
 
@@ -180,4 +180,23 @@ test('effort: spawn override > model entry > tier default; vendors without effor
   const argv = launchArgv(cfg, 'codex', cfg.vendors.codex.models[0], 'go', 'low');
   assert.ok(argv.includes('model_reasoning_effort="low"'));
   assert.equal(argv.at(-1), 'go');
+});
+
+test('runner heartbeat: touched at once and on every beat until stopped; execTests leaves one', async () => {
+  const out = mkdtempSync(join(tmpdir(), 'hl-hb-'));
+  const stop = heartbeat(out, 20);
+  const first = Number(readFileSync(join(out, 'heartbeat'), 'utf8'));
+  await new Promise(r => setTimeout(r, 70));
+  const later = Number(readFileSync(join(out, 'heartbeat'), 'utf8'));
+  assert.ok(later > first, 'beats while running');
+  stop();
+  const stopped = readFileSync(join(out, 'heartbeat'), 'utf8');
+  await new Promise(r => setTimeout(r, 50));
+  assert.equal(readFileSync(join(out, 'heartbeat'), 'utf8'), stopped, 'no beats after stop');
+  // A repo with no test command still gets a heartbeat file and a report.
+  const repo = mkdtempSync(join(tmpdir(), 'hl-hb-repo-'));
+  const art = join(out, 'art');
+  const r = await execTests(repo, {}, art);
+  assert.equal(r.status, 'error');
+  assert.ok(Number(readFileSync(join(art, 'heartbeat'), 'utf8')) > 0);
 });

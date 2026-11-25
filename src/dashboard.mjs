@@ -31,13 +31,15 @@ const NO_SESSION = [...ENDED, 'failed', 'queued', 'waiting'];
  */
 const cap = (s) => s[0].toUpperCase() + s.slice(1);
 const ordinal = (n) => `${n}${n % 100 >= 11 && n % 100 <= 13 ? 'th' : ['th', 'st', 'nd', 'rd'][n % 10] || 'th'}`;
+/** "retrying (2/3)" for an unfinished test job rerun by the watchdog (from its retry_note), else null. */
+export const retryLabel = (t) => (t && t.state !== 'done' && t.attempt > 1 ? (String(t.retry_note || '').match(/^retrying \(\d+\/\d+\)/)?.[0] || `retrying (${t.attempt})`) : null);
 export function headline(a) {
   const t = a.test;
   const pr = a.pr_number ? `PR #${a.pr_number}` : null;
   const total = (t?.passed ?? 0) + (t?.failed ?? 0);
   const score = t?.status && total ? ` (${t.passed ?? 0}/${total})` : '';
   const kind = t ? `${t.gpu ? 'GPU ' : ''}${t.purpose === 'gate' ? 'merge gate' : 'tests'}` : 'tests';
-  const pending = t && !t.status ? (t.state === 'running' ? `Running ${kind}` : t.position ? `${cap(kind)} queued, ${ordinal(t.position)} in line` : `Waiting to run ${kind}`) : null;
+  const pending = t && !t.status ? (t.state === 'running' ? `Running ${kind}${t.retry ? `, ${t.retry}` : ''}` : t.retry ? `${cap(kind)} ${t.retry}${t.position ? `, ${ordinal(t.position)} in line` : ''}` : t.position ? `${cap(kind)} queued, ${ordinal(t.position)} in line` : `Waiting to run ${kind}`) : null;
   const why = (a.status || '').replace(/^[a-z-]+:\s*/, '');
   switch (a.state) {
     case 'paused': return 'Paused by you';
@@ -167,9 +169,11 @@ export function createDashboard({ db, dbPath, core, host, log = () => {}, slotDi
 
   /** CPU test queue for the header: running jobs and queued ids in line order (GPU jobs are in gpu.status). */
   function testQueue() {
-    const running = db.prepare("SELECT t.id, t.agent, t.repo, t.purpose, t.claimed_at FROM tests t WHERE state = 'running' AND gpu = 0 ORDER BY claimed_at").all();
-    const queued = db.prepare("SELECT id FROM tests WHERE state = 'queued' AND gpu = 0 ORDER BY created_at, rowid").all().map(r => r.id);
-    return { running, queued: queued.length, limit: Math.max(1, Number(host.testConcurrency?.() ?? 2) || 2), line: queued };
+    const running = db.prepare("SELECT t.id, t.agent, t.repo, t.purpose, t.claimed_at, t.attempt, t.retry_note FROM tests t WHERE state = 'running' AND gpu = 0 ORDER BY claimed_at").all()
+      .map(({ attempt, retry_note, ...r }) => ({ ...r, retry: retryLabel({ state: 'running', attempt, retry_note }) }));
+    const queuedRows = db.prepare("SELECT id, agent, repo, purpose, attempt, retry_note FROM tests WHERE state = 'queued' AND gpu = 0 ORDER BY created_at, rowid").all();
+    const retrying = queuedRows.filter(r => r.attempt > 1).map(({ attempt, retry_note, ...r }) => ({ ...r, retry: retryLabel({ state: 'queued', attempt, retry_note }) }));
+    return { running, queued: queuedRows.length, retrying, limit: Math.max(1, Number(host.testConcurrency?.() ?? 2) || 2), line: queuedRows.map(r => r.id) };
   }
 
   async function snapshot() {
@@ -178,7 +182,7 @@ export function createDashboard({ db, dbPath, core, host, log = () => {}, slotDi
     const since = new Date(Date.now() - 24 * 3600e3).toISOString();
     const rows = db.prepare(`SELECT * FROM agents WHERE state NOT IN (${ENDED.map(s => `'${s}'`).join(',')}) OR updated_at >= ? ORDER BY created_at`).all(since);
     const agents = rows.map(a => {
-      const t = db.prepare('SELECT id, state, gpu, purpose, report, created_at, done_at FROM tests WHERE agent = ? ORDER BY created_at DESC LIMIT 1').get(a.id);
+      const t = db.prepare('SELECT id, state, gpu, purpose, report, created_at, done_at, attempt, retry_note FROM tests WHERE agent = ? ORDER BY created_at DESC LIMIT 1').get(a.id);
       const r = t?.report ? JSON.parse(t.report) : null;
       const ask = db.prepare('SELECT id, question, choices, at FROM asks WHERE agent = ? AND answered_at IS NULL ORDER BY id DESC LIMIT 1').get(a.id);
       return {
@@ -188,7 +192,7 @@ export function createDashboard({ db, dbPath, core, host, log = () => {}, slotDi
         spend: a.usage_start != null && core.spend ? core.spend(a) : null,
         status: db.prepare('SELECT text FROM status WHERE identity = ?').get(a.id)?.text || null,
         test: t ? { id: t.id, state: t.state, gpu: Boolean(t.gpu), purpose: t.purpose, status: r?.status || null, passed: r?.passed ?? null, failed: r?.failed ?? null, at: t.done_at || t.created_at,
-          position: t.state === 'queued' ? ((t.gpu ? gpuLine : tq.line).indexOf(t.id) + 1 || null) : null } : null,
+          position: t.state === 'queued' ? ((t.gpu ? gpuLine : tq.line).indexOf(t.id) + 1 || null) : null, retry: retryLabel(t) } : null,
         ask: ask ? { id: ask.id, question: ask.question, choices: JSON.parse(ask.choices), at: ask.at } : null,
       };
     }).map(a => ({ ...a, headline: headline(a) }));

@@ -20,6 +20,7 @@
 - Superseded gate kill (`killTestJob` on a running gate): unit-tested only; code is baked into nothing (broker-side) but needs `hauptling broker stop` to go live.
 - Per-delegator `gate`/`automerge` (PRD "Merge gate"): unit-tested only; needs `hauptling broker stop` (broker-side) to go live. Dashboard buttons unseen in a browser. Local repos with auto-merge on still stop at `[gate-passed]` (manual `hauptling merge`), as before.
 - GPU `pause --now`, the VRAM wait and `gateGpu` on the real GPU (unit-tested only).
+- Test watchdog (PRD "Watchdog"): core logic unit-tested with docker and clock stubbed; the real `testLiveness` probe (`docker inspect`, heartbeat mtime) is unrun. Needs `hauptling image` (runner heartbeat) and `hauptling broker stop`.
 
 ## Open
 

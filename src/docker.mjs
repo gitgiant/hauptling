@@ -24,6 +24,8 @@ export const PROXY = 'hauptling-egress';
 export const PROXY_URL = `http://${PROXY}:3128`;
 export const WORKER_BROKER_URL = `http://${PROXY}:${BROKER_PORT}`;
 const uid = () => `${process.getuid()}:${process.getgid()}`;
+/** Local test jobs whose container has been started: id → { at: start ms, art: artifacts dir }. */
+const testRuns = new Map();
 const testContainer = (id) => `hauptling-test-${String(id).replace(/[^a-zA-Z0-9_-]/g, '-')}`;
 export const container = (id) => `hl-${String(id).replace(/[^a-zA-Z0-9_-]/g, '-')}`;
 
@@ -51,7 +53,7 @@ export function docker(args, { input, timeout = 120e3 } = {}) {
 export function config() {
   const p = join(home(), 'config.json');
   const c = existsSync(p) ? JSON.parse(readFileSync(p, 'utf8')) : {};
-  return { memory: '2560m', cpus: 3, gpu: true, gpuMemory: '6g', gpuCpus: 4, gpuMemMB: 6144, gpuWaitMinutes: 30, testConcurrency: 2, ...c };
+  return { memory: '2560m', cpus: 3, gpu: true, gpuMemory: '6g', gpuCpus: 4, gpuMemMB: 6144, gpuWaitMinutes: 30, testConcurrency: 2, testStallSec: 300, testRetries: 2, ...c };
 }
 
 // ---------- GPU (phase 3) ----------
@@ -387,14 +389,20 @@ export function dockerHost({ log = () => {} } = {}) {
     },
     attachArgv: (_slot, id) => dockerArgv(['exec', '-it', container(id), 'tmux', 'attach', '-t', 'main']),
 
-    /** Runs one test job: checkout on the host, tests in a fresh container; returns the report. */
+    /**
+     * Runs one test job: checkout on the host, tests in a fresh container; returns the report. A container
+     * that ends without a report (removed, crashed, docker failed) gives an error report with `lost` set:
+     * the broker's watchdog reruns those. Each attempt gets its own checkout and artifacts dir.
+     */
     async runTestJob(job, { env = {} } = {}) {
       const root = join(home(), 'jobs');
-      const dir = join(root, job.id);
-      const art = join(root, `${job.id}-artifacts`);
+      const name = job.attempt > 1 ? `${job.id}.${job.attempt}` : job.id;
+      const dir = join(root, name);
+      const art = join(root, `${name}-artifacts`);
       rmSync(dir, { recursive: true, force: true });
+      rmSync(art, { recursive: true, force: true });
       mkdirSync(art, { recursive: true });
-      const fail = (notes) => ({ id: job.id, sha: job.sha, status: 'error', passed: 0, failed: 0, skipped: 0, failures: [], artifacts: [], duration_s: 0, log_path: join(art, 'test.log'), notes: notes.slice(0, 300) });
+      const fail = (notes, extra = {}) => ({ id: job.id, sha: job.sha, status: 'error', passed: 0, failed: 0, skipped: 0, failures: [], artifacts: [], duration_s: 0, log_path: join(art, 'test.log'), notes: notes.slice(0, 300), ...extra });
       try {
         await run(null, ['git', 'clone', '--quiet', '--no-checkout', job.url, dir], { env });
         await run(null, ['git', '-C', dir, 'checkout', '--quiet', '--detach', job.sha]);
@@ -403,17 +411,44 @@ export function dockerHost({ log = () => {} } = {}) {
       const image = await imageFor(dir, { log }).catch(e => { throw e; });
       const c = config();
       const limits = job.gpu ? ['--gpus', 'all', '--memory', String(c.gpuMemory), '--cpus', String(c.gpuCpus)] : ['--memory', String(c.memory), '--cpus', String(c.cpus)];
+      const live = { at: Date.now(), art };
+      testRuns.set(job.id, live);
       try {
         await docker(['run', '--rm', '--init', '--name', testContainer(job.id), '--user', uid(), '--network', NET, ...limits,
           '--label', `hauptling.test=${job.id}`, '-v', `${dir}:/work`, '-v', `${art}:/artifacts`, ...proxyEnv(),
           image, 'hauptling', 'test-exec', ...(job.gpu ? ['--gpu'] : []), '--selector', job.selector || '', '--timeout', String(job.timeout_s || 1800), '--artifacts', JSON.stringify(job.artifacts || [])],
         { timeout: ((job.timeout_s || 1800) + 1200) * 1000 });
-      } catch (e) { if (!existsSync(join(art, 'report.json'))) return fail(`test container failed: ${e.message}`); }
+      } catch (e) {
+        if (!existsSync(join(art, 'report.json'))) {
+          // Past the hard cap (timeout_s plus install time): fail as a timeout, never rerun.
+          if (e.killed) { await docker(['rm', '-f', testContainer(job.id)]).catch(() => {}); return fail(`test container timed out: ${e.message}`, { status: 'timeout' }); }
+          return fail(`test container failed: ${e.message}`, { lost: `container ended without a result: ${e.message}`.slice(0, 200) });
+        }
+      } finally { if (testRuns.get(job.id) === live) testRuns.delete(job.id); }
       const report = JSON.parse(readFileSync(join(art, 'report.json'), 'utf8'));
       rmSync(dir, { recursive: true, force: true });
       const hostPath = (p) => (p && p.startsWith('/artifacts') ? join(art, p.slice('/artifacts'.length)) : p);
       return { ...report, id: job.id, sha: job.sha, log_path: hostPath(report.log_path), artifacts: (report.artifacts || []).map(hostPath) };
     },
+
+    /**
+     * Watchdog probe for a running job: `preparing` (checkout or image build, no container yet), `done`
+     * (report written), `running`, `exited` or `gone` (container state), `unknown` (docker didn't answer);
+     * `activity` is the latest of the container start, its test.log and the runner's heartbeat (ms).
+     */
+    async testLiveness(id) {
+      const live = testRuns.get(id);
+      if (!live) return { state: 'preparing' };
+      if (existsSync(join(live.art, 'report.json'))) return { state: 'done' };
+      const mtime = (f) => { try { return statSync(join(live.art, f)).mtimeMs; } catch { return 0; } };
+      const activity = Math.max(live.at, mtime('heartbeat'), mtime('test.log'));
+      let state;
+      try { state = (await docker(['inspect', '-f', '{{.State.Status}}', testContainer(id)], { timeout: 20e3 })).stdout.trim(); } catch (e) { state = /no such (object|container)/i.test(e.message) ? 'gone' : 'unknown'; }
+      if (existsSync(join(live.art, 'report.json'))) return { state: 'done' };
+      if (state === 'gone' && Date.now() - live.at < 60e3) state = 'running'; // `docker run` may not have created it yet
+      return { state: ['created', 'running', 'restarting', 'paused'].includes(state) ? 'running' : ['gone', 'unknown'].includes(state) ? state : 'exited', activity };
+    },
+    testWatchdog: () => { const c = config(); return { stallSec: c.testStallSec, retries: c.testRetries }; },
 
     /** `gpu pause --now`: stop a running test job's container (the broker has already requeued it). */
     async killTestJob(id) { await docker(['rm', '-f', testContainer(id)]).catch(() => {}); },

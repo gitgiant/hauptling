@@ -346,9 +346,12 @@ function cpuTests(q) {
   if (!q) return null;
   return h('span', { class: 'cputests', title: testsTip(q) }, 'Tests ', h('b', { text: `${q.running.length}/${q.limit}` }), h('span', { class: 'more' }, testDetails(q)));
 }
-const testsTip = (q) => `CPU test jobs, up to ${q.limit} at once, one per repo${q.running.length ? `\n${q.running.map(r => `${r.id} ${r.purpose}${r.agent ? ` · ${r.agent}` : ''} · ${r.repo} · ${ago(r.claimed_at)}`).join('\n')}` : ''}`;
+const testsTip = (q) => `CPU test jobs, up to ${q.limit} at once, one per repo${[...q.running, ...(q.retrying || [])].length ? `\n${[
+  ...q.running.map(r => `${r.id} ${r.purpose}${r.agent ? ` · ${r.agent}` : ''} · ${r.repo} · ${ago(r.claimed_at)}${r.retry ? ` · ${r.retry}` : ''}`),
+  ...(q.retrying || []).map(r => `${r.id} ${r.purpose}${r.agent ? ` · ${r.agent}` : ''} · ${r.repo} · ${r.retry}`)].join('\n')}` : ''}`;
 function testDetails(q) {
-  return [q.running.map(r => h('span', { class: 'mono', text: `▶ ${r.agent || r.id} ${r.repo.split('/').pop()} ${ago(r.claimed_at)}` })),
+  return [q.running.map(r => h('span', { class: 'mono', text: `▶ ${r.agent || r.id} ${r.repo.split('/').pop()} ${ago(r.claimed_at)}${r.retry ? ` ${r.retry}` : ''}` })),
+    (q.retrying || []).map(r => h('span', { class: 'mono', text: `↻ ${r.agent || r.id} ${r.retry}` })),
     q.queued ? h('span', { text: `· ${q.queued} queued` }) : null];
 }
 

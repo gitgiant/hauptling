@@ -661,16 +661,89 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
       }
     } finally { pumping.gpu = false; }
   }
-  /** Runs a claimed job to its report; a job cancelled or requeued meanwhile (`gpu pause --now`) has its result discarded. */
+  /**
+   * Runs a claimed job to its report; a job cancelled or requeued meanwhile (`gpu pause --now`, the
+   * watchdog) has its result discarded. A report marked `lost` (container ended without a result) goes to
+   * the watchdog. The watchdog can abandon the run, so a hung runner doesn't hold the GPU queue.
+   */
   async function runJob(job) {
     let report;
+    const run = { claimed_at: job.claimed_at };
+    const abandoned = new Promise(r => { run.abandon = () => r(null); });
+    localRuns.set(job.id, run);
     try {
       const env = job.url.startsWith('https://github.com/') ? await github.gitAuthEnv() : {};
-      report = await host.runTestJob(job, { env });
+      report = await Promise.race([host.runTestJob(job, { env }), abandoned]);
     } catch (e) { report = errorReport(job, e.message); }
+    finally { if (localRuns.get(job.id) === run) localRuns.delete(job.id); }
+    if (run.lost) { await run.lost; report = null; } // the watchdog took it: wait until it is requeued or failed
     const row = db.prepare('SELECT state, claimed_at FROM tests WHERE id = ?').get(job.id);
-    if (row.state === 'running' && row.claimed_at === job.claimed_at) await testReport({ id: job.id, report }).catch(e => log(`test report ${job.id}: ${e.message}`));
+    if (report && row.state === 'running' && row.claimed_at === job.claimed_at) {
+      if (report.lost) await runnerLost(job.id, job.claimed_at, report.lost).catch(e => log(`test watchdog ${job.id}: ${e.message}`));
+      else await testReport({ id: job.id, report }).catch(e => log(`test report ${job.id}: ${e.message}`));
+    }
     if (!job.gpu) pumpCpu();
+  }
+
+  // ---------- test watchdog ----------
+  /** Locally running jobs: id → { claimed_at, abandon() }. Jobs claimed by external runners aren't watched. */
+  const localRuns = new Map();
+  const watchCfg = () => {
+    const c = host.testWatchdog?.() || {};
+    const n = (v, d) => (Number.isFinite(Number(v)) && v !== null && v !== '' ? Number(v) : d);
+    return { stallSec: Math.max(1, n(c.stallSec, 300)), retries: Math.max(0, n(c.retries, 2)) };
+  };
+
+  /**
+   * Every poll: a local job whose container is gone or exited without a result, or whose log and runner
+   * heartbeat haven't changed for `testStallSec`, is lost. Jobs still in checkout/image build aren't watched;
+   * `timeout_s` stays the hard cap (the runner's own timeout, never retried).
+   */
+  async function watchTests(at = Date.now()) {
+    if (!host.testLiveness) return;
+    const { stallSec } = watchCfg();
+    for (const [id, run] of [...localRuns]) {
+      const t = db.prepare('SELECT state, claimed_at FROM tests WHERE id = ?').get(id);
+      if (t?.state !== 'running' || t.claimed_at !== run.claimed_at) continue;
+      const l = await host.testLiveness(id).catch(() => ({ state: 'unknown' }));
+      const idle = Math.round((at - (l.activity ?? at)) / 1000);
+      const why = l.state === 'gone' ? 'container gone'
+        : l.state === 'exited' ? 'container exited without a result'
+          : l.state === 'running' && idle > stallSec ? `no output or heartbeat for ${idle}s` : null;
+      if (why) await runnerLost(id, run.claimed_at, why).catch(e => log(`test watchdog ${id}: ${e.message}`));
+    }
+  }
+
+  /**
+   * A job's runner is lost: remove its container, release its runner (for a GPU job, the GPU queue), then
+   * requeue the same row at the front of its repo (same created_at, no extra round), or after `testRetries`
+   * reruns report it failed through the usual path (test wait, gate-failed).
+   */
+  async function runnerLost(id, claimedAt, reason) {
+    const t = db.prepare('SELECT * FROM tests WHERE id = ?').get(id);
+    if (t?.state !== 'running' || t.claimed_at !== claimedAt) return;
+    const max = watchCfg().retries + 1;
+    // Its runJob (if still waiting) holds off until the row is requeued or failed: no late result, and the
+    // GPU queue doesn't move on to another job while the container is being removed.
+    const run = localRuns.get(id);
+    let release = () => {};
+    if (run?.claimed_at === claimedAt) { localRuns.delete(id); run.lost = new Promise(r => { release = r; }); }
+    try {
+      await host.killTestJob?.(id).catch(e => log(`kill test ${id}: ${e.message}`));
+      run?.abandon(); // a hung runner that the kill didn't end
+      if (t.attempt >= max) {
+        log(`test ${id} killed: ${reason}; runner unresponsive (${t.attempt} attempts), failed`);
+        await testReport({ id, report: errorReport(t, `runner unresponsive (${t.attempt} attempts): ${reason}`) });
+        return;
+      }
+      const note = `retrying (${t.attempt + 1}/${max}): ${reason}`;
+      const r = db.prepare("UPDATE tests SET state = 'queued', claimed_at = NULL, attempt = ?, retry_note = ? WHERE id = ? AND state = 'running' AND claimed_at = ?").run(t.attempt + 1, note.slice(0, 300), id, claimedAt);
+      if (!r.changes) return;
+      kvDel(db, `gpu:wait:${id}`);
+      log(`test ${id} killed: ${note}`);
+      bus.emit('tests');
+    } finally { release(); }
+    pump().catch(e => log(`test pump: ${e.message}`));
   }
 
   /** Dashboard "Run now": starts a queued CPU job at once, past the concurrency limit and the one-per-repo rule. */
@@ -781,7 +854,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   });
   function jobFor(t) {
     const a = t.agent ? agentRow(t.agent) : null;
-    return { id: t.id, url: cloneUrl(a || { repo: t.repo }), sha: t.sha, selector: t.selector, timeout_s: t.timeout_s, artifacts: JSON.parse(t.artifacts), gpu: Boolean(t.gpu), claimed_at: t.claimed_at };
+    return { id: t.id, url: cloneUrl(a || { repo: t.repo }), sha: t.sha, selector: t.selector, timeout_s: t.timeout_s, artifacts: JSON.parse(t.artifacts), gpu: Boolean(t.gpu), claimed_at: t.claimed_at, attempt: t.attempt || 1 };
   }
 
   async function claim({ wait = 25, gpu = false } = {}) {
@@ -1060,6 +1133,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     // A usage window may have reset: queued spawns that were waiting for it can start.
     for (const { id } of db.prepare("SELECT DISTINCT delegator id FROM agents WHERE state = 'queued'").all()) await startQueued(id).catch(e => log(`start ${id}: ${e.message}`));
     await watch();
+    await watchTests().catch(e => log(`test watchdog: ${e.message}`));
     for (const a of db.prepare("SELECT * FROM agents WHERE state IN ('done','working') AND pr_number IS NOT NULL").all()) {
       try {
         const slug = githubSlug(a.repo);
@@ -1206,5 +1280,5 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     return null;
   }
 
-  return { call, authenticate, spend, poll, watch, startQueued, bus, askForPage, answer, pump, recover, gpuReady, refreshUsage, recordUsage, budgetState, billingFor };
+  return { call, authenticate, spend, poll, watch, watchTests, startQueued, bus, askForPage, answer, pump, recover, gpuReady, refreshUsage, recordUsage, budgetState, billingFor };
 }
