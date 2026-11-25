@@ -8,7 +8,9 @@ const USAGE = `hauptling — delegate coding tasks to Claude, Codex and agy work
 
 Delegator (host): pass --delegator ID on spawn, wait, status, handoff and resume
   (optional when only one delegator is active; required when several are)
-  delegator start [--repo R] [--cli claude|codex|agy] [--max 3]   new delegator session
+  delegator start [--repo R] [--cli claude|codex|agy] [--max 3] [--no-gate] [--no-automerge]   new delegator session
+  delegator set [--delegator ID] [--gate on|off] [--automerge on|off]   gate off: reports merge with no test job
+                                           (cancels a queued gate and merges); automerge off: stop at [ready]
   delegator end [--delegator ID]           mark it ended (refused while it has agents)
   delegator list                           all delegators
   resume [--repo R | --delegator ID] [--cli C]  state + handoff for a new CLI (--repo: only that repo's delegator)
@@ -19,7 +21,7 @@ Delegator (host): pass --delegator ID on spawn, wait, status, handoff and resume
   status [--all]                           agents of the current delegator
   models                                   models.json table (suggest mode reasons over this)
   models prefer [cheap|balanced|best]      show or set the highest tier workers may use (spawn --allow-tier overrides)
-  attach AGENT | reply AGENT <text> | kill AGENT | merge AGENT
+  attach AGENT | reply AGENT <text> | kill AGENT | merge AGENT   (merge: local repos, or when automerge is off)
   test request --sha S [--selector X] [--gpu] [--timeout S] | test wait ID | test get ID | test report ID FILE
   dashboard [--print] [--host H] [--new-token]  open the dashboard (--print: show the sign-in link; --host: link via H, e.g. your Tailscale name)
   gpu status | gpu pause [--now] | gpu resume   hold the GPU test queue (--now kills and requeues the running job)
@@ -47,7 +49,7 @@ const [cmd, ...rest] = process.argv.slice(2);
 
 async function main() {
   const { call } = await import('../src/client.mjs');
-  const args = parseArgs(rest, { repeat: ['choice', 'artifacts'], bool: ['test-writer', 'allow-tier', 'until-event', 'host', 'all', 'gpu', 'force', 'no-host', 'no-login', 'now', 'print', 'new-token'] });
+  const args = parseArgs(rest, { repeat: ['choice', 'artifacts'], bool: ['test-writer', 'allow-tier', 'until-event', 'host', 'all', 'gpu', 'force', 'no-host', 'no-login', 'now', 'print', 'new-token', 'no-gate', 'no-automerge'] });
   const text = () => args._.join(' ');
   switch (cmd) {
     case undefined: case 'help': case '--help': case '-h': return out(USAGE);
@@ -73,8 +75,13 @@ async function main() {
     // ----- delegator -----
     case 'delegator': {
       if (args._[0] === 'end') { const r = await call('delegator.end', { delegator: args.delegator }); return out(`Delegator ${r.delegator} ended.`); }
+      if (args._[0] === 'set') {
+        const onoff = (k) => { if (args[k] == null) return undefined; if (!['on', 'off'].includes(args[k])) throw new Error(`--${k} takes on or off`); return args[k] === 'on'; };
+        const r = await call('delegator.set', { delegator: args.delegator, gate: onoff('gate'), automerge: onoff('automerge') });
+        return out(`Delegator ${r.delegator}: gate ${r.gate ? 'on' : 'off'}, automerge ${r.automerge ? 'on' : 'off'}.`);
+      }
       if (args._[0] !== 'start') { const list = await call('delegator.list'); return out(list.map(d => `${d.id} ${d.active ? 'active' : 'ended'} ${d.cli || ''} ${d.repo || ''} max ${d.max_agents}`).join('\n') || 'none'); }
-      const r = await call('delegator.start', { repo: args.repo && normalizeRepo(args.repo), cli: args.cli, max: args.max ? Number(args.max) : 3 });
+      const r = await call('delegator.start', { repo: args.repo && normalizeRepo(args.repo), cli: args.cli, max: args.max ? Number(args.max) : 3, gate: !args['no-gate'], automerge: !args['no-automerge'] });
       return out(`Delegator ${r.id} started. Pass --delegator ${r.id} on every spawn, wait, status, handoff and resume.`);
     }
     case 'resume': {

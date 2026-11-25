@@ -17,7 +17,8 @@ CREATE TABLE IF NOT EXISTS mail (
 CREATE INDEX IF NOT EXISTS mail_unseen ON mail (recipient, seen_at);
 CREATE TABLE IF NOT EXISTS delegators (
   id TEXT PRIMARY KEY, cli TEXT, repo TEXT, max_agents INTEGER NOT NULL DEFAULT 3,
-  handoff TEXT, handoff_at TEXT, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL
+  handoff TEXT, handoff_at TEXT, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL,
+  gate INTEGER NOT NULL DEFAULT 1, automerge INTEGER NOT NULL DEFAULT 1
 );
 -- A spawned worker. id is its mailbox identity.
 CREATE TABLE IF NOT EXISTS agents (
@@ -69,6 +70,10 @@ export function openDb(path) {
     try { db.exec(`ALTER TABLE agents ADD COLUMN ${col}`); } catch {}
   }
   try { db.exec('ALTER TABLE asks ADD COLUMN nonce TEXT'); } catch {}
+  // Per-delegator merge settings: gate (hauptling test job before merging), automerge (broker merges rather than stopping at [ready]).
+  for (const col of ['gate INTEGER NOT NULL DEFAULT 1', 'automerge INTEGER NOT NULL DEFAULT 1']) {
+    try { db.exec(`ALTER TABLE delegators ADD COLUMN ${col}`); } catch {}
+  }
   return db;
 }
 

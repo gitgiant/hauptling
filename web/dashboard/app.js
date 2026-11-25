@@ -392,7 +392,11 @@ function renderBoard(b) {
       : (shut ? 'Show the cards' : 'Hide the cards (keep the status dots)');
     out.push(h('div', { class: `group${shut ? ' shut' : ''}`, 'data-key': key },
       h('h2', {}, h('button', { class: 'gtoggle', type: 'button', 'aria-expanded': String(!shut), title: toggleTitle, onclick: () => toggleGroup(key) },
-        h('span', { class: 'caret', 'aria-hidden': 'true', text: '▾' }), h('span', { class: 'mono', text: repo || 'No repo' }), ' · ', h('span', { class: 'mono', text: d }), shut && !idle ? h('span', { class: 'count', text: ` (${list.length})` }) : null)),
+        h('span', { class: 'caret', 'aria-hidden': 'true', text: '▾' }), h('span', { class: 'mono', text: repo || 'No repo' }), ' · ', h('span', { class: 'mono', text: d }), shut && !idle ? h('span', { class: 'count', text: ` (${list.length})` }) : null),
+      delegator && !delegator.gate ? h('span', { class: 'tag', title: 'Reports merge without a hauptling test job', text: 'no gate' }) : null,
+      delegator && !delegator.automerge ? h('span', { class: 'tag', title: 'The broker waits for you to merge', text: 'manual merge' }) : null,
+      h('button', { type: 'button', class: 'gset', title: delegator?.gate ? 'Turn the merge gate off: reports merge without a test job' : 'Turn the merge gate on for later reports', onclick: () => act('delegator.set', { delegator: d, gate: !delegator?.gate }, `Gate ${delegator?.gate ? 'off' : 'on'} for ${d}`) }, delegator?.gate ? 'Gate on' : 'Gate off'),
+      h('button', { type: 'button', class: 'gset', title: delegator?.automerge ? 'Turn auto-merge off: the broker stops at [ready]' : 'Turn auto-merge on for later reports', onclick: () => act('delegator.set', { delegator: d, automerge: !delegator?.automerge }, `Auto-merge ${delegator?.automerge ? 'off' : 'on'} for ${d}`) }, delegator?.automerge ? 'Auto-merge on' : 'Auto-merge off')),
       idle
         ? (shut ? null : h('p', { class: 'empty', text: `No agents running · started ${ago(delegator.created_at)} ago${delegator.handoff_waiting ? ' · handoff waiting' : ''}` }))
         : shut
@@ -433,7 +437,10 @@ function renderDetailHead(a, el) {
   const old = head.querySelector('.reply input');
   if (old && old.value) reply.text.value = old.value;
   const hadFocus = old && document.activeElement === old;
-  const canMerge = isLocal(a) && a.state === 'done' && a.test?.purpose === 'gate' && a.test?.status === 'pass';
+  const dg = state.board?.delegators.find(x => x.id === a.delegator);
+  const passed = a.test?.purpose === 'gate' && a.test?.status === 'pass';
+  // Local repos always merge by hand; GitHub PRs only when the delegator turned auto-merge off.
+  const canMerge = a.state === 'done' && (isLocal(a) || (dg && !dg.automerge)) && (passed || a.gate === 'ci' || (dg && !dg.gate));
   put(head, 
     h('h2', { text: a.headline || a.title }),
     a.headline ? h('p', { class: 'prompt', title: 'Prompt (spawn title)', text: a.title }) : null,

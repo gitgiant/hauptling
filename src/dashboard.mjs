@@ -56,6 +56,7 @@ export function headline(a) {
         if (t?.purpose === 'gate' && t.status === 'pass') return a.gate === 'push' ? `Gate passed, pushing to ${a.base}` : pr ? `Gate passed, merging ${pr}` : `Ready to merge into ${a.base}`;
         if (t?.purpose === 'gate') return `Merge gate ${t.status}${score}; the delegator decides`;
       }
+      if (a.gate === 'off') return pr ? `Gate off: ${pr} merging or ready to merge` : `Gate off: ready to merge into ${a.base}`;
       return pr ? `Done: ${pr} waiting for review` : 'Done: report sent to the delegator';
     case 'merged': return `Merged into ${a.base || 'base'}`;
     case 'closed': return `${pr || 'PR'} closed without merging`;
@@ -69,7 +70,7 @@ export function headline(a) {
   }
 }
 
-const ACTIONS = new Set(['answer', 'reply', 'kill', 'merge', 'gpu.pause', 'gpu.resume', 'test.run', 'models.prefer']);
+const ACTIONS = new Set(['answer', 'reply', 'kill', 'merge', 'delegator.set', 'gpu.pause', 'gpu.resume', 'test.run', 'models.prefer']);
 const COOKIE = 'hl_dash';
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml' };
 
@@ -173,9 +174,9 @@ export function createDashboard({ db, dbPath, core, host, log = () => {}, slotDi
       };
     }).map(a => ({ ...a, headline: headline(a) }));
     const delegators = db.prepare(`
-      SELECT id, repo, cli, created_at, handoff IS NOT NULL AS handoff_waiting
+      SELECT id, repo, cli, gate, automerge, created_at, handoff IS NOT NULL AS handoff_waiting
       FROM delegators WHERE active = 1 ORDER BY created_at
-    `).all().map(d => ({ ...d, handoff_waiting: Boolean(d.handoff_waiting) }));
+    `).all().map(d => ({ ...d, gate: Boolean(d.gate), automerge: Boolean(d.automerge), handoff_waiting: Boolean(d.handoff_waiting) }));
     const { line: _l, ...tests } = tq;
     return { agents, delegators, gpu: await gpu(), tests, blocked: agents.filter(a => a.state === 'blocked').length };
   }

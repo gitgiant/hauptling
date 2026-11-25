@@ -424,12 +424,16 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     try { return JSON.parse((await host.run(a.slot, ['cat', `${a.dir}/hauptling.json`])).stdout); } catch { return {}; }
   }
 
+  const delegatorRow = (id) => db.prepare('SELECT * FROM delegators WHERE id = ?').get(id);
+
   async function gate(id) {
     let a = agentRow(id);
+    const d = delegatorRow(a.delegator);
     const slug = githubSlug(a.repo);
     if (slug && (await repoConfig(a)).pushToMain) {
       // Per-repo opt-in: no PR; a passing gate test pushes straight to the base branch.
       update(id, { gate: 'push' });
+      if (!d.gate) return land(agentRow(id));
       requestTest({ agent: id, requester: 'hauptling', sha: a.sha, purpose: 'gate' });
       return;
     }
@@ -439,15 +443,59 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
       update(id, { pr_url: pr.url, pr_number: pr.number });
       const checks = await github.requiredChecks(slug, a.base);
       if (checks.length) {
-        await github.prAutoMerge(slug, pr.number);
         update(id, { gate: 'ci' });
+        if (d.automerge) await github.prAutoMerge(slug, pr.number);
+        else emitReady(agentRow(id));
         return;
       }
     }
     a = agentRow(id);
     if (a.gate === 'push') return;
+    if (!delegatorRow(a.delegator).gate) { update(id, { gate: 'off' }); return land(agentRow(id)); }
     update(id, { gate: 'tests' });
     requestTest({ agent: id, requester: 'hauptling', sha: a.sha, purpose: 'gate' });
+  }
+
+  const emitReady = (a, why = '') => emit(a.delegator, a.id, 'ready', `${a.id} ready to merge${why}${a.pr_url ? ` (${a.pr_url})` : ''}: run \`hauptling merge ${a.id}\` (or the dashboard's Merge button)`);
+
+  /** The gate is passed or off: merge now, or stop at [ready] when the delegator turned auto-merge off. */
+  async function land(a) {
+    if (!delegatorRow(a.delegator).automerge) return emitReady(a);
+    await mergeNow(a);
+    if (githubSlug(a.repo)) await poll();
+  }
+
+  /** Merges a reported agent's work: push to base (pushToMain), the GitHub PR, or the local branch. Emits `merged` (PRs: poll does). */
+  async function mergeNow(a) {
+    const slug = githubSlug(a.repo);
+    if (a.gate === 'push') {
+      try {
+        await git(a, ['fetch', '--quiet', 'origin', a.base]);
+        await git(a, ['rebase', '--quiet', `origin/${a.base}`]);
+        await git(a, ['push', 'origin', `HEAD:refs/heads/${a.base}`]);
+        await git(a, ['push', '--quiet', 'origin', '--delete', a.branch]).catch(() => {});
+      } catch (e) {
+        await git(a, ['rebase', '--abort']).catch(() => {});
+        update(a.id, { state: 'working' });
+        emit(a.delegator, a.id, 'gate-failed', `${a.id} tests passed but pushing to ${a.base} failed: ${e.message.slice(0, 200)}`);
+        await sendMail('hauptling', a.id, `Tests passed, but your branch no longer applies on ${a.base}. Rebase onto origin/${a.base}, fix conflicts, commit, report again.`);
+        return;
+      }
+      await cleanup(a, 'merged');
+      emit(a.delegator, a.id, 'merged', `${a.id} pushed to ${a.base} (pushToMain)`);
+    } else if (slug) {
+      if (a.gate === 'ci') await github.prAutoMerge(slug, a.pr_number); // GitHub's required checks still apply
+      else await github.prMerge(slug, a.pr_number); // the caller polls, which emits [merged]
+    } else {
+      const hostGit = (repo, args) => host.hostGit(repo, args);
+      const current = await hostGit(a.repo, ['rev-parse', '--abbrev-ref', 'HEAD']);
+      if (current === a.base) {
+        if (await hostGit(a.repo, ['status', '--porcelain', '--untracked-files=no'])) throw new Error(`${a.base} is checked out with uncommitted changes in ${a.repo}`);
+        await hostGit(a.repo, ['merge', '--no-ff', '-m', `Merge ${a.branch}: ${a.title}`, a.branch]);
+      } else await hostGit(a.repo, ['fetch', '.', `${a.branch}:${a.base}`]);
+      await cleanup(a, 'merged');
+      emit(a.delegator, a.id, 'merged', `${a.id} merged into ${a.base}`);
+    }
   }
 
   /** Stores a question and notifies you; the answer page is keyed by a random nonce, not a token. */
@@ -726,26 +774,10 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
         return;
       }
     }
-    const slug = githubSlug(a.repo);
-    if (a.gate === 'push') {
-      try {
-        await git(a, ['fetch', '--quiet', 'origin', a.base]);
-        await git(a, ['rebase', '--quiet', `origin/${a.base}`]);
-        await git(a, ['push', 'origin', `HEAD:refs/heads/${a.base}`]);
-        await git(a, ['push', '--quiet', 'origin', '--delete', a.branch]).catch(() => {});
-      } catch (e) {
-        await git(a, ['rebase', '--abort']).catch(() => {});
-        update(a.id, { state: 'working' });
-        emit(a.delegator, a.id, 'gate-failed', `${a.id} tests passed but pushing to ${a.base} failed: ${e.message.slice(0, 200)}`);
-        await sendMail('hauptling', a.id, `Tests passed, but your branch no longer applies on ${a.base}. Rebase onto origin/${a.base}, fix conflicts, commit, report again.`);
-        return;
-      }
-      await cleanup(a, 'merged');
-      emit(a.delegator, a.id, 'merged', `${a.id} pushed to ${a.base} (pushToMain)`);
-      return;
-    }
-    if (slug) {
-      await github.prMerge(slug, a.pr_number);
+    if (!delegatorRow(a.delegator).automerge) return emitReady(a, ' (gate tests passed)');
+    if (a.gate === 'push') return mergeNow(a);
+    if (githubSlug(a.repo)) {
+      await mergeNow(a);
       emit(a.delegator, a.id, 'gate-passed', `${a.id} gate tests passed; PR ${a.pr_url} merged`);
       await poll();
     } else emit(a.delegator, a.id, 'gate-passed', `${a.id} tests passed; run \`hauptling merge ${a.id}\` to merge ${a.branch} into ${a.base}`);
@@ -795,19 +827,17 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     return { killed: a.id };
   }
 
-  /** Local-only repos: merge the agent's branch into base in the host checkout. */
-  async function merge({ agent }, hostGit) {
+  /** Manual merge, for when auto-merge is off (or local repos): needs a passing gate test unless the gate is off or GitHub's own checks gate it. */
+  async function merge({ agent }) {
     const a = mustAgent(agent);
-    if (githubSlug(a.repo)) throw new Error('GitHub repos merge through their PR');
-    const t = db.prepare("SELECT report FROM tests WHERE agent = ? AND purpose = 'gate' AND sha = ? AND state = 'done'").get(a.id, a.sha);
-    if (!t || JSON.parse(t.report).status !== 'pass') throw new Error('No passing gate test job for the reported sha');
-    const current = await hostGit(a.repo, ['rev-parse', '--abbrev-ref', 'HEAD']);
-    if (current === a.base) {
-      if (await hostGit(a.repo, ['status', '--porcelain', '--untracked-files=no'])) throw new Error(`${a.base} is checked out with uncommitted changes in ${a.repo}`);
-      await hostGit(a.repo, ['merge', '--no-ff', '-m', `Merge ${a.branch}: ${a.title}`, a.branch]);
-    } else await hostGit(a.repo, ['fetch', '.', `${a.branch}:${a.base}`]);
-    await cleanup(a, 'merged');
-    emit(a.delegator, a.id, 'merged', `${a.id} merged into ${a.base}`);
+    if (a.state !== 'done') throw new Error(`${a.id} is ${a.state}; merge works after it reports`);
+    if (githubSlug(a.repo) && !a.pr_number && a.gate !== 'push') throw new Error(`${a.id} has no PR yet`);
+    if (delegatorRow(a.delegator).gate && a.gate !== 'ci') {
+      const t = db.prepare("SELECT report FROM tests WHERE agent = ? AND purpose = 'gate' AND sha = ? AND state = 'done'").get(a.id, a.sha);
+      if (!t || JSON.parse(t.report).status !== 'pass') throw new Error('No passing gate test job for the reported sha');
+    }
+    await mergeNow(a);
+    if (githubSlug(a.repo)) await poll();
     return { merged: a.id };
   }
 
@@ -878,10 +908,30 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   }
 
   // ---------- delegator lifecycle ----------
-  function delegatorStart({ cli, repo, max = 3 }) {
+  function delegatorStart({ cli, repo, max = 3, gate = true, automerge = true }) {
     const id = `d_${hex(3)}`;
-    db.prepare('INSERT INTO delegators (id, cli, repo, max_agents, created_at) VALUES (?, ?, ?, ?, ?)').run(id, cli || null, repo || null, Number(max), now());
+    db.prepare('INSERT INTO delegators (id, cli, repo, max_agents, gate, automerge, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(id, cli || null, repo || null, Number(max), gate ? 1 : 0, automerge ? 1 : 0, now());
     return { id };
+  }
+
+  /**
+   * Changes a delegator's merge settings. Turning the gate off lands its reported agents whose gate job is
+   * still queued or running (the job is cancelled); turning it on affects later reports only.
+   */
+  async function delegatorSet({ delegator, gate, automerge }) {
+    const d = delegatorId(delegator);
+    if (gate != null) db.prepare('UPDATE delegators SET gate = ? WHERE id = ?').run(gate ? 1 : 0, d);
+    if (automerge != null) db.prepare('UPDATE delegators SET automerge = ? WHERE id = ?').run(automerge ? 1 : 0, d);
+    if (gate === false) {
+      const waiting = db.prepare("SELECT DISTINCT a.id FROM agents a JOIN tests t ON t.agent = a.id WHERE a.delegator = ? AND a.state = 'done' AND t.purpose = 'gate' AND t.state IN ('queued', 'running') AND t.sha = a.sha").all(d);
+      for (const { id } of waiting) {
+        cancelTests(db.prepare("SELECT id, state FROM tests WHERE agent = ? AND purpose = 'gate' AND state IN ('queued', 'running')").all(id), 'merge gate turned off');
+        update(id, { gate: 'off' });
+        await land(agentRow(id)).catch(e => emit(d, id, 'gate-error', `${id}: ${e.message}`));
+      }
+    }
+    const row = delegatorRow(d);
+    return { delegator: d, gate: Boolean(row.gate), automerge: Boolean(row.automerge) };
   }
 
   /** Marks a delegator ended, so commands without --delegator stop considering it. Refused while it has live agents. */
@@ -926,10 +976,10 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     hook: (a, who) => hook(who, a),
     report: (a, who) => report(who, a),
     ask: (a, who) => ask(who, a),
-    answer, reply, spawn, wait, agents, kill, merge: (a) => merge(a, (repo, args) => host.hostGit(repo, args)), poll,
+    answer, reply, spawn, wait, agents, kill, merge, poll,
     'agent.get': ({ agent }) => { const { token: _t, ...r } = mustAgent(agent); return r; },
     'attach': ({ agent }) => { const a = mustAgent(agent); return { argv: host.attachArgv(a.slot, a.id) }; },
-    'delegator.start': delegatorStart, 'delegator.end': delegatorEnd, 'delegator.list': () => db.prepare('SELECT * FROM delegators ORDER BY created_at DESC').all(),
+    'delegator.start': delegatorStart, 'delegator.end': delegatorEnd, 'delegator.set': delegatorSet, 'delegator.list': () => db.prepare('SELECT * FROM delegators ORDER BY created_at DESC').all(),
     handoff, resume,
     'mail.send': ({ from, to, text }, who) => sendMail(who.role === 'agent' ? who.agent : from, to, text),
     'mail.check': ({ identity }, who) => mail.take(db, who.role === 'agent' ? who.agent : identity),
