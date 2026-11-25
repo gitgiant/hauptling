@@ -335,8 +335,8 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     mail.setStatus(db, a.id, `working: ${a.title}`.slice(0, STATUS_MAX));
   }
 
-  async function cleanup(a, state) {
-    cancelAgentTests(a.id, state);
+  async function cleanup(a, state, options) {
+    cancelAgentTests(a.id, state, options);
     if (a.slot) {
       await host.stopWorker(a.slot, a.id);
       await host.run(a.slot, ['rm', '-rf', a.dir]).catch(() => {});
@@ -564,7 +564,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
    * Cancels test jobs: queued ones are marked done/cancelled, running ones too and their container is
    * stopped. A cancelled job never reaches testReport or gateResult (its late result is discarded).
    */
-  function cancelTests(rows, notes) {
+  function cancelTests(rows, notes, { resumeQueue = true } = {}) {
     for (const { id, state } of rows) {
       const report = JSON.stringify({ id, status: 'cancelled', passed: 0, failed: 0, skipped: 0, failures: [], notes });
       db.prepare("UPDATE tests SET state = 'done', report = ?, done_at = ? WHERE id = ?").run(report, now(), id);
@@ -573,15 +573,15 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
       bus.emit(`test:${id}`);
       if (state === 'running') Promise.resolve(host.killTestJob?.(id)).catch(e => log(`kill test ${id}: ${e.message}`));
     }
-    if (rows.length) pump().catch(e => log(`test pump: ${e.message}`));
+    if (rows.length && resumeQueue) pump().catch(e => log(`test pump: ${e.message}`));
   }
   /** A newer report supersedes the agent's gate jobs for other shas. */
   function supersedeGates(agentId, sha) {
     cancelTests(db.prepare("SELECT id, state FROM tests WHERE agent = ? AND purpose = 'gate' AND state IN ('queued', 'running') AND sha != ?").all(agentId, sha), 'superseded by a newer report');
   }
   /** An agent that ended (killed, closed, failed, merged, handed off) gives up all its queued and running test jobs. */
-  function cancelAgentTests(agentId, why) {
-    cancelTests(db.prepare("SELECT id, state FROM tests WHERE agent = ? AND state IN ('queued', 'running')").all(agentId), `agent ${why}`);
+  function cancelAgentTests(agentId, why, options) {
+    cancelTests(db.prepare("SELECT id, state FROM tests WHERE agent = ? AND state IN ('queued', 'running')").all(agentId), `agent ${why}`, options);
   }
 
   const errorReport = (job, notes) => ({ id: job.id, sha: job.sha, status: 'error', passed: 0, failed: 0, skipped: 0, failures: [], duration_s: 0, notes: String(notes).slice(0, 300) });
@@ -696,9 +696,13 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     return r;
   }
 
-  /** Broker start: test containers from before the restart are gone; their jobs rerun from scratch, first in line. */
+  /** Broker start: cancel ended agents’ jobs and requeue the remaining interrupted jobs first in line. */
   async function recover() {
     await host.removeTestContainers?.().catch(e => log(`remove test containers: ${e.message}`));
+    const ended = [...ENDED, 'failed', 'exited'];
+    const agents = db.prepare(`SELECT DISTINCT a.id, a.state FROM agents a JOIN tests t ON t.agent = a.id
+      WHERE a.state IN (${ended.map(() => '?').join(',')}) AND t.state IN ('queued', 'running')`).all(...ended);
+    for (const a of agents) cancelAgentTests(a.id, a.state, { resumeQueue: false });
     const r = db.prepare("UPDATE tests SET state = 'queued', claimed_at = NULL WHERE state = 'running'").run();
     if (r.changes) log(`requeued ${r.changes} test job(s) after restart`);
     return { requeued: r.changes };
@@ -887,7 +891,6 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
 
   /** Every minute: PR state for done agents (merged → free the slot; CI failure → wake the worker). */
   async function poll() {
-    pump().catch(e => log(`test pump: ${e.message}`)); // also rechecks a GPU job held for VRAM
     await refreshUsage({ force: true }).catch(e => log(`usage: ${e.message}`));
     // A usage window may have reset: queued spawns that were waiting for it can start.
     for (const { id } of db.prepare("SELECT DISTINCT delegator id FROM agents WHERE state = 'queued'").all()) await startQueued(id).catch(e => log(`start ${id}: ${e.message}`));
@@ -896,8 +899,8 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
       try {
         const slug = githubSlug(a.repo);
         const pr = await github.prView(slug, a.pr_number);
-        if (pr.state === 'MERGED') { await cleanup(a, 'merged'); emit(a.delegator, a.id, 'merged', `${a.id} merged: ${a.pr_url}`); continue; }
-        if (pr.state === 'CLOSED') { await cleanup(a, 'closed'); emit(a.delegator, a.id, 'closed', `${a.id} PR closed without merge`); continue; }
+        if (pr.state === 'MERGED') { await cleanup(a, 'merged', { resumeQueue: false }); emit(a.delegator, a.id, 'merged', `${a.id} merged: ${a.pr_url}`); continue; }
+        if (pr.state === 'CLOSED') { await cleanup(a, 'closed', { resumeQueue: false }); emit(a.delegator, a.id, 'closed', `${a.id} PR closed without merge`); continue; }
         const failed = (pr.statusCheckRollup || []).filter(c => ['FAILURE', 'ERROR', 'TIMED_OUT', 'CANCELLED'].includes(c.conclusion || c.state));
         if (failed.length && a.ci_note !== pr.headRefOid) {
           update(a.id, { ci_note: pr.headRefOid, state: 'working' });
@@ -905,6 +908,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
         }
       } catch (e) { log(`poll ${a.id}: ${e.message}`); }
     }
+    pump().catch(e => log(`test pump: ${e.message}`)); // also rechecks a GPU job held for VRAM
   }
 
   // ---------- delegator lifecycle ----------
