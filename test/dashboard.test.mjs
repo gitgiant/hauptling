@@ -73,6 +73,23 @@ test('dashboard auth: token → cookie, no cookie → 401, docker0 → 403, othe
   s.done();
 });
 
+test('screen of a dead container: ended answer (last screen kept), no error, no log noise', async () => {
+  const s = await setup();
+  const url = `/dash/agent/${s.id}/screen`;
+  assert.equal((await s.req(url)).json.text, 'hello world');
+  s.host.tmuxCapture = async () => { throw new Error('docker exec: Error response from daemon: No such container: hl-x'); };
+  const r = await s.req(url);
+  assert.equal(r.code, 200);
+  assert.equal(r.json.ended, true);
+  assert.equal(r.json.text, 'hello world', 'last saved screen');
+  assert.match(r.json.note, /ended/);
+  s.host.tmuxCapture = async () => { throw new Error('tmux exploded'); };
+  assert.equal((await s.req(url)).code, 400, 'other capture errors still surface');
+  s.db.prepare("UPDATE agents SET state = 'merged' WHERE id = ?").run(s.id);
+  assert.equal((await s.req(url)).json.ended, true);
+  s.done();
+});
+
 test('dashboard board, detail and actions', async () => {
   const s = await setup();
   const who = s.core.authenticate(s.db.prepare('SELECT token FROM agents WHERE id = ?').get(s.id).token, 'ADMIN');

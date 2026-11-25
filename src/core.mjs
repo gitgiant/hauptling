@@ -445,6 +445,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   function requestTest({ agent, requester, sha, branch, selector = '', gpu = false, artifacts = [], timeout_s = 1800, purpose = 'agent', repo }) {
     const a = agent ? agentRow(agent) : null;
     const round = a && purpose === 'agent' ? db.prepare("SELECT COUNT(*) n FROM tests WHERE agent = ? AND purpose = 'agent'").get(a.id).n + 1 : 1;
+    if (a && purpose === 'gate') supersedeGates(a.id, sha);
     const id = `t_${hex(4)}`;
     db.prepare(`INSERT INTO tests (id, agent, requester, repo, sha, branch, selector, gpu, artifacts, timeout_s, round, purpose, state, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)`).run(id, a?.id ?? null, requester, repo || a.repo, sha, branch || a?.branch || null, selector, gpu ? 1 : 0, JSON.stringify(artifacts), Number(timeout_s), round, purpose, now());
@@ -457,6 +458,19 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     bus.emit('tests');
     pump().catch(e => log(`test pump: ${e.message}`));
     return { id, round };
+  }
+
+  /** A newer report supersedes the agent's gate jobs for other shas: queued ones are cancelled, a running one is killed. Cancelled gates never reach gateResult. */
+  function supersedeGates(agentId, sha) {
+    const old = db.prepare("SELECT id, state FROM tests WHERE agent = ? AND purpose = 'gate' AND state IN ('queued', 'running') AND sha != ?").all(agentId, sha);
+    for (const { id, state } of old) {
+      const report = JSON.stringify({ id, status: 'cancelled', passed: 0, failed: 0, skipped: 0, failures: [], notes: 'superseded by a newer report' });
+      db.prepare("UPDATE tests SET state = 'done', report = ?, done_at = ? WHERE id = ?").run(report, now(), id);
+      kvDel(db, `gpu:need:${id}`);
+      kvDel(db, `gpu:wait:${id}`);
+      bus.emit(`test:${id}`);
+      if (state === 'running') Promise.resolve(host.killTestJob?.(id)).catch(e => log(`kill test ${id}: ${e.message}`));
+    }
   }
 
   const errorReport = (job, notes) => ({ id: job.id, sha: job.sha, status: 'error', passed: 0, failed: 0, skipped: 0, failures: [], duration_s: 0, notes: String(notes).slice(0, 300) });

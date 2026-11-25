@@ -141,6 +141,8 @@ Phases 2–4 get their own grill at phase start.
 - **Broker restart** (both queues): on startup, leftover test containers are removed and `running` jobs are requeued at the front and rerun from scratch.
 - **No GPU host**: setup detects `nvidia-smi`; without it the toolkit is skipped, `doctor` says "GPU: none (GPU tests disabled)" and `--gpu` fails fast with "no GPU on this host". `"gpu": false` in config disables it on a GPU host.
 - **Merge gate**: CPU only by default. `"gateGpu": true` in `hauptling.json` adds the GPU command to the gate; while it waits the agent status shows `gate: waiting for GPU`.
+- **Superseded gates** (2026-11-25): queuing a gate for an agent cancels its older gate jobs (other sha): `queued` ones are marked done with status `cancelled`; a `running` one is also killed via `killTestJob`, as `gpu pause --now` does. A cancelled gate never reaches `gateResult`, so it emits no `gate-passed`/`gate-failed` and merges nothing; only the gate for the agent's current sha can merge (`gateResult` still ignores a sha that isn't the agent's head).
+- **Dead container** (dashboard): `/screen` answers `{ended: true, note, text: last captured screen}` when the container is gone, without logging; the page stops polling on `ended`.
 - **Timeout**: GPU jobs keep the 1800 s default `timeout_s`.
 
 ### Phase 2 decisions (2026-11-21)

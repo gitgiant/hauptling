@@ -439,7 +439,8 @@ async function loadScreen(id, body) {
     if (state.selected !== id || state.sub !== 'screen') return;
     const pre = body.querySelector('pre.screen');
     const atBottom = !pre || pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 20;
-    if (s.note) { put(body, h('p', { class: 'empty', text: s.note })); return; }
+    if (s.ended) clearInterval(state.screenTimer); // container gone: stop polling
+    if (s.note) { put(body, s.text ? h('pre', { class: 'screen' }, s.text) : null, h('p', { class: 'empty', text: s.note })); return; }
     const next = pre || h('pre', { class: 'screen' });
     next.textContent = s.text || '(empty screen)';
     if (!pre) put(body, next, h('p', { class: 'empty', text: 'Read-only mirror, refreshed every 2 s. Live terminal: hauptling attach (web terminal comes in 4b).' }));
