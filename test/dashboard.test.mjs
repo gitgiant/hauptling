@@ -201,6 +201,11 @@ test('usage panel and spend: slot × vendor limits, sign-in state, totals of fin
   assert.deepEqual(claude.limits.map(l => [l.window, l.used_pct, l.slot]), [['5h', 55, 'hl-w2']], 'newest reading from any slot');
   assert.equal(claude.slots.find(x => x.slot === 'hl-w1').busy, s.id, 'Sign in locked for the running worker\'s vendor');
   assert.equal(u.vendors.find(v => v.vendor === 'codex').slots.find(x => x.slot === 'hl-w1').busy, null);
+  // A codex worker on the same slot (one worker per slot per vendor) locks codex there and leaves claude's lock alone.
+  s.db.prepare("INSERT INTO agents (id, delegator, vendor, model, repo, base, branch, brief, title, state, token, created_at, updated_at, slot) SELECT 'codex_x_1', delegator, 'codex', 'm', repo, base, 'hl/codex_x_1', 'b', 't', 'working', 'tk2', created_at, created_at, 'hl-w1' FROM agents WHERE id = ?").run(s.id);
+  const u2 = (await s.req('/dash/usage')).json;
+  const onW1 = (v) => u2.vendors.find(x => x.vendor === v).slots.find(x => x.slot === 'hl-w1').busy;
+  assert.deepEqual([onW1('claude'), onW1('codex'), onW1('agy')], [s.id, 'codex_x_1', null]);
   assert.equal(claude.slots[0].login, 'hauptling login hl-w1 claude');
   assert.equal(u.spend.total.cost_usd, 1.5);
   assert.equal(u.spend.byVendor[0].key, 'claude');

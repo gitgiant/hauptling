@@ -157,20 +157,34 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     return { id, vendor, model: entry.id, effort: eff, state: state(id), billing: agentRow(id).billing, ...(tw ? { testWriter: { id: tw.id, vendor: tw.vendor, model: tw.model, state: state(tw.id) } } : {}) };
   }
 
-  /** Starts queued agents while the delegator is under its limit and a slot is free. */
+  const inActive = `state IN (${ACTIVE.map(() => '?').join(',')})`;
+  /**
+   * Slots with no live worker of this vendor. A slot runs at most one worker per vendor: each vendor's
+   * credentials sit in their own dir under the slot, and a container mounts only its vendor's dir, so a
+   * claude and a codex worker on one slot never share a refresh token. `except`: an agent to ignore (restart).
+   */
+  function freeSlots(vendor, except = null) {
+    const used = new Set(db.prepare(`SELECT slot FROM agents WHERE slot IS NOT NULL AND vendor = ? AND id IS NOT ? AND ${inActive}`).all(vendor, except, ...ACTIVE).map(r => r.slot));
+    return slots().filter(s => !used.has(s));
+  }
+  /** Live worker containers on this host, across every delegator. */
+  const workerCount = (except = null) => db.prepare(`SELECT COUNT(*) n FROM agents WHERE slot IS NOT NULL AND id IS NOT ? AND ${inActive}`).get(except, ...ACTIVE).n;
+  /** Host-wide cap on live workers (`maxWorkers` in ~/.hauptling/config.json, default 6), so CPU and RAM aren't overrun. */
+  const maxWorkers = () => Math.max(1, Number(host.maxWorkers?.() ?? 6) || 6);
+
+  /** Starts queued agents while the delegator is under its limit, the host under `maxWorkers`, and a slot is free for the agent's vendor. */
   async function startQueued(d) {
     const started = [];
     for (;;) {
       const next = tx(db, () => {
         const max = db.prepare('SELECT max_agents FROM delegators WHERE id = ?').get(d).max_agents;
         const active = db.prepare(`SELECT COUNT(*) n FROM agents WHERE delegator = ? AND state IN (${ACTIVE.map(() => '?').join(',')})`).get(d, ...ACTIVE).n;
-        if (active >= max) return null;
-        const used = new Set(db.prepare(`SELECT slot FROM agents WHERE slot IS NOT NULL AND state IN (${ACTIVE.map(() => '?').join(',')})`).all(...ACTIVE).map(r => r.slot));
-        const free = slots().filter(s => !used.has(s));
-        // First queued agent that can start: on the API key, or on a plan that isn't at 100% (else it waits for the reset).
-        const a = free.length ? db.prepare("SELECT * FROM agents WHERE delegator = ? AND state = 'queued' ORDER BY created_at").all(d).find(q => startable(q.vendor)) : null;
-        const slot = free[0];
-        if (!slot || !a) return null;
+        if (active >= max || workerCount() >= maxWorkers()) return null;
+        // First queued agent that can start: a slot free for its vendor, and on the API key or on a plan that
+        // isn't at 100% (else it waits for the reset).
+        const a = db.prepare("SELECT * FROM agents WHERE delegator = ? AND state = 'queued' ORDER BY created_at").all(d).find(q => freeSlots(q.vendor).length && startable(q.vendor));
+        if (!a) return null;
+        const slot = freeSlots(a.vendor)[0];
         const dir = `${host.workRoot}/${a.id}`;
         const billing = billingFor(a.vendor);
         db.prepare("UPDATE agents SET state = 'spawning', slot = ?, dir = ?, billing = ?, updated_at = ? WHERE id = ?").run(slot, dir, billing, now(), a.id);
@@ -294,7 +308,11 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     return { text: statusText(recordUsage(a, normalizeUsage(vendor, scrub(payload), priceOf(a)))) };
   }
 
-  /** Codex has no status line hook: read its session log in the slot (throttled; poll and the dashboard call this). */
+  /**
+   * Codex has no status line hook: read its session log in the slot's codex dirs (throttled; poll and the
+   * dashboard call this). Only codex workers mount those dirs and a slot holds one codex worker at a time,
+   * so the newest log there since the agent started is the agent's, whatever other vendors run on the slot.
+   */
   let codexAt = 0;
   async function refreshUsage({ force = false } = {}) {
     if (!host.codexUsage || (!force && Date.now() - codexAt < 10e3)) return;
@@ -1013,9 +1031,10 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
 
   const restart = ({ agent }) => lifecycle(agent, async a => {
     if (![...PAUSABLE, 'paused', 'exited', 'failed', 'restarting'].includes(a.state) || !a.dir) throw new Error(`${a.id} is ${a.state}; no worker to restart`);
-    const used = new Set(db.prepare(`SELECT slot FROM agents WHERE id != ? AND state IN (${ACTIVE.map(() => '?').join(',')})`).all(a.id, ...ACTIVE).map(r => r.slot));
-    const slot = a.slot && !used.has(a.slot) ? a.slot : slots().find(s => !used.has(s));
-    if (!slot) throw new Error('No free worker slot');
+    const free = freeSlots(a.vendor, a.id);
+    const slot = a.slot && free.includes(a.slot) ? a.slot : free[0];
+    if (!slot) throw new Error(`No slot free for ${a.vendor}`);
+    if (!ACTIVE.includes(a.state) && workerCount(a.id) >= maxWorkers()) throw new Error(`maxWorkers (${maxWorkers()}) workers are running; free one first`);
     update(a.id, { state: 'restarting', slot, idle: 0 });
     let newClone = false;
     let attempted = false;

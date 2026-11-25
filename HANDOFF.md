@@ -22,6 +22,8 @@
 - GPU `pause --now`, the VRAM wait and `gateGpu` on the real GPU (unit-tested only).
 - Test watchdog (PRD "Watchdog"): core logic unit-tested with docker and clock stubbed; the real `testLiveness` probe (`docker inspect`, heartbeat mtime) is unrun. Needs `hauptling image` (runner heartbeat) and `hauptling broker stop`.
 
+- Slots per vendor (PRD "Security"): a slot runs one worker per vendor, containers mount only their vendor's dir, `maxWorkers` (default 6) caps the host. Unit-tested only. Needs `hauptling image` and `hauptling broker restart`; check a codex worker's container has no `.vendor/claude`.
+
 ## Open
 
 - nullpunkt: commit `b9a0f6e8` (drops the coagent mailbox for `hauptling mail`) sits in `nullpunkt/.worktrees/claude_opus-5-5_d72c0`, unpushed. Before `node scripts/worktree.mjs sync claude_opus-5-5_d72c0`, discard the main checkout's local edits to `.mcp.json` and `.codex/hooks.json` (the commit replaces both). Sync restarts the user's game.

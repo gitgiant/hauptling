@@ -276,7 +276,8 @@ export function createDashboard({ db, dbPath, core, host, log = () => {}, slotDi
     const signedIn = new Map(all.map(l => [`${l.slot}:${l.vendor}`, l.ok]));
     const keyOf = new Map(all.filter(l => l.key).map(l => [l.vendor, l.key]));
     const rows = db.prepare('SELECT * FROM slot_usage ORDER BY at DESC').all();
-    const busy = new Map(db.prepare("SELECT slot, id, vendor FROM agents WHERE slot IS NOT NULL AND state IN ('spawning','restarting','paused','working','blocked','done')").all().map(r => [r.slot, r]));
+    // A slot runs one worker per vendor: key by both, or a codex worker would hide the claude one on the same slot.
+    const busy = new Map(db.prepare("SELECT slot, id, vendor FROM agents WHERE slot IS NOT NULL AND state IN ('spawning','restarting','paused','working','blocked','done')").all().map(r => [`${r.slot}:${r.vendor}`, r.id]));
     // One account per vendor (signed in on every slot, or one API key): the newest reading of each window, from any slot.
     const vendors = VENDOR_LIST.map(vendor => {
       const latest = new Map();
@@ -289,7 +290,7 @@ export function createDashboard({ db, dbPath, core, host, log = () => {}, slotDi
         slots: slotNames.map(slot => ({
           slot,
           signed_in: Boolean(signedIn.get(`${slot}:${vendor}`)),
-          busy: busy.get(slot)?.vendor === vendor ? busy.get(slot).id : null,
+          busy: busy.get(`${slot}:${vendor}`) || null,
           login: `hauptling login ${slot} ${vendor}`,
         })),
       };

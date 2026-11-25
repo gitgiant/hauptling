@@ -890,3 +890,60 @@ test('watchdog: a hung GPU job releases the GPU queue before it is requeued', as
   assert.equal(g.state(t.id).state, 'done');
   assert.equal(g.state(next.id).state, 'running');
 });
+
+test('slots per vendor: with claude on hl-w1 and codex on hl-w2/hl-w3, a new claude agent starts on hl-w2', async () => {
+  const { core, db } = setup();
+  await core.call('delegator.start', { repo: 'gitgiant/demo', max: 6 });
+  const slotOf = (id) => db.prepare('SELECT slot FROM agents WHERE id = ?').get(id).slot;
+  const c1 = await core.call('spawn', { brief: 'c1', vendor: 'claude', mode: 'cheapest' });
+  const x1 = await core.call('spawn', { brief: 'x1', vendor: 'codex', mode: 'cheapest' });
+  const x2 = await core.call('spawn', { brief: 'x2', vendor: 'codex', mode: 'cheapest' });
+  await settle();
+  assert.equal(slotOf(c1.id), 'hl-w1');
+  assert.deepEqual([slotOf(x1.id), slotOf(x2.id)], ['hl-w1', 'hl-w2'], 'codex takes hl-w1 beside the claude worker');
+  db.prepare("UPDATE agents SET slot = 'hl-w2' WHERE id = ?").run(x1.id);
+  db.prepare("UPDATE agents SET slot = 'hl-w3' WHERE id = ?").run(x2.id);
+  const c2 = await core.call('spawn', { brief: 'c2', vendor: 'claude', mode: 'cheapest' });
+  assert.equal(c2.state, 'spawning');
+  assert.equal(slotOf(c2.id), 'hl-w2');
+});
+
+test('slots per vendor: a second claude agent never shares a slot with an active claude agent', async () => {
+  const { core, db } = setup();
+  await core.call('delegator.start', { repo: 'gitgiant/demo', max: 6 });
+  const row = (id) => db.prepare('SELECT slot, state FROM agents WHERE id = ?').get(id);
+  const ids = [];
+  for (let i = 0; i < 4; i++) ids.push((await core.call('spawn', { brief: `c${i}`, vendor: 'claude', mode: 'cheapest' })).id);
+  await settle();
+  assert.deepEqual(ids.slice(0, 3).map(id => row(id).slot), ['hl-w1', 'hl-w2', 'hl-w3']);
+  assert.deepEqual({ ...row(ids[3]) }, { slot: null, state: 'queued' }, 'every slot holds a claude worker: the fourth waits');
+  // A restart must not move onto another claude worker's slot either.
+  db.prepare("UPDATE agents SET state = 'exited', slot = NULL WHERE id = ?").run(ids[0]);
+  db.prepare("UPDATE agents SET state = 'working', slot = 'hl-w1' WHERE id = ?").run(ids[3]);
+  await assert.rejects(core.call('restart', { agent: ids[0] }), /No slot free for claude/);
+  await core.call('kill', { agent: ids[1] });
+  await settle();
+  await core.call('restart', { agent: ids[0] });
+  assert.equal(row(ids[0]).slot, 'hl-w2');
+  const slots = db.prepare("SELECT slot FROM agents WHERE vendor = 'claude' AND slot IS NOT NULL AND state IN ('spawning','restarting','working','blocked','done','paused')").all().map(r => r.slot);
+  assert.equal(new Set(slots).size, slots.length, `claude slots overlap: ${slots}`);
+});
+
+test('maxWorkers caps live workers across every delegator; freeing one starts the next', async () => {
+  const { core, db, host } = setup();
+  host.maxWorkers = () => 2;
+  await core.call('delegator.start', { repo: 'gitgiant/demo', max: 6 });
+  await core.call('delegator.start', { repo: 'gitgiant/other', max: 6 });
+  const d = db.prepare('SELECT id, repo FROM delegators').all();
+  const mine = d.find(x => x.repo === 'gitgiant/demo').id;
+  const theirs = d.find(x => x.repo === 'gitgiant/other').id;
+  const a = await core.call('spawn', { delegator: mine, brief: 'a', vendor: 'claude', mode: 'cheapest' });
+  const b = await core.call('spawn', { delegator: mine, brief: 'b', vendor: 'codex', mode: 'cheapest' });
+  const c = await core.call('spawn', { delegator: theirs, brief: 'c', vendor: 'agy', mode: 'cheapest' });
+  await settle();
+  assert.deepEqual([a.state, b.state, c.state], ['spawning', 'spawning', 'queued'], 'slots are free for agy, but the host is at maxWorkers');
+  await core.call('kill', { agent: a.id });
+  await core.call('poll');
+  await settle();
+  assert.equal(db.prepare('SELECT state FROM agents WHERE id = ?').get(c.id).state, 'working');
+});
