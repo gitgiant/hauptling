@@ -174,6 +174,6 @@ macOS stays untested until a Mac is available.
 
 - Refresh token rotation (a refresh returns a new refresh token and invalidates the old one, so a second copy of a credential file gets silently signed out):
   - **Claude: yes** (reported 2026-11-24, not yet observed on a slot). Refreshes on a 401 and proactively up to 5 min before expiry; reusing an old refresh token fails with `invalid_grant`.
-  - **Codex: unknown** (assumed yes).
+  - **Codex: yes** (reported 2026-11-24, not yet observed on a slot). Refreshing `auth.json` spends the old refresh token; a process or copy still holding it fails and needs a new sign-in. Restoring an old `auth.json` (backup, re-copy) has the same effect.
   - **agy: own Google sign-in unknown** (assumed yes). Its MCP OAuth tokens (`mcp_oauth_tokens.json`) do rotate, and concurrent agy processes sharing them collide: one rotates, the other reuses the old token, gets `invalid_grant`, and the file is cleared (reported 2026-11-24, from an Antigravity CLI issue).
   - Design consequences either way: each slot signs in on its own; credentials are never copied between slots; the slot dir is mounted, not copied, into containers so a refresh writes back to the one real file; one worker per slot at a time. Not yet guarded: a "Sign in again" on a slot whose worker is running (two processes refreshing one file).
