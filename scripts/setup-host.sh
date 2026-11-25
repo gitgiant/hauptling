@@ -9,6 +9,10 @@ OWNER="${2:?user}"
 HL_HOME="${3:?hauptling home}"
 GPU="${4:-gpu}"
 export DEBIAN_FRONTEND=noninteractive
+
+# /etc/init.d/docker sets `ulimit -Hn 524288`, which fails (and aborts the start) when the caller's soft
+# limit is higher, e.g. 1048576 in a WSL terminal. Lower the soft limit for the init script only.
+docker_service() { (ulimit -Sn 1024 && service docker "$1" >/dev/null); }
 . /etc/os-release
 arch=$(dpkg --print-architecture)
 
@@ -40,7 +44,7 @@ if grep -qi microsoft /proc/version && [ "$(ps -p 1 -o comm=)" != systemd ]; the
     if grep -q '^\[boot\]' /etc/wsl.conf; then sed -i '/^\[boot\]/a command = service docker start' /etc/wsl.conf
     else printf '\n[boot]\ncommand = service docker start\n' >> /etc/wsl.conf; fi
   fi
-  service docker status >/dev/null 2>&1 || service docker start >/dev/null
+  service docker status >/dev/null 2>&1 || docker_service start
 else
   systemctl enable --now docker >/dev/null
 fi
@@ -57,7 +61,7 @@ if [ "$GPU" = gpu ] && [ -n "$smi" ] && "$smi" -L >/dev/null 2>&1; then
   fi
   if ! docker info --format '{{json .Runtimes}}' 2>/dev/null | grep -q nvidia; then
     nvidia-ctk runtime configure --runtime=docker >/dev/null
-    if command -v systemctl >/dev/null && [ "$(ps -p 1 -o comm=)" = systemd ]; then systemctl restart docker; else service docker restart >/dev/null; fi
+    if command -v systemctl >/dev/null && [ "$(ps -p 1 -o comm=)" = systemd ]; then systemctl restart docker; else docker_service restart; fi
   fi
   echo "GPU: $("$smi" -L | head -1)"
 else
