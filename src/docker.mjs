@@ -49,7 +49,7 @@ export function docker(args, { input, timeout = 120e3 } = {}) {
 export function config() {
   const p = join(home(), 'config.json');
   const c = existsSync(p) ? JSON.parse(readFileSync(p, 'utf8')) : {};
-  return { memory: '2560m', cpus: 3, gpu: true, gpuMemory: '6g', gpuCpus: 4, gpuMemMB: 6144, gpuWaitMinutes: 30, ...c };
+  return { memory: '2560m', cpus: 3, gpu: true, gpuMemory: '6g', gpuCpus: 4, gpuMemMB: 6144, gpuWaitMinutes: 30, testConcurrency: 2, ...c };
 }
 
 // ---------- GPU (phase 3) ----------
@@ -376,6 +376,7 @@ export function dockerHost({ log = () => {} } = {}) {
       } finally { closeSync(fd); }
     },
     gpuConfig: () => { const c = config(); return { memMB: c.gpuMemMB, waitMinutes: c.gpuWaitMinutes }; },
+    testConcurrency: () => config().testConcurrency,
 
     /** argv for an interactive sign-in in a throwaway container with the slot's credentials. */
     loginArgv(slot, vendorArgv) {

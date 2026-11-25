@@ -160,6 +160,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
       started.push(next.id);
       launch(next).catch(e => {
         update(next.id, { state: 'failed', report: `spawn failed: ${e.message}`.slice(0, 600) });
+        cancelAgentTests(next.id, 'failed');
         emit(next.delegator, next.id, 'failed', `${next.id} failed to start: ${e.message}`);
         startQueued(d).catch(() => {});
       });
@@ -285,6 +286,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   }
 
   async function cleanup(a, state) {
+    cancelAgentTests(a.id, state);
     if (a.slot) {
       await host.stopWorker(a.slot, a.id);
       await host.run(a.slot, ['rm', '-rf', a.dir]).catch(() => {});
@@ -460,46 +462,83 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     return { id, round };
   }
 
-  /** A newer report supersedes the agent's gate jobs for other shas: queued ones are cancelled, a running one is killed. Cancelled gates never reach gateResult. */
-  function supersedeGates(agentId, sha) {
-    const old = db.prepare("SELECT id, state FROM tests WHERE agent = ? AND purpose = 'gate' AND state IN ('queued', 'running') AND sha != ?").all(agentId, sha);
-    for (const { id, state } of old) {
-      const report = JSON.stringify({ id, status: 'cancelled', passed: 0, failed: 0, skipped: 0, failures: [], notes: 'superseded by a newer report' });
+  /**
+   * Cancels test jobs: queued ones are marked done/cancelled, running ones too and their container is
+   * stopped. A cancelled job never reaches testReport or gateResult (its late result is discarded).
+   */
+  function cancelTests(rows, notes) {
+    for (const { id, state } of rows) {
+      const report = JSON.stringify({ id, status: 'cancelled', passed: 0, failed: 0, skipped: 0, failures: [], notes });
       db.prepare("UPDATE tests SET state = 'done', report = ?, done_at = ? WHERE id = ?").run(report, now(), id);
       kvDel(db, `gpu:need:${id}`);
       kvDel(db, `gpu:wait:${id}`);
       bus.emit(`test:${id}`);
       if (state === 'running') Promise.resolve(host.killTestJob?.(id)).catch(e => log(`kill test ${id}: ${e.message}`));
     }
+    if (rows.length) pump().catch(e => log(`test pump: ${e.message}`));
+  }
+  /** A newer report supersedes the agent's gate jobs for other shas. */
+  function supersedeGates(agentId, sha) {
+    cancelTests(db.prepare("SELECT id, state FROM tests WHERE agent = ? AND purpose = 'gate' AND state IN ('queued', 'running') AND sha != ?").all(agentId, sha), 'superseded by a newer report');
+  }
+  /** An agent that ended (killed, closed, failed, merged, handed off) gives up all its queued and running test jobs. */
+  function cancelAgentTests(agentId, why) {
+    cancelTests(db.prepare("SELECT id, state FROM tests WHERE agent = ? AND state IN ('queued', 'running')").all(agentId), `agent ${why}`);
   }
 
   const errorReport = (job, notes) => ({ id: job.id, sha: job.sha, status: 'error', passed: 0, failed: 0, skipped: 0, failures: [], duration_s: 0, notes: String(notes).slice(0, 300) });
 
   /**
-   * Two queues, one job each at a time, each job in a fresh container: CPU jobs and GPU jobs
-   * (`--gpus all`). External runners use test.claim (CPU queue only).
+   * Two queues, each job in a fresh container. CPU jobs: up to `testConcurrency` at once (host
+   * setting, default 2), at most one per repo, FIFO otherwise. GPU jobs (`--gpus all`): one at a time.
+   * External runners use test.claim (CPU queue only, same one-per-repo rule).
    */
-  const pumping = { cpu: false, gpu: false };
-  async function pump() { await Promise.all([pumpQueue(false), pumpQueue(true)]); }
-  async function pumpQueue(gpu) {
-    const q = gpu ? 'gpu' : 'cpu';
-    if (pumping[q] || !host.runTestJob) return;
-    pumping[q] = true;
+  const concurrency = () => Math.max(1, Number(host.testConcurrency?.() ?? 2) || 2);
+  const pumping = { gpu: false };
+  async function pump() { pumpCpu(); await pumpGpu(); }
+  function pumpCpu() {
+    if (!host.runTestJob) return;
+    while (db.prepare("SELECT COUNT(*) n FROM tests WHERE state = 'running' AND gpu = 0").get().n < concurrency()) {
+      const t = grab(false);
+      if (!t) break;
+      runJob(jobFor(t)).catch(e => log(`test run ${t.id}: ${e.message}`));
+    }
+  }
+  async function pumpGpu() {
+    if (pumping.gpu || !host.runTestJob) return;
+    pumping.gpu = true;
     try {
       for (;;) {
-        if (gpu && !(await gpuReady())) break;
-        const { job } = await claim({ wait: 0, gpu });
-        if (!job) break;
-        let report;
-        try {
-          const env = job.url.startsWith('https://github.com/') ? await github.gitAuthEnv() : {};
-          report = await host.runTestJob(job, { env });
-        } catch (e) { report = errorReport(job, e.message); }
-        const row = db.prepare('SELECT state, claimed_at FROM tests WHERE id = ?').get(job.id);
-        if (row.state !== 'running' || row.claimed_at !== job.claimed_at) continue; // killed by `gpu pause --now` and requeued
-        await testReport({ id: job.id, report }).catch(e => log(`test report ${job.id}: ${e.message}`));
+        if (!(await gpuReady())) break;
+        const t = grab(true);
+        if (!t) break;
+        await runJob(jobFor(t));
       }
-    } finally { pumping[q] = false; }
+    } finally { pumping.gpu = false; }
+  }
+  /** Runs a claimed job to its report; a job cancelled or requeued meanwhile (`gpu pause --now`) has its result discarded. */
+  async function runJob(job) {
+    let report;
+    try {
+      const env = job.url.startsWith('https://github.com/') ? await github.gitAuthEnv() : {};
+      report = await host.runTestJob(job, { env });
+    } catch (e) { report = errorReport(job, e.message); }
+    const row = db.prepare('SELECT state, claimed_at FROM tests WHERE id = ?').get(job.id);
+    if (row.state === 'running' && row.claimed_at === job.claimed_at) await testReport({ id: job.id, report }).catch(e => log(`test report ${job.id}: ${e.message}`));
+    if (!job.gpu) pumpCpu();
+  }
+
+  /** Dashboard "Run now": starts a queued CPU job at once, past the concurrency limit and the one-per-repo rule. */
+  function testRunNow({ id }) {
+    const t = db.prepare('SELECT * FROM tests WHERE id = ?').get(id);
+    if (!t) throw new Error(`No test ${id}`);
+    if (t.state !== 'queued') throw new Error(`Test ${id} is ${t.state}, not queued`);
+    if (t.gpu) throw new Error('GPU jobs run one at a time; use the GPU queue controls');
+    if (!host.runTestJob) throw new Error('No local test runner');
+    t.claimed_at = now();
+    db.prepare("UPDATE tests SET state = 'running', claimed_at = ? WHERE id = ? AND state = 'queued'").run(t.claimed_at, id);
+    runJob(jobFor(t)).catch(e => log(`test run ${id}: ${e.message}`));
+    return { started: id };
   }
 
   // ---------- GPU queue ----------
@@ -578,23 +617,29 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     return args.gpu ? gpuRequest(req, cfg) : requestTest(req);
   }
 
+  /** Claims the oldest queued job of a queue (CPU: skipping repos that already have a CPU job running). */
+  const grab = (gpu) => tx(db, () => {
+    const t = gpu
+      ? db.prepare("SELECT * FROM tests WHERE state = 'queued' AND gpu = 1 ORDER BY created_at, rowid LIMIT 1").get()
+      : db.prepare("SELECT * FROM tests q WHERE state = 'queued' AND gpu = 0 AND NOT EXISTS (SELECT 1 FROM tests r WHERE r.state = 'running' AND r.gpu = 0 AND r.repo = q.repo) ORDER BY created_at, rowid LIMIT 1").get();
+    if (!t) return null;
+    t.claimed_at = now();
+    db.prepare("UPDATE tests SET state = 'running', claimed_at = ? WHERE id = ?").run(t.claimed_at, t.id);
+    return t;
+  });
+  function jobFor(t) {
+    const a = t.agent ? agentRow(t.agent) : null;
+    return { id: t.id, url: cloneUrl(a || { repo: t.repo }), sha: t.sha, selector: t.selector, timeout_s: t.timeout_s, artifacts: JSON.parse(t.artifacts), gpu: Boolean(t.gpu), claimed_at: t.claimed_at };
+  }
+
   async function claim({ wait = 25, gpu = false } = {}) {
     if (!gpu) kvSet(db, 'runner_seen', Date.now());
-    const grab = () => tx(db, () => {
-      const t = db.prepare("SELECT * FROM tests WHERE state = 'queued' AND gpu = ? ORDER BY created_at LIMIT 1").get(gpu ? 1 : 0);
-      if (!t) return null;
-      t.claimed_at = now();
-      db.prepare("UPDATE tests SET state = 'running', claimed_at = ? WHERE id = ?").run(t.claimed_at, t.id);
-      return t;
-    });
-    let t = grab();
+    let t = grab(gpu);
     if (!t && wait > 0) {
       await new Promise(r => { const timer = setTimeout(r, wait * 1000); bus.once('tests', () => { clearTimeout(timer); r(); }); });
-      t = grab();
+      t = grab(gpu);
     }
-    if (!t) return { job: null };
-    const a = t.agent ? agentRow(t.agent) : null;
-    return { job: { id: t.id, url: cloneUrl(a || { repo: t.repo }), sha: t.sha, selector: t.selector, timeout_s: t.timeout_s, artifacts: JSON.parse(t.artifacts), gpu: Boolean(t.gpu), claimed_at: t.claimed_at } };
+    return { job: t ? jobFor(t) : null };
   }
 
   async function testReport({ id, report }) {
@@ -847,7 +892,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
       await checkGpu(null);
       return gpuRequest({ requester: 'user', ...a }, null);
     },
-    'test.wait': testWait, 'test.get': testGet,
+    'test.wait': testWait, 'test.get': testGet, 'test.run': testRunNow,
     'test.claim': claim, 'test.report': testReport, 'test.heartbeat': () => kvSet(db, 'runner_seen', Date.now()),
     'usage.report': (a, who) => usageReport(who, a),
     'dashboard.token': ({ rotate = false }) => ({ token: dashToken(db, { rotate }), url: publicUrl }),
