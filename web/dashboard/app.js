@@ -439,6 +439,28 @@ function toggleGroup(key) {
   [...document.querySelectorAll('#board .gtoggle')].find(b => b.closest('.group').dataset.key === key)?.focus();
 }
 const ORDER = { blocked: 0, exited: 1, failed: 1, working: 2, spawning: 3, waiting: 4, queued: 5, done: 6 };
+/** Group-heading icon toggles for a delegator's merge gate and auto-merge: original 16 px glyphs, a slash through them when off. */
+const ICONS = {
+  gate: ['M8 1.5 2.8 3.4v4.2c0 3.2 2.2 5.6 5.2 6.9 3-1.3 5.2-3.7 5.2-6.9V3.4z', 'M5.6 8.1l1.7 1.7 3.2-3.4'],
+  automerge: ['M3.5 2.5 8 7v6.5', 'M12.5 2.5 8 7', 'M5.8 11.5 8 13.7l2.2-2.2'],
+};
+function mergeToggle(d, delegator, kind) {
+  const gate = kind === 'gate', on = !!delegator?.[kind];
+  const ns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(ns, 'svg');
+  for (const [k, v] of Object.entries({ viewBox: '0 0 16 16', width: 15, height: 15, fill: 'none', stroke: 'currentColor', 'stroke-width': 1.6, 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true', focusable: 'false' })) svg.setAttribute(k, v);
+  const path = (dd, cls) => { const p = document.createElementNS(ns, 'path'); p.setAttribute('d', dd); if (cls) p.setAttribute('class', cls); svg.append(p); };
+  for (const dd of ICONS[kind]) path(dd);
+  if (!on) path('M2 14 14 2', 'slash');
+  const title = gate
+    ? (on ? 'Merge gate on: click to merge without tests' : 'Merge gate off: click to run tests before merging')
+    : (on ? 'Auto-merge on: click to stop at [ready] and merge yourself' : 'Auto-merge off: click to merge automatically');
+  return h('button', { type: 'button', class: `gset${on ? ' on' : ''}`, 'aria-pressed': String(on), 'aria-label': gate ? 'Merge gate' : 'Auto-merge', title,
+    onclick: () => {
+      if (gate && on && !confirm(`Turn the merge gate off for ${d}? Reports will merge without a test job.`)) return;
+      act('delegator.set', { delegator: d, [kind]: !on }, `${gate ? 'Gate' : 'Auto-merge'} ${on ? 'off' : 'on'} for ${d}`);
+    } }, svg);
+}
 function renderBoard(b) {
   const active = new Map(b.delegators.map(d => [d.id, d]));
   const live = b.agents.filter(a => !a.ended && active.has(a.delegator));
@@ -467,10 +489,8 @@ function renderBoard(b) {
     out.push(h('div', { class: `group${shut ? ' shut' : ''}`, 'data-key': key },
       h('h2', {}, h('button', { class: 'gtoggle', type: 'button', 'aria-expanded': String(!shut), title: toggleTitle, onclick: () => toggleGroup(key) },
         h('span', { class: 'caret', 'aria-hidden': 'true', text: '▾' }), h('span', { class: 'mono', text: repo || 'No repo' }), ' · ', h('span', { class: 'mono', text: d }), shut && !idle ? h('span', { class: 'count', text: ` (${list.length})` }) : null),
-      delegator && !delegator.gate ? h('span', { class: 'tag', title: 'Reports merge without a hauptling test job', text: 'no gate' }) : null,
-      delegator && !delegator.automerge ? h('span', { class: 'tag', title: 'The broker waits for you to merge', text: 'manual merge' }) : null,
-      h('button', { type: 'button', class: 'gset', title: delegator?.gate ? 'Turn the merge gate off: reports merge without a test job' : 'Turn the merge gate on for later reports', onclick: () => act('delegator.set', { delegator: d, gate: !delegator?.gate }, `Gate ${delegator?.gate ? 'off' : 'on'} for ${d}`) }, delegator?.gate ? 'Gate on' : 'Gate off'),
-      h('button', { type: 'button', class: 'gset', title: delegator?.automerge ? 'Turn auto-merge off: the broker stops at [ready]' : 'Turn auto-merge on for later reports', onclick: () => act('delegator.set', { delegator: d, automerge: !delegator?.automerge }, `Auto-merge ${delegator?.automerge ? 'off' : 'on'} for ${d}`) }, delegator?.automerge ? 'Auto-merge on' : 'Auto-merge off')),
+      mergeToggle(d, delegator, 'gate'),
+      mergeToggle(d, delegator, 'automerge')),
       idle
         ? (shut ? null : h('p', { class: 'empty', text: `No agents running · started ${ago(delegator.created_at)} ago${delegator.handoff_waiting ? ' · handoff waiting' : ''}` }))
         : shut
