@@ -3,7 +3,7 @@
 //   node scripts/dash-preview.mjs                 → http://127.0.0.1:8411/ (Ctrl-C to stop)
 //   node scripts/dash-preview.mjs --shots DIR     → screenshots of every view at several sizes, then exits.
 // Screenshots use headless Edge or Chromium: $BROWSER, else msedge.exe (WSL) or chromium on PATH.
-// The fake event stream sends its data and closes (retry: 1 h), so --virtual-time-budget doesn't hang.
+// Each page shows a size label at the bottom left, red if anything sticks out past the right edge.
 import { createServer } from 'node:http';
 import { readFileSync, existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { join, normalize, resolve } from 'node:path';
@@ -51,27 +51,58 @@ const usage = {
 const tables = ['agents', 'events', 'tests', 'gpu_jobs', 'mail', 'usage', 'keys'].map((name, i) => ({ name, rows: (i + 1) * 37 }));
 const screen = { text: Array.from({ length: 40 }, (_, i) => `✓ step ${i}: ${TITLES[i % TITLES.length]}`).join('\n') };
 
-const json = (res, body) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); };
+// The fake data goes into the page itself (stub EventSource and fetch that answer in microtasks), so it is
+// rendered before the load event: headless --screenshot fires then, and --virtual-time-budget hangs on WSL Edge.
+const FAKE = { board, host, usage, tables, screen,
+  history: agents.map(a => ({ ...a, state: 'merged', report: 'Merged after review.' })),
+  table: { offset: 0, total: 3, columns: ['id', 'state', 'repo', 'title'], rows: agents.slice(0, 3).map(a => [a.id, a.state, a.repo, a.title]) } };
+const STUB = `<script>
+const FAKE = ${JSON.stringify(FAKE).replace(/</g, '\\u003c')};
+window.EventSource = class {
+  constructor(url) {
+    this.l = {};
+    if (url !== '/dash/stream') return;
+    queueMicrotask(() => { this.onopen?.(); for (const k of ['board', 'host']) for (const f of this.l[k] || []) f({ data: JSON.stringify(FAKE[k]) }); });
+  }
+  addEventListener(k, f) { (this.l[k] ||= []).push(f); }
+  close() {}
+};
+function route(u) {
+  const p = u.pathname;
+  if (p === '/dash/board') return FAKE.board;
+  if (p === '/dash/usage') return FAKE.usage;
+  if (p === '/dash/history') return FAKE.history;
+  if (p === '/dash/db/tables') return FAKE.tables;
+  if (p === '/dash/db/table') return { name: u.searchParams.get('name'), ...FAKE.table };
+  const m = /^\\/dash\\/agent\\/[\\w.-]+\\/(screen|diff|events)$/.exec(p);
+  if (m) return m[1] === 'screen' ? FAKE.screen : m[1] === 'diff' ? { stat: '', patch: '' } : { events: [] };
+  return null;
+}
+window.fetch = async (url) => {
+  const d = route(new URL(url, location.href));
+  return { ok: d != null, statusText: 'not in the preview', json: async () => d ?? { error: 'not in the preview' } };
+};
+// Size label (bottom left): red when the page or a card, pane or header item sticks out on the right.
+function probe() {
+  const w = innerWidth, sw = document.documentElement.scrollWidth;
+  const out = [...document.querySelectorAll('.top > *, .split > *, .card, .panel, .usage, .split')].filter(e => { const r = e.getBoundingClientRect(); return r.width && r.right > w + 0.5; });
+  const bad = sw > w || out.length;
+  const el = document.getElementById('probe') || document.body.appendChild(Object.assign(document.createElement('div'), { id: 'probe' }));
+  el.textContent = w + '×' + innerHeight + ' · page ' + sw + 'px' + (out.length ? ' · past the right edge: ' + out.slice(0, 3).map(e => e.id ? '#' + e.id : e.className).join(', ') : '');
+  el.style.cssText = 'position:fixed;left:4px;bottom:4px;z-index:9;font:11px monospace;padding:1px 4px;color:#fff;background:' + (bad ? '#c00' : '#060');
+}
+addEventListener('DOMContentLoaded', probe); addEventListener('load', probe); addEventListener('resize', probe);
+</script>`;
+
 const server = createServer((req, res) => {
-  const url = new URL(req.url, 'http://x'), p = url.pathname;
+  const p = new URL(req.url, 'http://x').pathname;
   if (p === '/' || p.startsWith('/web/')) {
     const f = normalize(join(WEB, p === '/' ? 'index.html' : p.slice(5)));
     if (!f.startsWith(WEB) || !existsSync(f)) { res.writeHead(404); return res.end(); }
     res.writeHead(200, { 'content-type': TYPES[f.slice(f.lastIndexOf('.'))] || 'application/octet-stream' });
-    return res.end(readFileSync(f));
+    return res.end(p === '/' ? readFileSync(f, 'utf8').replace('<head>', `<head>\n${STUB}`) : readFileSync(f));
   }
-  if (p === '/dash/stream') {
-    res.writeHead(200, { 'content-type': 'text/event-stream' });
-    return res.end(`retry: 3600000\n\nevent: board\ndata: ${JSON.stringify(board)}\n\nevent: host\ndata: ${JSON.stringify(host)}\n\n`);
-  }
-  if (p === '/dash/board') return json(res, board);
-  if (p === '/dash/usage') return json(res, usage);
-  if (p === '/dash/history') return json(res, agents.map(a => ({ ...a, state: 'merged', report: 'Merged after review.' })));
-  if (p === '/dash/db/tables') return json(res, tables);
-  if (p === '/dash/db/table') return json(res, { name: url.searchParams.get('name'), offset: 0, total: 3, columns: ['id', 'state', 'repo', 'title'], rows: agents.slice(0, 3).map(a => [a.id, a.state, a.repo, a.title]) });
-  const m = /^\/dash\/agent\/[\w.-]+\/(screen|diff|events)$/.exec(p);
-  if (m) return json(res, m[1] === 'screen' ? screen : m[1] === 'diff' ? { stat: '', patch: '' } : { events: [] });
-  res.writeHead(404, { 'content-type': 'application/json' }); res.end('{"error":"not in the preview"}');
+  res.writeHead(404); res.end();
 });
 
 const args = process.argv.slice(2);
@@ -93,7 +124,7 @@ server.listen(port, '127.0.0.1', async () => {
       const out = join(shots, `${name}-${w}x${h}.png`);
       try {
         await promisify(execFile)(browser, ['--headless', '--disable-gpu', '--hide-scrollbars', `--user-data-dir=${winPath(profile)}`, `--window-size=${w},${h}`,
-          '--virtual-time-budget=3000', `--screenshot=${winPath(out)}`, base + hash], { timeout: 60e3 });
+          `--screenshot=${winPath(out)}`, base + hash], { timeout: 60e3 });
         console.log(out);
       } catch (e) { console.error(`${name} ${w}x${h}: ${e.message}`); }
       finally { rmSync(profile, { recursive: true, force: true }); }
