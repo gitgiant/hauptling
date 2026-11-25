@@ -12,7 +12,8 @@ import * as codegraph from './codegraph.mjs';
 /*
  * Where workers run: a fresh Docker container per task.
  *   - clone on the host in ~/.hauptling/work/<agent>, bind-mounted at /work (git stays host-side)
- *   - the slot's credentials dir ~/.hauptling/slots/<slot> mounted at /home/worker/.vendor
+ *   - only the agent's vendor dir(s) from the slot's credentials ~/.hauptling/slots/<slot>/<dir>, mounted at
+ *     /home/worker/.vendor/<dir> (a slot runs one worker per vendor; vendors never see each other's tokens)
  *   - internal network `hauptling-int` (no route out); `hauptling-egress` is the only exit
  *     (CONNECT proxy with allowlist) and relays the broker port to the host
  *   - tmux inside the container runs the vendor TUI; attach with `docker exec -it … tmux attach`
@@ -53,7 +54,7 @@ export function docker(args, { input, timeout = 120e3 } = {}) {
 export function config() {
   const p = join(home(), 'config.json');
   const c = existsSync(p) ? JSON.parse(readFileSync(p, 'utf8')) : {};
-  return { memory: '2560m', cpus: 3, gpu: true, gpuMemory: '6g', gpuCpus: 4, gpuMemMB: 6144, gpuWaitMinutes: 30, testConcurrency: 2, testStallSec: 300, testRetries: 2, ...c };
+  return { memory: '2560m', cpus: 3, gpu: true, gpuMemory: '6g', gpuCpus: 4, gpuMemMB: 6144, gpuWaitMinutes: 30, testConcurrency: 2, maxWorkers: 6, testStallSec: 300, testRetries: 2, ...c };
 }
 
 // ---------- GPU (phase 3) ----------
@@ -272,13 +273,37 @@ async function codexRollout(roots, since) {
   } finally { closeSync(fd); }
 }
 
+/** Each vendor's config dirs inside a slot (and inside a worker, under /home/worker/.vendor). */
+export const VENDOR_DIRS = { claude: ['claude'], codex: ['codex', 'codex-key'], agy: ['gemini'] };
+
 export function slotDir(slot) {
   const d = join(home(), 'slots', slot);
-  for (const v of ['claude', 'codex', 'codex-key', 'gemini']) mkdirSync(join(d, v), { recursive: true });
+  for (const v of Object.values(VENDOR_DIRS).flat()) mkdirSync(join(d, v), { recursive: true });
   return d;
 }
 
+/** `-v` flags mounting only this vendor's dirs from the slot: a codex worker on hl-w2 never sees hl-w2's Claude token. */
+export function vendorMounts(slot, vendor) {
+  const dirs = VENDOR_DIRS[vendor];
+  if (!dirs) throw new Error(`Unknown vendor ${vendor}`);
+  const d = slotDir(slot);
+  return dirs.flatMap(v => ['-v', `${join(d, v)}:/home/worker/.vendor/${v}`]);
+}
+
 // ---------- worker host (what core.mjs drives) ----------
+
+/**
+ * `docker run` args for a task container: its own clone at /work, its own /home/worker (container-local),
+ * and only its vendor's credentials dir(s) from the slot, so workers of other vendors can share the slot.
+ */
+export function workerRunArgs({ slot, id, dir, vendor, env = {}, apiKey = false, mcpFile, image, limits = config() }) {
+  const git = { GIT_AUTHOR_NAME: `hauptling ${slot}`, GIT_AUTHOR_EMAIL: `${slot}@hauptling.local`, GIT_COMMITTER_NAME: `hauptling ${slot}`, GIT_COMMITTER_EMAIL: `${slot}@hauptling.local` };
+  return ['run', '-d', '--name', container(id), '--init', '--user', uid(), '--network', NET,
+    '--memory', String(limits.memory), '--cpus', String(limits.cpus), '--label', `hauptling.agent=${id}`, '--label', `hauptling.slot=${slot}`, '--label', `hauptling.vendor=${vendor}`,
+    '-v', `${dir}:/work`, ...vendorMounts(slot, vendor), '-v', `${mcpFile}:/etc/claude-code/managed-mcp.json:ro`, ...proxyEnv(),
+    ...Object.entries({ ...env, ...(apiKey ? workerKeyEnv(vendor) : {}), ...git }).flatMap(([k, v]) => ['-e', `${k}=${v}`]),
+    image, 'sleep', 'infinity'];
+}
 
 const mcpPath = (id) => join(home(), 'mcp', `${id}.json`);
 
@@ -331,11 +356,7 @@ export function dockerHost({ log = () => {} } = {}) {
       writeFileSync(mcpFile, JSON.stringify(mcp, null, 2));
       if (codegraphCache) codegraph.seed(codegraphCache, dir);
       await docker(['rm', '-f', container(id)]).catch(() => {});
-      await docker(['run', '-d', '--name', container(id), '--init', '--user', uid(), '--network', NET,
-        '--memory', String(c.memory), '--cpus', String(c.cpus), '--label', `hauptling.agent=${id}`, '--label', `hauptling.slot=${slot}`,
-        '-v', `${dir}:/work`, '-v', `${slotDir(slot)}:/home/worker/.vendor`, '-v', `${mcpFile}:/etc/claude-code/managed-mcp.json:ro`, ...proxyEnv(),
-        ...Object.entries({ ...env, ...(apiKey ? workerKeyEnv(vendor) : {}), GIT_AUTHOR_NAME: `hauptling ${slot}`, GIT_AUTHOR_EMAIL: `${slot}@hauptling.local`, GIT_COMMITTER_NAME: `hauptling ${slot}`, GIT_COMMITTER_EMAIL: `${slot}@hauptling.local` }).flatMap(([k, v]) => ['-e', `${k}=${v}`]),
-        image, 'sleep', 'infinity']);
+      await docker(workerRunArgs({ slot, id, dir, vendor, env, apiKey, mcpFile, image, limits: c }));
       // Also installs the repo's dependencies (through the proxy; a failure is noted in the brief, never fatal).
       await exec(id, ['hauptling', 'prepare', vendor, '/work'], { timeout: (INSTALL_TIMEOUT_S + 120) * 1000 });
       if (codegraphCache) {
@@ -469,10 +490,11 @@ export function dockerHost({ log = () => {} } = {}) {
     },
     gpuConfig: () => { const c = config(); return { memMB: c.gpuMemMB, waitMinutes: c.gpuWaitMinutes }; },
     testConcurrency: () => config().testConcurrency,
+    maxWorkers: () => config().maxWorkers,
 
-    /** argv for an interactive sign-in in a throwaway container with the slot's credentials. */
-    loginArgv(slot, vendorArgv) {
-      return dockerArgv(['run', '--rm', '-it', '--init', '--user', uid(), '--network', NET, '-v', `${slotDir(slot)}:/home/worker/.vendor`, ...proxyEnv(), baseImageTag(), ...vendorArgv]);
+    /** argv for an interactive sign-in in a throwaway container with the slot's credentials for this vendor. */
+    loginArgv(slot, vendor, vendorArgv) {
+      return dockerArgv(['run', '--rm', '-it', '--init', '--user', uid(), '--network', NET, ...vendorMounts(slot, vendor), ...proxyEnv(), baseImageTag(), ...vendorArgv]);
     },
   };
 }
