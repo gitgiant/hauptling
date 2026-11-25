@@ -791,8 +791,14 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     return { delegator: d };
   }
 
-  function resume({ delegator, cli }) {
-    const d = delegatorId(delegator);
+  /** `repo`: names this session's repo may go by (path, owner/name); then only that repo's active delegator resumes. */
+  function resume({ delegator, cli, repo }) {
+    let d;
+    if (!delegator && repo) {
+      const names = [repo].flat().filter(Boolean);
+      d = db.prepare(`SELECT id FROM delegators WHERE active = 1 AND repo IN (${names.map(() => '?').join(',')}) ORDER BY created_at DESC LIMIT 1`).get(...names)?.id;
+      if (!d) return { delegator: null, repo: names[0] };
+    } else d = delegatorId(delegator);
     if (cli) db.prepare('UPDATE delegators SET cli = ? WHERE id = ?').run(cli, d);
     const row = db.prepare('SELECT * FROM delegators WHERE id = ?').get(d);
     const pending = db.prepare('SELECT COUNT(*) n FROM events WHERE delegator = ? AND consumed_at IS NULL').get(d).n;

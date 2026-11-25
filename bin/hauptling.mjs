@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { parseArgs } from '../src/util.mjs';
+import { githubSlug, parseArgs } from '../src/util.mjs';
+import { spawnSync } from 'node:child_process';
 
 const USAGE = `hauptling — delegate coding tasks to Claude, Codex and agy workers
 
@@ -10,7 +11,7 @@ Delegator (host): pass --delegator ID on spawn, wait, status, handoff and resume
   delegator start [--repo R] [--cli claude|codex|agy] [--max 3]   new delegator session
   delegator end [--delegator ID]           mark it ended (refused while it has agents)
   delegator list                           all delegators
-  resume [--delegator ID] [--cli C]        state + handoff for a new CLI
+  resume [--repo R | --delegator ID] [--cli C]  state + handoff for a new CLI (--repo: only that repo's delegator)
   handoff <text|--file F>                  store a handoff note
   spawn --brief FILE [--vendor V] [--model M | --mode cheapest|rule] [--difficulty easy|normal|hard]
         [--repo R] [--base B] [--title T] [--test-writer [--test-writer-vendor V] [--test-writer-model M]]
@@ -76,8 +77,11 @@ async function main() {
       return out(`Delegator ${r.id} started. Pass --delegator ${r.id} on every spawn, wait, status, handoff and resume.`);
     }
     case 'resume': {
-      const r = await call('resume', { delegator: args.delegator, cli: args.cli });
+      const names = args.repo ? repoNames(args.repo) : null;
+      const r = await call('resume', { delegator: args.delegator, cli: args.cli, repo: names });
       const d = r.delegator;
+      // Suggest the GitHub owner/name when there is one, so workers get PRs.
+      if (!d) return out(`No active delegator for ${r.repo}. Start one: hauptling delegator start --repo ${names.at(-1)} --cli <claude|codex|agy>`);
       out(`Delegator ${d.id} (${d.repo || 'no default repo'}, max ${d.max_agents} agents), ${r.pendingEvents} unread events.`);
       out(d.handoff ? `Handoff (${d.handoff_at}):\n${d.handoff}` : 'No handoff note.');
       return out(board(r.agents));
@@ -257,6 +261,17 @@ function normalizeRepo(r) {
   if (/^[\w.-]+\/[\w.-]+$/.test(r) && !existsSync(r)) return r;
   if (/^(https?:|git@)/.test(r)) return r;
   return resolve(r);
+}
+
+/** Every name a repo may be stored under: as given (normalized), plus the GitHub owner/name of a local clone's origin. */
+function repoNames(r) {
+  const names = [normalizeRepo(r)];
+  if (existsSync(names[0])) {
+    const url = spawnSync('git', ['-C', names[0], 'remote', 'get-url', 'origin'], { encoding: 'utf8' }).stdout?.trim();
+    const slug = url && githubSlug(url);
+    if (slug) names.push(slug);
+  }
+  return names;
 }
 
 function board(agents) {

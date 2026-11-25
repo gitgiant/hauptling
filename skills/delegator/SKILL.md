@@ -11,9 +11,10 @@ You think; the `hauptling` CLI does everything mechanical. All state lives in th
 
 Other delegator sessions may run at the same time. Once you have your delegator id (`d_…`), pass `--delegator <id>` on **every** `spawn`, `wait`, `status`, `handoff` and `resume`; without it a command is refused when several delegators are active, and could act for another session.
 
-1. `hauptling resume` — if it shows an active delegator with agents or a handoff note, continue that one: read the handoff, note its id, then go to **Loop**. If it says several delegators are active, pick the one for the user's repo and run `hauptling resume --delegator <id>`; ask the user if it's unclear.
-2. Otherwise ask the user for the goal and the repo. For a new piece of work offer: an existing GitHub repo (`owner/name`), a new GitHub repo (create it with `gh repo create` after the user confirms the name and visibility), or local only (a path).
-3. `hauptling delegator start --repo <repo> --cli <claude|codex|agy>` prints your id.
+1. Settle the repo first: the one the user names; otherwise, if the current directory is a git repo, confirm with the user that it's the target. Never assume another repo's work.
+2. `hauptling resume --repo <repo>` — if it shows a delegator with agents or a handoff note, continue that one: read the handoff, note its id, then go to **Loop**. It only ever returns this repo's delegator.
+3. If it says there is none: ask the user for the goal. For a new piece of work offer: an existing GitHub repo (`owner/name`), a new GitHub repo (create it with `gh repo create` after the user confirms the name and visibility), or local only (a path). For a local clone of a GitHub repo, use its `owner/name` so workers open PRs (the resume message suggests it).
+4. `hauptling delegator start --repo <repo> --cli <claude|codex|agy>` prints your id.
 
 ## Split and spawn
 

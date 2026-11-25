@@ -10,6 +10,7 @@ Hauptling delegates coding tasks to Claude, Codex and agy (Antigravity CLI) agen
 - **`hauptling` Node CLI** is its toolbelt for everything mechanical: spawn, mailbox, status, test jobs, GPU lease, handoff, containers.
 - **All state lives in the host store** (SQLite at `~/.hauptling/hauptling.db`, owned only by the host broker), never in a chat. Any delegator can `hauptling resume`.
 - **Several delegators at once** (2026-11-25): each session passes `--delegator <id>` on every delegator command (`spawn`, `wait`, `status`, `handoff`, `resume`); CLI env doesn't survive between an agent's shell calls, so it is a flag. Without the flag a command uses the one active delegator, and is refused when several are active (the error lists them). `hauptling delegator end [--delegator ID]` marks one ended (refused while it has live agents); the skill ends its delegator when the goal is done. `resume` without an id, with several active, lists them so the session picks by repo or asks the user.
+- **A new session resumes only its own repo** (2026-11-25): `/delegator` first settles the repo (the one the user names, else the current directory's git repo, confirmed with the user), then runs `hauptling resume --repo <repo>`. That continues the active delegator for that repo (a local path also matches the GitHub `owner/name` of its `origin`), or reports none so the session starts a new one. It never picks up another repo's delegator.
 - Separate repo, used across repos. New `/delegator` offers: existing GitHub repo, create a new one, or local only.
 
 ## Topology

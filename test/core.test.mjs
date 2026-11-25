@@ -421,3 +421,14 @@ test('clones exclude the brief and pnpm\'s store from git, so `hauptling report`
   const sh = host.calls.find(c => c[1] === 'sh' && String(c[3]).includes('info/exclude'));
   assert.match(sh[3], /printf '%s\\n' \.hauptling\/ \.pnpm-store\/ >> "\$1\/\.git\/info\/exclude"/);
 });
+
+test('resume --repo continues only that repo\'s delegator; another repo\'s session gets none', async () => {
+  const { core } = setup();
+  const { id: space } = await core.call('delegator.start', { repo: '/w/nullpunkt' });
+  const { id: hl } = await core.call('delegator.start', { repo: 'gitgiant/hauptling' });
+  assert.equal((await core.call('resume', { repo: ['/w/nullpunkt'] })).delegator.id, space);
+  assert.equal((await core.call('resume', { repo: ['/w/hauptling', 'gitgiant/hauptling'] })).delegator.id, hl, 'a local clone matches its GitHub owner/name');
+  assert.deepEqual(await core.call('resume', { repo: ['/w/other'] }), { delegator: null, repo: '/w/other' });
+  await core.call('delegator.end', { delegator: hl });
+  assert.equal((await core.call('resume', { repo: ['gitgiant/hauptling'] })).delegator, null, 'ended delegators are not resumed');
+});
