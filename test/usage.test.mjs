@@ -6,7 +6,7 @@ import { openDb } from '../src/db.mjs';
 import { createCore } from '../src/core.mjs';
 import * as keyStore from '../src/keys.mjs';
 import { loadModels } from '../src/models.mjs';
-import { lastTokenCount, normalizeUsage, scrub, statusText } from '../src/usage.mjs';
+import { estimateCost, lastTokenCount, normalizeUsage, scrub, statusText } from '../src/usage.mjs';
 
 // Shapes copied from real payloads (Claude Code and agy status line docs; a Codex 0.172 rollout file).
 const CLAUDE = {
@@ -57,6 +57,12 @@ test('usage: Codex rollout tail → last token_count; cost estimated from models
   assert.deepEqual(u.limits.map(l => [l.window, l.used_pct]), [['5h', 1], ['week', 73]]);
   assert.equal(normalizeUsage('codex', p, { usd_in: null, usd_out: null }).cost_usd, null, 'unknown price → unknown cost');
   assert.equal(lastTokenCount('{"type":"session_meta"}\n'), null);
+});
+
+test('usage: estimate Codex cost using a shipped models.json price', () => {
+  const cfg = loadModels(join(tmpdir(), 'none.json'));
+  const luna = cfg.vendors.codex.models.find(model => model.id === 'gpt-6-luna');
+  assert.equal(estimateCost(luna, 1_000_000, 1_000_000), 0.6);
 });
 
 /** `keys`: { key, budget } stands in for ~/.hauptling/keys (none by default). */
