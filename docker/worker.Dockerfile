@@ -10,9 +10,9 @@ RUN apt-get update \
 RUN corepack enable \
  && npm install -g --no-audit --no-fund @anthropic-ai/claude-code @openai/codex @colbymchenry/codegraph \
  && npm cache clean --force
-COPY agy /usr/local/bin/agy
+COPY --chmod=0755 agy /usr/local/bin/agy
 COPY hauptling /opt/hauptling
-RUN chmod 0755 /usr/local/bin/agy /opt/hauptling/bin/hauptling.mjs \
+RUN chmod 0755 /opt/hauptling/bin/hauptling.mjs \
  && chmod -R a+rX /opt/hauptling \
  && ln -s /opt/hauptling/bin/hauptling.mjs /usr/local/bin/hauptling \
  && node -e "import('/opt/hauptling/src/vendors.mjs').then(m => m.writeManagedFiles())" \
