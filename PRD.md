@@ -175,7 +175,7 @@ Phases 2–4 get their own grill at phase start.
 ### Phase 1 decisions
 
 - **Code**: plain ESM `.mjs`, JSDoc, `node:test`, no build. Install: clone, then `install.sh` (Linux) or `install.cmd` (Windows, hands over to `install.sh` in WSL).
-- **Broker**: sole owner of the SQLite store, auto-spawned detached by any `hauptling` command (`hauptling broker start|stop|status`), listening on 127.0.0.1. Workers' `hauptling` is an HTTP client with per-agent tokens. The broker acts as worker users through a sudoers rule limited to them. (An earlier design ran the broker on Windows with an SSH tunnel into WSL; dropped as brittle.)
+- **Broker**: sole owner of the SQLite store, auto-spawned detached by any `hauptling` command (`hauptling broker start|stop|restart|status`), listening on 127.0.0.1. Workers' `hauptling` is an HTTP client with per-agent tokens. The broker acts as worker users through a sudoers rule limited to them. (An earlier design ran the broker on Windows with an SSH tunnel into WSL; dropped as brittle.)
 - **Slots**: one Linux user per slot (`hl-w1`…), 3 per delegator by default (`hauptling setup --slots N`), plus `hl-test` for test jobs. Each slot signs in to each vendor once (`hauptling login <slot> <vendor>`). Hooks are user-level in each slot; target repos are never modified.
 - **Spawn**: `hauptling spawn --brief brief.md [--vendor] [--model] [--repo] [--base] [--test-writer]` clones into the slot's home, makes the branch, starts the TUI in tmux and sends "Read your brief: <path>". The worker ends with `hauptling report "<≤300 chars>"`.
 - **Delegator**: `hauptling wait` blocks (zero tokens) and returns the next event (report, blocked, test result, merged, failure).

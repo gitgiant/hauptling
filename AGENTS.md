@@ -7,7 +7,7 @@ Design and every decision: `PRD.md`. Current state and open items: `HANDOFF.md` 
 - Plain ESM `.mjs`, JSDoc, `node:test` (`npm test`), no build step, no npm dependencies. The dashboard is vanilla JS in `web/dashboard/`.
 - Record decisions in `PRD.md` before building. Design interviews: one question per message, lettered options and a recommendation.
 - Work on a branch; fast-forward `main` when the user says "merge to main".
-- Code that runs inside workers (`vendors.mjs` prepare, `runner.mjs`, the CLI) is baked into the worker image: after changing it, run `hauptling image`, then `hauptling broker stop` (the next command restarts the broker).
+- Code that runs inside workers (`vendors.mjs` prepare, `runner.mjs`, the CLI) is baked into the worker image: after changing it, run `hauptling image`, then `hauptling broker restart`.
 
 ## Gotchas on this host (WSL2)
 

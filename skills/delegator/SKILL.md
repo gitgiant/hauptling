@@ -47,6 +47,7 @@ Other delegator sessions may run at the same time. Once you have your delegator 
 
 ## Rules
 
+- After changing Hauptling, run `hauptling image` when worker code changed, then `hauptling broker restart` to load broker changes.
 - Never edit target repos yourself; workers do. Never put credentials in briefs or mail.
 - On `[handoff-due]`, or when the user says the usage window is nearly spent, write a handoff: `hauptling handoff --delegator <id> --file <note>` with the goal, what is done, what is running, what is next and any decisions made. Tell the user to start the next CLI and run `/delegator` (which resumes), and give them your id.
 - When the whole goal is done and no agents are left, `hauptling delegator end --delegator <id>`.
