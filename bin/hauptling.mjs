@@ -21,6 +21,7 @@ Delegator (host): pass --delegator ID on spawn, wait, status, handoff and resume
   status [--all]                           agents of the current delegator
   models                                   models.json table (suggest mode reasons over this)
   models prefer [cheap|balanced|best]      show or set the highest tier workers may use (spawn --allow-tier overrides)
+  pause AGENT | unpause AGENT | restart AGENT
   attach AGENT | reply AGENT <text> | kill AGENT | merge AGENT   (merge: local repos, or when automerge is off)
   test request --sha S [--selector X] [--gpu] [--timeout S] | test wait ID | test get ID | test report ID FILE
   dashboard [--print] [--host H] [--new-token]  open the dashboard (--print: show the sign-in link; --host: link via H, e.g. your Tailscale name)
@@ -131,7 +132,7 @@ async function main() {
       return;
     }
     case 'reply': { const [agent, ...t] = args._; return out(await call('reply', { agent, text: t.join(' ') })); }
-    case 'kill': return out(await call('kill', { agent: args._[0] }));
+    case 'pause': case 'unpause': case 'restart': case 'kill': return out(await call(cmd, { agent: args._[0] }));
     case 'merge': return out(await call('merge', { agent: args._[0] }));
 
     // ----- worker -----

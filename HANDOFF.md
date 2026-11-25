@@ -2,8 +2,8 @@
 
 ## Needs a real run to confirm
 
+- Agent lifecycle controls passed stubbed tests. A Docker host is still needed to verify freeze/unfreeze, vendor session resume and container recreation from the existing clone, and to rebuild the worker image and restart the broker.
 - Test recovery and external-merge cancellation were tested with a fake host. The live broker still needs to run the updated code.
-
 - Broker not restarted since `cli-fixes`: header CPU/Mem/GPU graphs, card headlines, usage chips and the CodeGraph launch path go live after `hauptling broker stop` (a test job was running, so it was left up).
 - CodeGraph with a real task: whether agents (and their subagents) actually use it; first-index time on a large repo (nullpunkt). The container path itself is verified (index 3 s / 1 s from cache on this repo, no MCP prompt, repo `.mcp.json` ignored).
 - Token economy changed worker code (`src/vendors.mjs` turns Claude plugins off in the slot): run `hauptling image`, then `hauptling broker stop`.

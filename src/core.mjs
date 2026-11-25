@@ -19,7 +19,12 @@ import * as keyStore from './keys.mjs';
  * `call(name, args, who)` is the whole API; who = {role: admin|agent|runner, agent?}.
  */
 
-const ACTIVE = ['spawning', 'working', 'blocked', 'done'];
+const PAUSABLE = ['working', 'blocked', 'done'];
+const ACTIVE = ['spawning', 'restarting', 'paused', ...PAUSABLE];
+const TEST_ELIGIBLE = "NOT EXISTS (SELECT 1 FROM agents a WHERE a.id = q.agent AND a.state IN ('paused','restarting'))";
+const START_PROMPT = 'Read your brief at .hauptling/brief.md and carry it out.';
+const RESTART_PREAMBLE = 'You were restarted; continue from the current state of the branch and working tree.';
+const RESUME_PROMPT = 'Continue the task from the current state of the branch and working tree.';
 const ENDED = ['merged', 'killed', 'closed', 'handed-off'];
 /** Paths added to every clone's .git/info/exclude: Hauptling's own files and caches tools write into the clone. */
 // node_modules/: prepare installs dependencies into the clone (vendors.mjs installDeps); a repo that doesn't ignore it must not get it committed.
@@ -31,6 +36,8 @@ const HANDOFF_PCT = 85;
 const WORKER_RULES = readFileSync(new URL('../prompts/worker-rules.md', import.meta.url), 'utf8').trim();
 
 export function createCore({ db, host, github, notify = () => false, models = loadModels, savePrefer = setPrefer, keys = keyStore, workerUrl, publicUrl = workerUrl, runnerToken, log = () => {}, stallMinutes = Number(process.env.HAUPTLING_STALL_MINUTES || 10), idleMinutes = Number(process.env.HAUPTLING_IDLE_MINUTES || 15) }) {
+  const changing = new Set();
+  const merging = new Set();
   const bus = new EventEmitter();
   bus.setMaxListeners(0);
   const agentRow = (id) => db.prepare('SELECT * FROM agents WHERE id = ?').get(id);
@@ -305,15 +312,24 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     }
   }
 
-  async function launch(a) {
-    const cfg = models();
-    const entry = findModel(cfg, a.vendor, a.model);
+  async function cloneWorker(a, { restart = false } = {}) {
     await host.run(a.slot, ['rm', '-rf', a.dir]);
     await host.run(a.slot, ['mkdir', '-p', host.workRoot]);
     await host.run(a.slot, ['git', 'clone', '--quiet', cloneUrl(a), a.dir], { env: await authEnv(a) });
     let base = a.base;
     if (!base) base = await git(a, ['rev-parse', '--abbrev-ref', 'HEAD']);
-    await git(a, ['checkout', '--quiet', '-B', a.branch, `origin/${a.start_from || base}`]);
+    let from = `origin/${a.start_from || base}`;
+    if (restart) {
+      const branch = await git(a, ['branch', '--remotes', '--list', `origin/${a.branch}`]);
+      if (branch) from = `origin/${a.branch}`;
+    }
+    await git(a, ['checkout', '--quiet', '-B', a.branch, from]);
+    return { ...a, base };
+  }
+
+  async function workerOptions(a, { restart = false, newClone = !restart } = {}) {
+    const cfg = models();
+    const entry = findModel(cfg, a.vendor, a.model);
     // Inside the clone (auto modes don't read outside the workspace), excluded from git.
     const briefPath = `${a.dir}/.hauptling/brief.md`;
     const repoCfg = await repoConfig(a);
@@ -324,25 +340,41 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     }
     const { config: mcp, missing } = codegraph.mcpConfig({ codegraph: cg, repoCfg, repoMcp });
     if (missing.length) emit(a.delegator, a.id, 'mcp-missing', `hauptling.json "mcp" names servers not in .mcp.json: ${missing.join(', ')}`);
-    const withBase = { ...a, base, codegraph: cg };
+    const brief = briefText({ ...a, codegraph: cg });
     // Kept out of git (and so out of commitFor's `add -A`): the brief, and pnpm's store, which pnpm puts in /work
     // because the clone is a different mount from the worker's home.
-    await host.run(a.slot, ['sh', '-c', `mkdir -p "$(dirname "$0")" && cat > "$0" && printf '%s\\n' ${CLONE_EXCLUDES.join(' ')} >> "$1/.git/info/exclude"`, briefPath, a.dir], { input: briefText(withBase) });
-    const prompt = 'Read your brief at .hauptling/brief.md and carry it out.';
-    await host.startWorker({ slot: a.slot, id: a.id, dir: a.dir, vendor: a.vendor, apiKey: a.billing === 'api', argv: launchArgv(cfg, a.vendor, entry, prompt, a.effort),
+    const exclude = `printf '%s\\n' ${CLONE_EXCLUDES.join(' ')} >> "$1/.git/info/exclude"`;
+    await host.run(a.slot, ['sh', '-c', `mkdir -p "$(dirname "$0")" && cat > "$0"${newClone ? ` && ${exclude}` : ''}`, briefPath, a.dir],
+      { input: restart ? `${RESTART_PREAMBLE}\n\n${brief}` : brief });
+    const prompt = restart ? `${RESTART_PREAMBLE}\n${START_PROMPT}` : START_PROMPT;
+    const argv = launchArgv(cfg, a.vendor, entry, prompt, a.effort);
+    const args = argv.filter(arg => arg !== prompt);
+    let resumeArgv;
+    if (restart && a.session_id) {
+      if (a.vendor === 'claude') resumeArgv = [...args, '--resume', a.session_id, RESUME_PROMPT];
+      if (a.vendor === 'codex') resumeArgv = [args[0], 'resume', ...args.slice(1), a.session_id, RESUME_PROMPT];
+    }
+    return { slot: a.slot, id: a.id, dir: a.dir, vendor: a.vendor, apiKey: a.billing === 'api', argv, resumeArgv,
       mcp, codegraphCache: cg ? codegraph.cacheDir(a.repo) : null,
-      env: { HAUPTLING_AGENT: a.id, HAUPTLING_TOKEN: a.token, HAUPTLING_BROKER: workerUrl } });
-    update(a.id, { state: 'working', base, idle: 0, usage_start: JSON.stringify(windowSnapshot(db, a.vendor)) });
+      env: { HAUPTLING_AGENT: a.id, HAUPTLING_TOKEN: a.token, HAUPTLING_BROKER: workerUrl } };
+  }
+
+  async function launch(a) {
+    a = await cloneWorker(a);
+    await host.startWorker(await workerOptions(a));
+    update(a.id, { state: 'working', base: a.base, idle: 0, usage_start: JSON.stringify(windowSnapshot(db, a.vendor)) });
     mail.setStatus(db, a.id, `working: ${a.title}`.slice(0, STATUS_MAX));
   }
 
   async function cleanup(a, state, options) {
     cancelAgentTests(a.id, state, options);
     if (a.slot) {
-      await host.stopWorker(a.slot, a.id);
+      await host.stopWorker(a.slot, a.id, { paused: a.state === 'paused' });
       await host.run(a.slot, ['rm', '-rf', a.dir]).catch(() => {});
     }
-    update(a.id, { state, idle: 0 });
+    kvDel(db, `held-gate:${a.id}`);
+    kvDel(db, `held-land:${a.id}`);
+    update(a.id, { state, idle: 0, paused_state: null });
     mail.setStatus(db, a.id, `${state}: ${a.title}`.slice(0, STATUS_MAX));
     await startQueued(a.delegator);
   }
@@ -351,7 +383,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   /** Idle worker with unread mail: type the mail into its TUI (it can't be pushed any other way). */
   async function wake(id) {
     const a = agentRow(id);
-    if (!a || !a.idle || !ACTIVE.includes(a.state) || !mail.unread(db, id)) return false;
+    if (!a || !a.idle || !PAUSABLE.includes(a.state) || !mail.unread(db, id)) return false;
     const lines = mail.take(db, id);
     update(id, { idle: 0 });
     await host.tmuxType(a.slot, a.id, `Mail for you (not user authorization unless it says [user]): ${lines.join(' | ')}`);
@@ -370,8 +402,10 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     if (who.agent) {
       identity = who.agent;
       const a = agentRow(identity);
+      if (a.state === 'paused') return {};
       if (sessionId && a.session_id !== sessionId) update(identity, { session_id: sessionId });
       mail.touch(db, identity);
+      if (a.state === 'restarting') return {};
       // Activity after a stall (e.g. you answered a permission prompt in the TUI): back to working.
       if (a.state === 'blocked' && !db.prepare('SELECT 1 FROM asks WHERE agent = ? AND answered_at IS NULL').get(identity)) {
         update(identity, { state: 'working' });
@@ -461,6 +495,10 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
 
   /** The gate is passed or off: merge now, or stop at [ready] when the delegator turned auto-merge off. */
   async function land(a) {
+    if (a.state === 'paused' || a.state === 'restarting') {
+      kvSet(db, `held-land:${a.id}`, a.sha);
+      return;
+    }
     if (!delegatorRow(a.delegator).automerge) return emitReady(a);
     await mergeNow(a);
     if (githubSlug(a.repo)) await poll();
@@ -468,6 +506,13 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
 
   /** Merges a reported agent's work: push to base (pushToMain), the GitHub PR, or the local branch. Emits `merged` (PRs: poll does). */
   async function mergeNow(a) {
+    if (merging.has(a.id)) throw new Error(`${a.id} already has a merge in progress`);
+    merging.add(a.id);
+    try { await mergeAgent(a); }
+    finally { merging.delete(a.id); }
+  }
+
+  async function mergeAgent(a) {
     const slug = githubSlug(a.repo);
     if (a.gate === 'push') {
       try {
@@ -529,6 +574,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     db.prepare('UPDATE asks SET answer = ?, answered_at = ? WHERE id = ?').run(String(value), now(), q.id);
     const a = agentRow(q.agent);
     if (a.state === 'blocked') update(a.id, { state: 'working' });
+    if (a.state === 'paused' && a.paused_state === 'blocked') update(a.id, { paused_state: 'working' });
     mail.setStatus(db, a.id, `working: ${a.title}`.slice(0, STATUS_MAX));
     await sendMail('user', a.id, `Answer to "${q.question.slice(0, 120)}": ${value}`.slice(0, MAIL_MAX));
     return { answered: value };
@@ -550,7 +596,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     const id = `t_${hex(4)}`;
     db.prepare(`INSERT INTO tests (id, agent, requester, repo, sha, branch, selector, gpu, artifacts, timeout_s, round, purpose, state, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)`).run(id, a?.id ?? null, requester, repo || a.repo, sha, branch || a?.branch || null, selector, gpu ? 1 : 0, JSON.stringify(artifacts), Number(timeout_s), round, purpose, now());
-    if (a && round >= 3) {
+    if (a && round >= 3 && PAUSABLE.includes(a.state)) {
       const q = `${a.id} is on test round ${round}. Keep iterating?`;
       update(a.id, { state: 'blocked' });
       mail.setStatus(db, a.id, `blocked: test round ${round}`);
@@ -632,6 +678,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     const t = db.prepare('SELECT * FROM tests WHERE id = ?').get(id);
     if (!t) throw new Error(`No test ${id}`);
     if (t.state !== 'queued') throw new Error(`Test ${id} is ${t.state}, not queued`);
+    if (t.agent && ['paused', 'restarting'].includes(agentRow(t.agent)?.state)) throw new Error(`Agent ${t.agent} is paused or restarting`);
     if (t.gpu) throw new Error('GPU jobs run one at a time; use the GPU queue controls');
     if (!host.runTestJob) throw new Error('No local test runner');
     t.claimed_at = now();
@@ -642,7 +689,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
 
   // ---------- GPU queue ----------
   const gpuCfg = () => ({ memMB: 6144, waitMinutes: 30, ...host.gpuConfig?.() });
-  const nextGpuJob = () => db.prepare("SELECT * FROM tests WHERE state = 'queued' AND gpu = 1 ORDER BY created_at LIMIT 1").get();
+  const nextGpuJob = () => db.prepare(`SELECT q.* FROM tests q WHERE q.state = 'queued' AND q.gpu = 1 AND ${TEST_ELIGIBLE} ORDER BY q.created_at, q.rowid LIMIT 1`).get();
 
   /**
    * May the next GPU job start? Not while paused. Otherwise it needs enough free VRAM (your desktop
@@ -656,6 +703,8 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
       if (!t) return true;
       const need = Number(kvGet(db, `gpu:need:${t.id}`) || gpuCfg().memMB);
       const free = await host.gpuFreeMB?.().catch(() => null);
+      if (kvGet(db, 'gpu:paused')) return false;
+      if (nextGpuJob()?.id !== t.id) continue;
       if (free == null || free >= need) { kvDel(db, `gpu:wait:${t.id}`); return true; }
       const since = Number(kvGet(db, `gpu:wait:${t.id}`) || 0);
       if (!since) { kvSet(db, `gpu:wait:${t.id}`, at); log(`gpu busy: ${free} MiB free, ${t.id} needs ${need}`); return false; }
@@ -723,8 +772,8 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   /** Claims the oldest queued job of a queue (CPU: skipping repos that already have a CPU job running). */
   const grab = (gpu) => tx(db, () => {
     const t = gpu
-      ? db.prepare("SELECT * FROM tests WHERE state = 'queued' AND gpu = 1 ORDER BY created_at, rowid LIMIT 1").get()
-      : db.prepare("SELECT * FROM tests q WHERE state = 'queued' AND gpu = 0 AND NOT EXISTS (SELECT 1 FROM tests r WHERE r.state = 'running' AND r.gpu = 0 AND r.repo = q.repo) ORDER BY created_at, rowid LIMIT 1").get();
+      ? nextGpuJob()
+      : db.prepare(`SELECT q.* FROM tests q WHERE q.state = 'queued' AND q.gpu = 0 AND ${TEST_ELIGIBLE} AND NOT EXISTS (SELECT 1 FROM tests r WHERE r.state = 'running' AND r.gpu = 0 AND r.repo = q.repo) ORDER BY q.created_at, q.rowid LIMIT 1`).get();
     if (!t) return null;
     t.claimed_at = now();
     db.prepare("UPDATE tests SET state = 'running', claimed_at = ? WHERE id = ?").run(t.claimed_at, t.id);
@@ -761,7 +810,11 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   }
 
   async function gateResult(a, t, r) {
-    if (a.sha !== t.sha) return; // superseded by a newer report
+    if (a.sha !== t.sha || ENDED.includes(a.state)) return;
+    if (['paused', 'restarting'].includes(a.state)) {
+      kvSet(db, `held-gate:${a.id}`, t.id);
+      return;
+    }
     const summary = `${r.status}: ${r.passed} passed, ${r.failed} failed${r.failures?.length ? ` — ${r.failures.slice(0, 2).map(f => f.test_id).join('; ')}` : ''}`;
     if (r.status !== 'pass') {
       update(a.id, { state: 'working' });
@@ -772,7 +825,10 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     if (!t.gpu) {
       // Per-repo opt-in ("gateGpu": true): the GPU command must pass too before merging.
       const cfg = await repoConfig(a);
-      if (cfg.gateGpu && Array.isArray(cfg.gpu) && await host.gpuAvailable?.()) {
+      const gpu = cfg.gateGpu && Array.isArray(cfg.gpu) && await host.gpuAvailable?.();
+      const current = agentRow(a.id);
+      if (current.state !== a.state || current.sha !== t.sha) return gateResult(current, t, r);
+      if (gpu) {
         gpuRequest({ agent: a.id, requester: 'hauptling', sha: t.sha, purpose: 'gate' }, cfg);
         mail.setStatus(db, a.id, 'gate: waiting for GPU');
         emit(a.delegator, a.id, 'gate-cpu-passed', `${a.id} gate tests ${summary}; GPU gate queued`);
@@ -824,13 +880,110 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     return rows.map(({ token: _t, brief: _b, ...r }) => ({ ...r, status: db.prepare('SELECT text FROM status WHERE identity = ?').get(r.id)?.text || null }));
   }
 
-  async function kill({ agent }) {
+  async function lifecycle(agent, change) {
     const a = mustAgent(agent);
+    if (changing.has(a.id) || merging.has(a.id)) throw new Error(`${a.id} already has a lifecycle action in progress`);
+    changing.add(a.id);
+    try { return await change(a); }
+    finally { changing.delete(a.id); }
+  }
+
+  function refreshAgent(a, state, idle = a.idle) {
+    update(a.id, { state, idle, paused_state: null });
+    mail.touch(db, a.id);
+    mail.setStatus(db, a.id, `${state}: ${a.title}`.slice(0, STATUS_MAX));
+  }
+
+  async function releaseHeldWork(id) {
+    const key = `held-gate:${id}`;
+    const gateId = kvGet(db, key);
+    if (gateId) {
+      kvDel(db, key);
+      const t = testGet({ id: gateId });
+      await gateResult(agentRow(id), t, t.report).catch(e => log(`held gate ${id}: ${e.message}`));
+    }
+    const landKey = `held-land:${id}`;
+    const sha = kvGet(db, landKey);
+    if (sha) {
+      kvDel(db, landKey);
+      const a = agentRow(id);
+      if (a.sha === sha && !ENDED.includes(a.state)) await land(a).catch(e => log(`held merge ${id}: ${e.message}`));
+    }
+    bus.emit('tests');
+    pump().catch(e => log(`test pump: ${e.message}`));
+  }
+
+  const pause = ({ agent }) => lifecycle(agent, async a => {
+    if (a.state === 'paused') return { paused: a.id };
+    if (!a.slot || !PAUSABLE.includes(a.state)) throw new Error(`${a.id} is ${a.state}; no worker to pause`);
+    update(a.id, { state: 'paused', paused_state: a.state });
+    try { await host.pauseWorker(a.slot, a.id); }
+    catch (e) {
+      update(a.id, { state: a.state, paused_state: null });
+      await releaseHeldWork(a.id);
+      throw e;
+    }
+    emit(a.delegator, a.id, 'paused', `${a.id} paused`);
+    return { paused: a.id };
+  });
+
+  const unpause = ({ agent }) => lifecycle(agent, async a => {
+    if (a.state !== 'paused') throw new Error(`${a.id} is ${a.state}; only paused workers can resume`);
+    await host.unpauseWorker(a.slot, a.id);
+    update(a.id, { state: agentRow(a.id).paused_state, paused_state: null });
+    mail.touch(db, a.id);
+    await releaseHeldWork(a.id);
+    await wake(a.id).catch(e => log(`wake ${a.id}: ${e.message}`));
+    emit(a.delegator, a.id, 'resumed', `${a.id} resumed`);
+    return { resumed: a.id };
+  });
+
+  const restart = ({ agent }) => lifecycle(agent, async a => {
+    if (![...PAUSABLE, 'paused', 'exited', 'failed', 'restarting'].includes(a.state) || !a.dir) throw new Error(`${a.id} is ${a.state}; no worker to restart`);
+    const used = new Set(db.prepare(`SELECT slot FROM agents WHERE id != ? AND state IN (${ACTIVE.map(() => '?').join(',')})`).all(a.id, ...ACTIVE).map(r => r.slot));
+    const slot = a.slot && !used.has(a.slot) ? a.slot : slots().find(s => !used.has(s));
+    if (!slot) throw new Error('No free worker slot');
+    update(a.id, { state: 'restarting', slot, idle: 0 });
+    let newClone = false;
+    let attempted = false;
+    try {
+      // Work normally lives in a host bind mount, which survives container removal.
+      try { await git(a, ['rev-parse', '--is-inside-work-tree']); }
+      catch (e) {
+        const exists = await host.run(a.slot, ['test', '-e', a.dir]).then(() => true, () => false);
+        if (exists) throw e;
+        a = await cloneWorker(a, { restart: true });
+        newClone = true;
+      }
+      const options = await workerOptions({ ...a, slot }, { restart: true, newClone });
+      if (a.slot !== slot) options.resumeArgv = undefined; // vendor sessions are stored in the original slot
+      update(a.id, { session_id: null });
+      attempted = true;
+      const reused = a.slot === slot && await host.restartWorker(options);
+      if (!reused) await host.startWorker(options);
+    } catch (e) {
+      if (!attempted) {
+        update(a.id, { state: a.state, slot: a.slot, idle: a.idle, session_id: a.session_id });
+        if (a.state !== 'paused') await releaseHeldWork(a.id);
+      } else {
+        refreshAgent(a, 'exited', 0);
+        if (!agentRow(a.id).session_id) update(a.id, { session_id: a.session_id });
+      }
+      throw e;
+    }
+    update(a.id, { base: a.base });
+    refreshAgent(a, 'working', 0);
+    emit(a.delegator, a.id, 'restarted', `${a.id} restarted`);
+    await releaseHeldWork(a.id);
+    return { restarted: a.id };
+  });
+
+  const kill = ({ agent }) => lifecycle(agent, async a => {
     await cleanup(a, 'killed');
     const waiting = db.prepare("SELECT id FROM agents WHERE depends_on = ? AND state = 'waiting'").get(a.id);
     emit(a.delegator, a.id, 'killed', `${a.id} killed${waiting ? `; ${waiting.id} still waits for spec tests (kill it too, or spawn a new test writer)` : ''}`);
     return { killed: a.id };
-  }
+  });
 
   /** Manual merge, for when auto-merge is off (or local repos): needs a passing gate test unless the gate is off or GitHub's own checks gate it. */
   async function merge({ agent }) {
@@ -854,9 +1007,18 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   const PROMPT = /(Run this command\?|Allow this|Do you want to|Requesting permission|\(y\/n\)|Approve|Press enter to continue)/i;
   async function watch(at = Date.now()) {
     for (const a of db.prepare("SELECT a.*, i.seen_at FROM agents a JOIN identities i ON i.identity = a.id WHERE a.state IN ('working','blocked') AND a.slot IS NOT NULL").all()) {
+      const unchanged = () => {
+        const current = agentRow(a.id);
+        const seen = db.prepare('SELECT seen_at FROM identities WHERE identity = ?').get(a.id)?.seen_at;
+        return !changing.has(a.id) && current.state === a.state && current.updated_at === a.updated_at && seen === a.seen_at;
+      };
       try {
-        if (!(await host.tmuxAlive(a.slot, a.id))) {
+        if (!unchanged()) continue;
+        const alive = await host.tmuxAlive(a.slot, a.id);
+        if (!unchanged()) continue;
+        if (!alive) {
           const tail = (await host.tmuxCapture?.(a.slot, a.id, 8).catch(() => '') || '').trim().split('\n').slice(-3).join(' | ');
+          if (!unchanged()) continue;
           update(a.id, { state: 'exited', idle: 0 });
           mail.setStatus(db, a.id, `exited: ${a.title}`.slice(0, STATUS_MAX));
           emit(a.delegator, a.id, 'exited', `${a.id} TUI exited${tail ? `: ${tail}` : ''}. \`hauptling attach ${a.id}\` to look, \`hauptling kill ${a.id}\` to free its slot.`);
@@ -867,8 +1029,9 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
           // Ended its turn without `hauptling report` (e.g. asked a question in plain text).
           if (at - Date.parse(a.seen_at) < idleMinutes * 60e3) continue;
           if (kvGet(db, `stall:${a.id}`) === a.seen_at) continue; // already notified this idle period
-          kvSet(db, `stall:${a.id}`, a.seen_at);
           const screen = await host.tmuxCapture?.(a.slot, a.id, 25).catch(() => '') || '';
+          if (!unchanged()) continue;
+          kvSet(db, `stall:${a.id}`, a.seen_at);
           const tail = screen.split('\n').map(l => l.trim()).filter(Boolean).slice(-3).join(' | ');
           update(a.id, { state: 'blocked' });
           mail.setStatus(db, a.id, 'blocked: idle without report');
@@ -878,8 +1041,9 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
         }
         if (a.state !== 'working' || a.idle || at - Date.parse(a.seen_at) < stallMinutes * 60e3) continue;
         if (kvGet(db, `stall:${a.id}`) === a.seen_at) continue; // already reported this stall
-        kvSet(db, `stall:${a.id}`, a.seen_at);
         const screen = await host.tmuxCapture?.(a.slot, a.id, 25).catch(() => '') || '';
+        if (!unchanged()) continue;
+        kvSet(db, `stall:${a.id}`, a.seen_at);
         const prompt = PROMPT.test(screen);
         const why = prompt ? `waiting on a ${a.vendor} permission prompt` : `no activity for ${stallMinutes} min`;
         update(a.id, { state: 'blocked' });
@@ -900,8 +1064,16 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
       try {
         const slug = githubSlug(a.repo);
         const pr = await github.prView(slug, a.pr_number);
-        if (pr.state === 'MERGED') { await cleanup(a, 'merged', { resumeQueue: false }); emit(a.delegator, a.id, 'merged', `${a.id} merged: ${a.pr_url}`); continue; }
-        if (pr.state === 'CLOSED') { await cleanup(a, 'closed', { resumeQueue: false }); emit(a.delegator, a.id, 'closed', `${a.id} PR closed without merge`); continue; }
+        if (changing.has(a.id) || agentRow(a.id).state !== a.state) continue;
+        if (pr.state === 'MERGED' || pr.state === 'CLOSED') {
+          const state = pr.state.toLowerCase();
+          await lifecycle(a.id, async current => {
+            await cleanup(current, state, { resumeQueue: false });
+            const message = state === 'merged' ? `merged: ${a.pr_url}` : 'PR closed without merge';
+            emit(a.delegator, a.id, state, `${a.id} ${message}`);
+          });
+          continue;
+        }
         const failed = (pr.statusCheckRollup || []).filter(c => ['FAILURE', 'ERROR', 'TIMED_OUT', 'CANCELLED'].includes(c.conclusion || c.state));
         if (failed.length && a.ci_note !== pr.headRefOid) {
           update(a.id, { ci_note: pr.headRefOid, state: 'working' });
@@ -981,7 +1153,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     hook: (a, who) => hook(who, a),
     report: (a, who) => report(who, a),
     ask: (a, who) => ask(who, a),
-    answer, reply, spawn, wait, agents, kill, merge, poll,
+    answer, reply, spawn, wait, agents, pause, unpause, restart, kill, merge, poll,
     'agent.get': ({ agent }) => { const { token: _t, ...r } = mustAgent(agent); return r; },
     'attach': ({ agent }) => { const a = mustAgent(agent); return { argv: host.attachArgv(a.slot, a.id) }; },
     'delegator.start': delegatorStart, 'delegator.end': delegatorEnd, 'delegator.set': delegatorSet, 'delegator.list': () => db.prepare('SELECT * FROM delegators ORDER BY created_at DESC').all(),
@@ -1016,6 +1188,12 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     if (!fn) throw new Error(`Unknown call ${name}`);
     if (who.role === 'agent' && !AGENT_CALLS.has(name)) throw new Error(`${name} is not allowed for workers`);
     if (who.role === 'runner' && !RUNNER_CALLS.has(name)) throw new Error(`${name} is not allowed for the test runner`);
+    if (who.role === 'agent' && ['report', 'ask', 'test.request'].includes(name)) {
+      return lifecycle(who.agent, a => {
+        if (!PAUSABLE.includes(a.state)) throw new Error(`Agent is ${a.state}`);
+        return fn(args, who);
+      });
+    }
     return fn(args, who);
   }
 

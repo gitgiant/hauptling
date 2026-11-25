@@ -303,7 +303,11 @@ function render() {
   renderBoard(b);
   if (state.selected) {
     const a = b.agents.find(x => x.id === state.selected);
-    if (a) renderDetailHead(a, $('#detail'));
+    if (a) {
+      const detail = $('#detail');
+      renderDetailHead(a, detail);
+      if (state.sub === 'terminal' && TERMINAL_STATES.includes(a.state) && (!state.term || state.term.ended)) renderSub(detail, a);
+    }
   }
 }
 
@@ -393,7 +397,7 @@ function card(a) {
     a.gate ? h('span', { text: `gate: ${a.gate}` }) : null,
     a.ci_note ? h('span', { class: 'chip fail', text: `CI failed ${a.ci_note.slice(0, 7)}` }) : null,
     testChip(a.test),
-    a.ended ? null : runNow(a.test),
+    a.ended || ['paused', 'restarting'].includes(a.state) ? null : runNow(a.test),
     usageChips(a.usage),
   ];
   const el = h('div', { class: `card ${a.state}${state.selected === a.id ? ' selected' : ''}`, role: 'button', tabindex: '0', onclick: () => select(a.id), onkeydown: (e) => e.key === 'Enter' && select(a.id) },
@@ -524,12 +528,20 @@ function renderDetailHead(a, el) {
     a.ended ? null : reply,
     a.ended ? null : h('div', { class: 'actions' },
       canMerge ? h('button', { class: 'primary', onclick: () => act('merge', { agent: a.id }, `${a.id} merged into ${a.base}`) }, `Merge into ${a.base}`) : null,
-      runNow(a.test),
+      ['paused', 'restarting'].includes(a.state) ? null : runNow(a.test),
+      a.state === 'paused'
+        ? h('button', { onclick: () => act('unpause', { agent: a.id }, `${a.id} resumed`) }, 'Resume')
+        : ['working', 'blocked', 'done'].includes(a.state)
+          ? h('button', { onclick: () => act('pause', { agent: a.id }, `${a.id} paused`) }, 'Pause') : null,
+      ['working', 'blocked', 'done', 'paused', 'exited', 'failed', 'restarting'].includes(a.state) && a.slot
+        ? h('button', { onclick: () => confirm(`Restart ${a.id}? Its branch and working tree will be kept.`) && act('restart', { agent: a.id }, `${a.id} restarted`) }, 'Restart') : null,
       h('button', { class: 'danger', onclick: () => confirm(`Kill ${a.id}? Its container and clone are removed.`) && act('kill', { agent: a.id }, `${a.id} killed`) }, 'Kill'),
       h('span', { class: 'mono empty', text: `hauptling attach ${a.id}` })),
   );
   if (hadFocus) reply.text.focus();
 }
+
+const TERMINAL_STATES = ['spawning', 'restarting', 'paused', 'working', 'blocked', 'done'];
 
 function renderSub(el, a) {
   const tabs = el.querySelector('.subtabs');
@@ -542,7 +554,7 @@ function renderSub(el, a) {
   if (state.sub === 'events') loadEvents(a.id, body);
   if (state.sub === 'terminal') {
     // Same live states as the server's terminal (src/terminal.mjs); otherwise the stream would retry forever.
-    if (a.slot && ['spawning', 'working', 'blocked', 'done'].includes(a.state)) state.term = openTerminal(body, a.id);
+    if (a.slot && TERMINAL_STATES.includes(a.state)) state.term = openTerminal(body, a.id);
     else put(body, h('p', { class: 'empty', text: `No live session (${a.state})` }));
   }
 }
@@ -593,9 +605,9 @@ function openTerminal(container, sid, { autoInput = false, onEnd } = {}) {
   const wrapBox = h('input', { type: 'checkbox' });
   const pre = h('pre', { class: 'term', tabindex: '0', 'aria-label': `Terminal ${sid}` }, 'connecting…');
   const setInput = (st) => {
-    inputOn = st.input; box.checked = st.input;
+    inputOn = st.input; box.checked = st.input; box.disabled = Boolean(st.state);
     pre.classList.toggle('live', st.input);
-    note.textContent = st.input ? `Input on until ${new Date(st.until).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} (extends while you type). Click the screen, then type or paste.` : '';
+    note.textContent = st.state === 'paused' ? 'Paused by you' : st.state === 'restarting' ? 'Restarting session…' : st.input ? `Input on until ${new Date(st.until).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} (extends while you type). Click the screen, then type or paste.` : '';
   };
   const setWrap = (on) => { wrapBox.checked = on; pre.classList.toggle('nowrap', !on); };
   setWrap(localStorage.getItem('hl-term-wrap') !== '0');
@@ -647,7 +659,7 @@ function openTerminal(container, sid, { autoInput = false, onEnd } = {}) {
     onEnd?.(d);
   });
   es.onerror = () => { if (!ended) note.textContent = 'Reconnecting…'; };
-  return { sid, close() { ended = true; es.close(); clearTimeout(flushing); } };
+  return { sid, get ended() { return ended; }, close() { ended = true; es.close(); clearTimeout(flushing); } };
 }
 function closeTerm() { state.term?.close(); state.term = null; }
 

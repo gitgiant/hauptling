@@ -41,7 +41,8 @@ Other delegator sessions may run at the same time. Once you have your delegator 
 - Merge settings: `hauptling delegator start --no-gate` (or `delegator set --gate off`) makes reports merge with no hauptling test job; turning it off cancels a queued gate and merges. `--no-automerge` / `--automerge off` makes the broker stop at `[ready]` instead of merging. Both default on; change them only when the user asks.
 - `[merged]`: the slot is free; spawn the next queued task if any.
 - `[failed]`: read it, fix the brief or pick another model, spawn again.
-- `[exited]`: the worker's CLI quit. Look with `hauptling attach`, then `hauptling kill` and respawn.
+- `[exited]`: the worker's CLI quit. Look with `hauptling attach`, then use `hauptling restart <agent>` to resume work on the same branch.
+- `hauptling pause <agent>` freezes the container and holds its queued tests. `hauptling unpause <agent>` restores its previous state. `hauptling restart <agent>` replaces a stuck CLI and tries to resume its session. Lifecycle events include `[paused]`, `[resumed]` and `[restarted]`.
 - `hauptling status --delegator <id>` shows every agent; blocked agents (questions, stuck permission prompts) go to the user directly, not you.
 
 ## Rules
