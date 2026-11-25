@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { openDb } from '../src/db.mjs';
 import { createCore } from '../src/core.mjs';
-import { createDashboard, dashToken, stripAnsi } from '../src/dashboard.mjs';
+import { createDashboard, dashToken, headline, stripAnsi } from '../src/dashboard.mjs';
 import { loadModels } from '../src/models.mjs';
 
 function fakeHost() {
@@ -174,12 +174,40 @@ test('usage panel and spend: slot × vendor limits, sign-in state, totals of fin
   s.done();
 });
 
-test('host load: CPU and memory as whole percents', async () => {
-  const { dash, done } = await setup();
+test('host load: CPU, memory and GPU as whole percents', async () => {
+  const { dash, host, done } = await setup();
+  host.gpuUtil = async () => 37;
   try {
     for (let i = 0; i < 1e6; i++); // some CPU between samples
-    const { cpu, mem } = dash.hostLoad();
+    const { cpu, mem, gpu } = await dash.hostLoad();
+    assert.equal(gpu, 37);
     for (const v of [cpu, mem]) assert.ok(v === null || (Number.isInteger(v) && v >= 0 && v <= 100), `got ${v}`);
     assert.ok(mem > 0);
   } finally { done(); }
+});
+
+test('headline: one sentence per situation, for the human watching', () => {
+  const base = { base: 'main', title: 'Add terrain LOD' };
+  const gateTest = (over) => ({ purpose: 'gate', gpu: false, state: 'done', status: 'pass', passed: 9, failed: 0, ...over });
+  const cases = [
+    [{ state: 'blocked', ask: { question: 'Which API?' } }, 'Needs your answer: Which API?'],
+    [{ state: 'blocked', status: 'blocked: idle without report' }, 'Stuck: idle without report; attach or message it'],
+    [{ state: 'queued' }, 'Queued: waiting for a free worker slot'],
+    [{ state: 'waiting', depends_on: 'w_1' }, 'Waiting for its spec tests from w_1'],
+    [{ state: 'working' }, 'Working on it'],
+    [{ state: 'working', role: 'tests' }, 'Writing the spec tests'],
+    [{ state: 'working', test: { purpose: 'request', gpu: true, state: 'running' } }, 'Running GPU tests'],
+    [{ state: 'working', test: { purpose: 'request', state: 'done', status: 'fail', passed: 3, failed: 2 } }, 'Working; last tests fail (3/5)'],
+    [{ state: 'working', ci_note: 'abc', pr_number: 7 }, 'Fixing a CI failure on PR #7'],
+    [{ state: 'done', gate: 'ci', pr_number: 7 }, 'PR #7 open, waiting for CI to merge'],
+    [{ state: 'done', gate: 'tests', test: gateTest({ state: 'queued', status: null }) }, 'Waiting to run merge gate'],
+    [{ state: 'done', gate: 'tests', test: gateTest() }, 'Ready to merge into main'],
+    [{ state: 'done', gate: 'tests', test: gateTest({ status: 'fail', passed: 8, failed: 1 }) }, 'Merge gate fail (8/9); the delegator decides'],
+    [{ state: 'done', gate: 'none' }, 'Done: report sent to the delegator'],
+    [{ state: 'merged' }, 'Merged into main'],
+    [{ state: 'exited', report: 'r', gate: 'tests', test: gateTest({ status: 'error', passed: 0 }) }, 'Session exited; merge gate error'],
+    [{ state: 'exited' }, 'Session exited without reporting'],
+    [{ state: 'failed', report: 'spawn failed: no slot' }, 'Failed: spawn failed: no slot'],
+  ];
+  for (const [a, want] of cases) assert.equal(headline({ ...base, ...a }), want);
 });

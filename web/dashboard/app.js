@@ -55,6 +55,17 @@ const ago = (iso) => {
 const clock = (iso) => new Date(iso).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 const isLocal = (a) => a.repo.startsWith('/');
 
+// ---------- theme: dark by default, light on request, remembered per browser ----------
+function setTheme(t) {
+  document.documentElement.dataset.theme = t;
+  localStorage.setItem('hl-theme', t);
+  const b = $('#theme');
+  b.textContent = t === 'dark' ? '☀ Light' : '☾ Dark';
+  b.title = `Switch to ${t === 'dark' ? 'light' : 'dark'} mode`;
+}
+setTheme(localStorage.getItem('hl-theme') === 'light' ? 'light' : 'dark');
+$('#theme').addEventListener('click', () => setTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'));
+
 // ---------- state ----------
 const state = { board: null, selected: null, sub: 'screen', view: 'board', screenTimer: null, histSelected: null };
 
@@ -82,12 +93,7 @@ function connect() {
     render();
     if (state.pending) { const id = state.pending; state.pending = null; select(id); }
   });
-  es.addEventListener('host', (e) => {
-    const { cpu, mem } = JSON.parse(e.data);
-    put($('#sys'),
-      h('span', { title: 'Host CPU in use (all cores, last 2 s)' }, 'CPU ', h('b', { text: cpu == null ? '?' : `${cpu}%` })),
-      h('span', { title: 'Host memory in use' }, 'Mem ', h('b', { text: `${mem}%` })));
-  });
+  es.addEventListener('host', (e) => { state.host = JSON.parse(e.data); renderSys(); });
   es.onopen = () => { $('#conn').className = 'conn live'; $('#conn').textContent = 'live'; };
   es.onerror = () => { $('#conn').className = 'conn down'; $('#conn').textContent = 'reconnecting…'; };
 }
@@ -96,11 +102,42 @@ function render() {
   const b = state.board;
   document.title = b.blocked ? `(${b.blocked}) Hauptling` : 'Hauptling';
   renderGpu(b.gpu);
+  renderSys();
   renderBoard(b);
   if (state.selected) {
     const a = b.agents.find(x => x.id === state.selected);
     if (a) renderDetailHead(a, $('#detail'));
   }
+}
+
+/** A 0–100 % history as a small line graph; null samples break the line. */
+function spark(values, label) {
+  const W = 60, H = 16, n = 120;
+  const ns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('class', 'spark'); svg.setAttribute('width', W); svg.setAttribute('height', H); svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  svg.setAttribute('role', 'img'); svg.setAttribute('aria-label', label);
+  const x = (i) => ((i + n - values.length) / (n - 1)) * W;
+  const y = (v) => H - 1 - (Math.min(100, Math.max(0, v)) / 100) * (H - 2);
+  let d = '';
+  values.forEach((v, i) => { if (v == null) return; d += `${d && values[i - 1] != null ? 'L' : 'M'}${x(i).toFixed(1)},${y(v).toFixed(1)}`; });
+  const path = document.createElementNS(ns, 'path');
+  path.setAttribute('d', d);
+  svg.append(path);
+  return svg;
+}
+
+function metric(name, v, values, title) {
+  const mins = Math.round(((state.host?.every_s || 5) * 120) / 60);
+  return h('span', { class: 'metric', title: `${title}; graph: last ${mins} min` }, name ? `${name} ` : null, h('b', { text: v == null ? '?' : `${v}%` }), spark(values, `${name} over the last ${mins} minutes`));
+}
+
+function renderSys() {
+  const l = state.host;
+  if (!l) return;
+  put($('#sys'), metric('CPU', l.cpu, l.hist.cpu, 'Host CPU in use, all cores'), metric('Mem', l.mem, l.hist.mem, 'Host memory in use'));
+  const g = $('#gpu .gpu-util');
+  if (g) put(g, metric('', l.gpu, l.hist.gpu, 'GPU utilization'));
 }
 
 function renderGpu(g) {
@@ -110,6 +147,7 @@ function renderGpu(g) {
   const running = g.running[0];
   put(el, 
     h('span', {}, 'GPU ', h('b', { text: g.paused ? 'paused' : running ? 'busy' : 'idle' })),
+    h('span', { class: 'gpu-util' }),
     h('span', { title: 'Free VRAM / what a job waits for', text: `${g.freeMB ?? '?'} MiB free` }),
     running ? h('span', { class: 'mono', text: `▶ ${running.id}${running.agent ? ` (${running.agent})` : ''}` }) : null,
     g.queued.length ? h('span', { text: `${g.queued.length} queued${g.queued.some(q => q.waiting_since) ? ' · waiting for VRAM' : ''}` }) : null,
@@ -122,9 +160,7 @@ function renderGpu(g) {
 
 function card(a) {
   const meta = [
-    h('span', { class: 'mono', text: a.id }),
-    h('span', { text: a.model }),
-    h('span', { class: 'mono', text: a.branch }),
+    h('span', { class: 'mono', title: `${a.vendor} · ${a.model} · ${a.branch}`, text: a.id }),
     a.pr_url ? h('a', { href: a.pr_url, target: '_blank', rel: 'noopener', onclick: (e) => e.stopPropagation(), text: `PR #${a.pr_number}` }) : null,
     a.gate ? h('span', { text: `gate: ${a.gate}` }) : null,
     a.ci_note ? h('span', { class: 'chip fail', text: `CI failed ${a.ci_note.slice(0, 7)}` }) : null,
@@ -133,10 +169,10 @@ function card(a) {
   ];
   const el = h('div', { class: `card ${a.state}${state.selected === a.id ? ' selected' : ''}`, role: 'button', tabindex: '0', onclick: () => select(a.id), onkeydown: (e) => e.key === 'Enter' && select(a.id) },
     h('span', { class: `dot ${a.state}`, title: a.state }),
-    h('span', { class: 'title', title: a.title, text: a.title }),
+    h('span', { class: 'title', title: a.headline || a.title, text: a.headline || a.title }),
     h('span', { class: 'elapsed', title: `started ${clock(a.created_at)}`, text: ago(a.created_at) }),
+    a.headline ? h('div', { class: 'prompt', title: `Prompt: ${a.title}`, text: a.title }) : null,
     h('div', { class: 'meta' }, meta),
-    a.ask ? h('div', { class: 'status', text: `asks: ${a.ask.question}` }) : a.status ? h('div', { class: 'status', text: a.status }) : null,
   );
   return el;
 }
@@ -211,7 +247,8 @@ function renderDetailHead(a, el) {
   const hadFocus = old && document.activeElement === old;
   const canMerge = isLocal(a) && a.state === 'done' && a.test?.purpose === 'gate' && a.test?.status === 'pass';
   put(head, 
-    h('h2', { text: a.title }),
+    h('h2', { text: a.headline || a.title }),
+    a.headline ? h('p', { class: 'prompt', title: 'Prompt (spawn title)', text: a.title }) : null,
     h('div', { class: 'meta' },
       h('span', { class: 'mono', text: a.id }), h('span', { text: a.state }), h('span', { text: `${a.vendor} · ${a.model}` }),
       h('span', { class: 'mono', text: `${a.branch} → ${a.base}` }), h('span', { class: 'mono', text: a.repo }),
@@ -438,7 +475,7 @@ async function loadHistory() {
       const el = card({ ...a, ended: true });
       el.onclick = async () => {
         const det = $('#history-detail');
-        put(det, h('div', { class: 'dhead' }, h('h2', { text: a.title }),
+        put(det, h('div', { class: 'dhead' }, h('h2', { text: a.headline || a.title }), h('p', { class: 'prompt', text: a.title }),
           h('div', { class: 'meta' }, h('span', { class: 'mono', text: a.id }), h('span', { text: a.state }), h('span', { text: a.model }), h('span', { class: 'mono', text: a.repo }),
             a.pr_url ? h('a', { href: a.pr_url, target: '_blank', rel: 'noopener', text: `PR #${a.pr_number}` }) : null, h('span', { text: `ended ${clock(a.updated_at)}` })),
           a.report ? h('div', { class: 'report' }, h('b', { text: 'Report: ' }), a.report) : null));

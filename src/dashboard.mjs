@@ -23,6 +23,50 @@ import { token as newToken } from './util.mjs';
 const WEB = fileURLToPath(new URL('../web/dashboard/', import.meta.url));
 const ENDED = ['merged', 'killed', 'closed', 'handed-off'];
 const NO_SESSION = [...ENDED, 'failed', 'queued', 'waiting'];
+/**
+ * One plain sentence for the human watching the board: what the agent is doing or waiting on now.
+ * `a` is a board row (agent columns plus `status`, `test` and `ask` as the snapshot builds them).
+ */
+export function headline(a) {
+  const t = a.test;
+  const pr = a.pr_number ? `PR #${a.pr_number}` : null;
+  const total = (t?.passed ?? 0) + (t?.failed ?? 0);
+  const score = t?.status && total ? ` (${t.passed ?? 0}/${total})` : '';
+  const kind = t ? `${t.gpu ? 'GPU ' : ''}${t.purpose === 'gate' ? 'merge gate' : 'tests'}` : 'tests';
+  const pending = t && !t.status ? (t.state === 'running' ? `Running ${kind}` : `Waiting to run ${kind}`) : null;
+  const why = (a.status || '').replace(/^[a-z-]+:\s*/, '');
+  switch (a.state) {
+    case 'blocked': return a.ask ? `Needs your answer: ${a.ask.question}` : `Stuck${why ? `: ${why}` : ''}; attach or message it`;
+    case 'queued': return 'Queued: waiting for a free worker slot';
+    case 'waiting': return `Waiting for its spec tests${a.depends_on ? ` from ${a.depends_on}` : ''}`;
+    case 'spawning': return 'Starting its container';
+    case 'working':
+      if (a.status === 'gate: waiting for GPU') return 'Merge gate waiting for the GPU';
+      if (pending) return pending;
+      if (a.ci_note) return `Fixing a CI failure on ${pr || 'its PR'}`;
+      if (t?.status && t.status !== 'pass') return `Working; last ${kind} ${t.status}${score}`;
+      return a.role === 'tests' ? 'Writing the spec tests' : t?.status === 'pass' ? `Working; last ${kind} passed${score}` : 'Working on it';
+    case 'done':
+      if (a.status === 'gate: waiting for GPU') return 'Merge gate waiting for the GPU';
+      if (a.gate === 'ci') return `${pr} open, waiting for CI to merge`;
+      if (a.gate === 'tests' || a.gate === 'push') {
+        if (pending) return pending;
+        if (t?.purpose === 'gate' && t.status === 'pass') return a.gate === 'push' ? `Gate passed, pushing to ${a.base}` : pr ? `Gate passed, merging ${pr}` : `Ready to merge into ${a.base}`;
+        if (t?.purpose === 'gate') return `Merge gate ${t.status}${score}; the delegator decides`;
+      }
+      return pr ? `Done: ${pr} waiting for review` : 'Done: report sent to the delegator';
+    case 'merged': return `Merged into ${a.base || 'base'}`;
+    case 'closed': return `${pr || 'PR'} closed without merging`;
+    case 'killed': return 'Killed';
+    case 'handed-off': return 'Spec tests handed to the implementer';
+    case 'exited':
+      if (t?.purpose === 'gate' && t.status) return `Session exited; merge gate ${t.status === 'pass' ? 'passed' : t.status}${score}`;
+      return a.report ? 'Session exited after reporting' : 'Session exited without reporting';
+    case 'failed': return a.report ? `Failed: ${a.report}`.slice(0, 120) : 'Failed';
+    default: return a.state;
+  }
+}
+
 const ACTIONS = new Set(['answer', 'reply', 'kill', 'merge', 'gpu.pause', 'gpu.resume']);
 const COOKIE = 'hl_dash';
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml' };
@@ -73,15 +117,33 @@ export function createDashboard({ db, dbPath, core, host, log = () => {}, slotDi
     return gpuCache.value;
   }
 
-  // Host load: CPU % since the previous sample (summed over cores), memory % in use.
+  // Host load: CPU % since the previous sample (summed over cores), memory % in use, GPU utilization %.
+  // Sampled every 5 s from the first dashboard visit on; the last 10 min feed the header's graphs.
   const cpuTimes = () => cpus().reduce((t, c) => { const v = c.times; t.idle += v.idle; t.all += v.user + v.nice + v.sys + v.idle + v.irq; return t; }, { idle: 0, all: 0 });
   let cpuPrev = cpuTimes();
-  function hostLoad() {
+  const HIST = 120;
+  const hist = { cpu: [], mem: [], gpu: [] };
+  async function hostLoad() {
     const now = cpuTimes();
     const all = now.all - cpuPrev.all;
     const cpu = all > 0 ? Math.round(100 * (1 - (now.idle - cpuPrev.idle) / all)) : null;
     cpuPrev = now;
-    return { cpu, mem: Math.round(100 * (1 - freemem() / totalmem())) };
+    const gpu = await host.gpuUtil?.().catch(() => null) ?? null;
+    return { cpu, mem: Math.round(100 * (1 - freemem() / totalmem())), gpu };
+  }
+  let sampler = null;
+  let lastHost = '';
+  async function sample() {
+    const l = await hostLoad();
+    for (const k of Object.keys(hist)) { hist[k].push(l[k]); if (hist[k].length > HIST) hist[k].shift(); }
+    lastHost = JSON.stringify({ ...l, every_s: 5, hist });
+    for (const res of clients) res.write(`event: host\ndata: ${lastHost}\n\n`);
+  }
+  function startSampler() {
+    if (sampler) return;
+    sampler = setInterval(() => sample().catch(e => log(`host sample: ${e.message}`)), 5000);
+    sampler.unref?.();
+    sample().catch(() => {});
   }
 
   async function snapshot() {
@@ -99,7 +161,7 @@ export function createDashboard({ db, dbPath, core, host, log = () => {}, slotDi
         test: t ? { id: t.id, state: t.state, gpu: Boolean(t.gpu), purpose: t.purpose, status: r?.status || null, passed: r?.passed ?? null, failed: r?.failed ?? null, at: t.done_at || t.created_at } : null,
         ask: ask ? { id: ask.id, question: ask.question, choices: JSON.parse(ask.choices), at: ask.at } : null,
       };
-    });
+    }).map(a => ({ ...a, headline: headline(a) }));
     const delegators = db.prepare('SELECT id, cli, repo, active, created_at FROM delegators ORDER BY created_at').all();
     return { agents, delegators, gpu: await gpu(), blocked: agents.filter(a => a.state === 'blocked').length };
   }
@@ -107,11 +169,8 @@ export function createDashboard({ db, dbPath, core, host, log = () => {}, slotDi
   // One ticker for all open streams; it only runs while someone is watching.
   const clients = new Set();
   let last = '';
-  let lastHost = '';
   let timer = null;
   async function tick() {
-    const h = JSON.stringify(hostLoad());
-    if (h !== lastHost) { lastHost = h; for (const res of clients) res.write(`event: host\ndata: ${h}\n\n`); }
     try {
       const body = JSON.stringify(await snapshot());
       if (body !== last) { last = body; for (const res of clients) res.write(`event: board\ndata: ${body}\n\n`); }
@@ -124,8 +183,9 @@ export function createDashboard({ db, dbPath, core, host, log = () => {}, slotDi
     clients.add(res);
     if (last) res.write(`event: board\ndata: ${last}\n\n`);
     if (lastHost) res.write(`event: host\ndata: ${lastHost}\n\n`);
+    startSampler();
     if (!timer) { timer = setInterval(tick, 2000); timer.unref?.(); tick(); }
-    req.on('close', () => { clients.delete(res); if (!clients.size) { clearInterval(timer); timer = null; last = ''; lastHost = ''; } });
+    req.on('close', () => { clients.delete(res); if (!clients.size) { clearInterval(timer); timer = null; last = ''; } });
   }
 
   // ---------- agent detail ----------
@@ -172,7 +232,7 @@ export function createDashboard({ db, dbPath, core, host, log = () => {}, slotDi
   function history(q = '') {
     const like = `%${q}%`;
     return db.prepare(`SELECT * FROM agents WHERE state IN (${ENDED.map(s => `'${s}'`).join(',')})
-      AND (id LIKE ? OR title LIKE ? OR repo LIKE ? OR branch LIKE ? OR IFNULL(report, '') LIKE ?) ORDER BY updated_at DESC LIMIT 200`).all(like, like, like, like, like).map(pub);
+      AND (id LIKE ? OR title LIKE ? OR repo LIKE ? OR branch LIKE ? OR IFNULL(report, '') LIKE ?) ORDER BY updated_at DESC LIMIT 200`).all(like, like, like, like, like).map(a => ({ ...pub(a), headline: headline(a) }));
   }
 
   // ---------- usage: vendors panel + spend ----------

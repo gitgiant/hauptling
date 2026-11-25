@@ -16,7 +16,8 @@ You think; the `hauptling` CLI does everything mechanical. All state lives in th
 ## Split and spawn
 
 - Split the goal into tasks that touch separate files or areas, so branches rarely conflict. At most 3 run at once (more are queued).
-- Write each task's brief to a file (scratch dir, not the target repo): goal, acceptance criteria, relevant files, constraints, how to test. Workers see only the brief.
+- Repetitive work from a spec (e.g. assets from a JSON list): one task per batch of about 10 items, each named in its brief, rather than one long worker. Fresh workers stay sharp and cheap, and each batch is its own PR.
+- Write each task's brief to a file (scratch dir, not the target repo): goal, acceptance criteria, relevant files, constraints, how to test. Workers see only the brief. Start it with `# <task in a few words>`: that heading becomes the task's title on the dashboard. Skip sandbox/branch boilerplate; workers are told that already.
 - The user watches everything on the dashboard (`hauptling dashboard`); point them there rather than pasting long status.
 - GPU code: workers have no GPU; they run GPU tests with `hauptling test request --gpu`, which needs `"gpu": [argv]` in the repo's hauptling.json and a GPU on this host (`hauptling gpu status`). GPU jobs queue one at a time and wait while the user's desktop needs the VRAM or `hauptling gpu pause` is on. If there's no GPU, tell workers not to write tests that need one.
 - Pick the model. Default is suggest mode: read `hauptling models` and pass `--model`. Without `--vendor`, the vendor rotates claude → codex → agy. `--mode cheapest` or `--mode rule --difficulty easy|normal|hard` pick for you.

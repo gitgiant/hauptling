@@ -5,7 +5,7 @@ All four PRD phases, the sign-in lock, API keys, the per-vendor Usage tab and th
 ## Needs a real run to confirm
 
 - "Sign in" on the Usage tab (vendor login in host tmux).
-- Header CPU/Mem (branch `cli-fixes`) in a real browser; the SSE stream sends it, layout unseen.
+- Header CPU/Mem/GPU graphs and card headlines need a broker restart to go live; headlines unseen with real agents. Dark theme seen in a screenshot.
 - The Terminal tab live in a browser (parts tested; headless screenshots fire before data arrives).
 - A worker on an API key: Claude's TUI should show API billing; for agy, whether `GEMINI_API_KEY` or its OAuth sign-in wins is unknown.
 - GPU `pause --now`, the VRAM wait and `gateGpu` on the real GPU (unit-tested only).

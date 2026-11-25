@@ -53,7 +53,8 @@ export function config() {
 
 // ---------- GPU (phase 3) ----------
 /** nvidia-smi on PATH, or WSL's copy (the Windows driver exposes it there). */
-const nvidiaSmi = () => ['nvidia-smi', '/usr/lib/wsl/lib/nvidia-smi'].find(b => { try { execFileSync(b, ['-L'], { stdio: 'ignore', timeout: 15e3 }); return true; } catch { return false; } }) || null;
+let smiPath; // probed once per process: the probe is a synchronous spawn
+const nvidiaSmi = () => (smiPath !== undefined ? smiPath : (smiPath = ['nvidia-smi', '/usr/lib/wsl/lib/nvidia-smi'].find(b => { try { execFileSync(b, ['-L'], { stdio: 'ignore', timeout: 15e3 }); return true; } catch { return false; } }) || null));
 export const hasGpu = () => Boolean(nvidiaSmi());
 
 /** Free VRAM in MiB on the first GPU (your desktop shares it), or null when unknown. */
@@ -61,6 +62,16 @@ export function gpuFreeMB() {
   const bin = nvidiaSmi();
   if (!bin) return Promise.resolve(null);
   return new Promise((resolve) => execFile(bin, ['--query-gpu=memory.free', '--format=csv,noheader,nounits'], { timeout: 15e3 }, (err, out) => {
+    const n = parseInt(String(out).split('\n')[0], 10);
+    resolve(err || Number.isNaN(n) ? null : n);
+  }));
+}
+
+/** GPU utilization % of the first GPU (for the dashboard's load graph), or null. */
+export function gpuUtil() {
+  const bin = nvidiaSmi();
+  if (!bin) return Promise.resolve(null);
+  return new Promise((resolve) => execFile(bin, ['--query-gpu=utilization.gpu', '--format=csv,noheader,nounits'], { timeout: 15e3 }, (err, out) => {
     const n = parseInt(String(out).split('\n')[0], 10);
     resolve(err || Number.isNaN(n) ? null : n);
   }));
@@ -321,7 +332,7 @@ export function dockerHost({ log = () => {} } = {}) {
       const ids = (await docker(['ps', '-aq', '--filter', 'label=hauptling.test'])).stdout.split('\n').filter(Boolean);
       if (ids.length) await docker(['rm', '-f', ...ids]);
     },
-    gpuAvailable, gpuFreeMB,
+    gpuAvailable, gpuFreeMB, gpuUtil,
     /** Last `token_count` payload of the newest Codex session log in the slot written since `since` (ISO), or null. */
     async codexUsage(slot, since) {
       const t0 = Date.parse(since || 0) || 0;
