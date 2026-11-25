@@ -2,6 +2,7 @@ import { execFile, execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { closeSync, cpSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, rmSync, statSync, writeFileSync, realpathSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { BROKER_PORT, home, shellLine } from './util.mjs';
 import { workerKeyEnv } from './keys.mjs';
@@ -223,6 +224,34 @@ async function ensureNetworkOnce({ log = () => {}, force = false, dk = docker, b
 const proxyEnv = () => ['HTTPS_PROXY', 'HTTP_PROXY', 'https_proxy', 'http_proxy'].flatMap(k => ['-e', `${k}=${PROXY_URL}`])
   .concat(['-e', `NO_PROXY=${PROXY},localhost,127.0.0.1`, '-e', `no_proxy=${PROXY},localhost,127.0.0.1`]);
 
+/** Last `token_count` payload of the newest rollout log under these session roots written since `since` (ISO), or null. */
+async function codexRollout(roots, since) {
+  const t0 = Date.parse(since || 0) || 0;
+  let newest = null;
+  const days = [];
+  for (const root of roots.filter(existsSync)) {
+    const mine = [];
+    for (const y of readdirSync(root).sort().reverse().slice(0, 2)) for (const m of readdirSync(join(root, y)).sort().reverse().slice(0, 2)) for (const d of readdirSync(join(root, y, m)).sort().reverse().slice(0, 3)) mine.push(join(root, y, m, d));
+    days.push(...mine.slice(0, 3));
+  }
+  for (const dir of days) {
+    for (const f of readdirSync(dir)) {
+      if (!f.startsWith('rollout-') || !f.endsWith('.jsonl')) continue;
+      const st = statSync(join(dir, f));
+      if (st.mtimeMs >= t0 && (!newest || st.mtimeMs > newest.mtime)) newest = { path: join(dir, f), mtime: st.mtimeMs, size: st.size };
+    }
+  }
+  if (!newest) return null;
+  const { lastTokenCount } = await import('./usage.mjs');
+  const fd = openSync(newest.path, 'r');
+  try {
+    const len = Math.min(newest.size, 512 << 10);
+    const buf = Buffer.alloc(len);
+    readSync(fd, buf, 0, len, newest.size - len);
+    return lastTokenCount(buf.toString('utf8'));
+  } finally { closeSync(fd); }
+}
+
 export function slotDir(slot) {
   const d = join(home(), 'slots', slot);
   for (const v of ['claude', 'codex', 'codex-key', 'gemini']) mkdirSync(join(d, v), { recursive: true });
@@ -324,31 +353,12 @@ export function dockerHost({ log = () => {} } = {}) {
     gpuAvailable, gpuFreeMB,
     /** Last `token_count` payload of the newest Codex session log in the slot written since `since` (ISO), or null. */
     async codexUsage(slot, since) {
-      const t0 = Date.parse(since || 0) || 0;
-      let newest = null;
-      const days = [];
       // codex: subscription sign-in; codex-key: API key mode (separate CODEX_HOME).
-      for (const root of ['codex', 'codex-key'].map(h => join(slotDir(slot), h, 'sessions')).filter(existsSync)) {
-        const mine = [];
-        for (const y of readdirSync(root).sort().reverse().slice(0, 2)) for (const m of readdirSync(join(root, y)).sort().reverse().slice(0, 2)) for (const d of readdirSync(join(root, y, m)).sort().reverse().slice(0, 3)) mine.push(join(root, y, m, d));
-        days.push(...mine.slice(0, 3));
-      }
-      for (const dir of days) {
-        for (const f of readdirSync(dir)) {
-          if (!f.startsWith('rollout-') || !f.endsWith('.jsonl')) continue;
-          const st = statSync(join(dir, f));
-          if (st.mtimeMs >= t0 && (!newest || st.mtimeMs > newest.mtime)) newest = { path: join(dir, f), mtime: st.mtimeMs, size: st.size };
-        }
-      }
-      if (!newest) return null;
-      const { lastTokenCount } = await import('./usage.mjs');
-      const fd = openSync(newest.path, 'r');
-      try {
-        const len = Math.min(newest.size, 512 << 10);
-        const buf = Buffer.alloc(len);
-        readSync(fd, buf, 0, len, newest.size - len);
-        return lastTokenCount(buf.toString('utf8'));
-      } finally { closeSync(fd); }
+      return codexRollout(['codex', 'codex-key'].map(h => join(slotDir(slot), h, 'sessions')), since);
+    },
+    /** The same for the host's own Codex (a Codex delegator; token economy). */
+    async hostCodexUsage(since) {
+      return codexRollout([join(process.env.CODEX_HOME || join(homedir(), '.codex'), 'sessions')], since);
     },
     gpuConfig: () => { const c = config(); return { memMB: c.gpuMemMB, waitMinutes: c.gpuWaitMinutes }; },
 

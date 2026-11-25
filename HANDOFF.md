@@ -1,10 +1,11 @@
 # Handoff — 2026-11-25
 
-Token economy stages 1–2 are on branch `claude/beautiful-dirac-t0hx3x` (not yet on `main`); PRD "Token economy decisions" has all three stages. `npm test` (42) passes; nothing run on the real host yet.
+Token economy stages 1–2 are on branch `claude/beautiful-dirac-t0hx3x` (not yet on `main`); PRD "Token economy decisions" has all three stages. `npm test` (44) passes; nothing run on the real host yet.
 
 ## Needs a real run to confirm
 
 - Claude workers start with `--effort <tier default>` and Codex with `-c model_reasoning_effort="…"`; confirm both TUIs accept them.
+- Re-run `hauptling setup` to install the host status lines (`hauptling usage <vendor> --host`, chaining your old one); check the host Claude status line still shows your old output and `host_usage` fills.
 - A Claude delegator running `hauptling wait --until-event` in the background wakes on events.
 - Stage 1 changed `src/vendors.mjs` (Claude plugins turned off in the slot): run `hauptling image`, then `hauptling broker stop`.
 - Claude worker starts with `--strict-mcp-config` and no MCP servers; Codex with `-c mcp_servers={}` actually drops servers from the slot's `config.toml` (may merge instead of replace).
@@ -17,7 +18,7 @@ Token economy stages 1–2 are on branch `claude/beautiful-dirac-t0hx3x` (not ye
 
 ## Open
 
-- Token economy stage 3 (headroom routing at 80%): not started. agy's bare config (MCP off) is unknown. `[handoff-due]` assumes the host CLI uses the same vendor account as the slots.
+- Token economy stage 3 (headroom routing at 80%): not started. agy's bare config (MCP off) is unknown.
 - Codex prices in `models.json` are `null`, so Codex cost shows "unknown".
 - agy's own sign-in token rotation is unconfirmed (PRD "Open").
 - macOS / Ubuntu install untested; only WSL so far.

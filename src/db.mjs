@@ -47,6 +47,12 @@ CREATE TABLE IF NOT EXISTS slot_usage (
   slot TEXT NOT NULL, vendor TEXT NOT NULL, window TEXT NOT NULL, used_pct REAL NOT NULL,
   resets_at TEXT, at TEXT NOT NULL, PRIMARY KEY (slot, vendor, window)
 );
+-- The host CLI's own windows (a delegator's status line or ~/.codex log; token economy); latest reading only.
+-- Kept apart from slot_usage: the host may be signed in to another account than the slots.
+CREATE TABLE IF NOT EXISTS host_usage (
+  vendor TEXT NOT NULL, window TEXT NOT NULL, used_pct REAL NOT NULL, resets_at TEXT, at TEXT NOT NULL,
+  PRIMARY KEY (vendor, window)
+);
 `;
 
 /** Opens (and migrates) the store. Only the broker process calls this. */

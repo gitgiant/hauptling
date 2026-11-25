@@ -200,6 +200,18 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     }
   }
 
+  const hostReports = (vendor) => Boolean(db.prepare('SELECT 1 FROM host_usage WHERE vendor = ?').get(vendor));
+
+  /** The delegator's own CLI (`hauptling usage <vendor> --host`, or the host Codex log): its windows → handoff-due. */
+  function recordHostUsage(vendor, u) {
+    for (const l of u.limits) {
+      db.prepare(`INSERT INTO host_usage (vendor, window, used_pct, resets_at, at) VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT (vendor, window) DO UPDATE SET used_pct = excluded.used_pct, resets_at = excluded.resets_at, at = excluded.at`).run(vendor, l.window, l.used_pct, l.resets_at, now());
+      if (l.used_pct >= HANDOFF_PCT) handoffDue(vendor, l);
+    }
+    return u;
+  }
+
   /** Stores an agent's usage and its slot's limit windows; warns once per window at 90%. */
   function recordUsage(a, u) {
     update(a.id, { usage: JSON.stringify({ ...u, at: now() }) });
@@ -207,7 +219,8 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     for (const l of u.limits) {
       db.prepare(`INSERT INTO slot_usage (slot, vendor, window, used_pct, resets_at, at) VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT (slot, vendor, window) DO UPDATE SET used_pct = excluded.used_pct, resets_at = excluded.resets_at, at = excluded.at`).run(a.slot, a.vendor, l.window, l.used_pct, l.resets_at, now());
-      if (l.used_pct >= HANDOFF_PCT) handoffDue(a.vendor, l);
+      // Slot readings stand in for the delegator's own only until its host CLI reports (same-account assumption).
+      if (l.used_pct >= HANDOFF_PCT && !hostReports(a.vendor)) handoffDue(a.vendor, l);
       if (l.used_pct < 90) continue;
       const key = `usage:warn:${a.vendor}:${l.window}:${l.resets_at || 'unknown'}`; // once per account window, whichever slot reports it
       if (kvGet(db, key)) continue;
@@ -235,6 +248,11 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   async function refreshUsage({ force = false } = {}) {
     if (!host.codexUsage || (!force && Date.now() - codexAt < 10e3)) return;
     codexAt = Date.now();
+    const cd = db.prepare("SELECT MIN(created_at) since FROM delegators WHERE active = 1 AND cli = 'codex'").get();
+    if (cd?.since && host.hostCodexUsage) {
+      try { const p = await host.hostCodexUsage(cd.since); if (p) recordHostUsage('codex', normalizeUsage('codex', p)); }
+      catch (e) { log(`host codex usage: ${e.message}`); }
+    }
     for (const a of db.prepare("SELECT * FROM agents WHERE vendor = 'codex' AND slot IS NOT NULL AND state IN ('working','blocked','done')").all()) {
       try {
         const p = await host.codexUsage(a.slot, a.created_at);
@@ -799,6 +817,10 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     'test.wait': testWait, 'test.get': testGet,
     'test.claim': claim, 'test.report': testReport, 'test.heartbeat': () => kvSet(db, 'runner_seen', Date.now()),
     'usage.report': (a, who) => usageReport(who, a),
+    'usage.host': ({ vendor, payload }) => {
+      if (!isFamily(vendor)) throw new Error(`Vendor must be claude, codex or agy, got "${vendor}"`);
+      return { text: statusText(recordHostUsage(vendor, normalizeUsage(vendor, scrub(payload)))) };
+    },
     'dashboard.token': ({ rotate = false }) => ({ token: dashToken(db, { rotate }), url: publicUrl }),
     'gpu.pause': gpuPause, 'gpu.resume': gpuResume, 'gpu.status': gpuStatus,
     'models.prefer': ({ value }) => (value ? savePrefer(value) : preferOf(models())),

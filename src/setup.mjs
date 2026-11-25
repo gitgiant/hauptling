@@ -41,6 +41,9 @@ export async function setup({ slots = 3, vendors = VENDORS, host = true, login: 
     cpSync(join(ROOT, 'skills', 'delegator'), dir, { recursive: true });
     ok(dir);
   }
+  step('Delegator usage (host status lines → hauptling; your previous status line still shows)');
+  const { installStatusLines } = await import('./hoststatus.mjs');
+  for (const line of installStatusLines()) ok(line);
   for (const line of plat.setupHost({ root: ROOT })) ok(line);
   gitIdentity();
 

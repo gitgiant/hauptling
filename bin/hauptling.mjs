@@ -42,7 +42,7 @@ const [cmd, ...rest] = process.argv.slice(2);
 
 async function main() {
   const { call } = await import('../src/client.mjs');
-  const args = parseArgs(rest, { repeat: ['choice', 'artifacts'], bool: ['test-writer', 'allow-tier', 'until-event', 'all', 'gpu', 'force', 'no-host', 'no-login', 'now', 'print', 'new-token'] });
+  const args = parseArgs(rest, { repeat: ['choice', 'artifacts'], bool: ['test-writer', 'allow-tier', 'until-event', 'host', 'all', 'gpu', 'force', 'no-host', 'no-login', 'now', 'print', 'new-token'] });
   const text = () => args._.join(' ');
   switch (cmd) {
     case undefined: case 'help': case '--help': case '-h': return out(USAGE);
@@ -125,8 +125,10 @@ async function main() {
       for await (const c of process.stdin) raw += c;
       try {
         const { scrub } = await import('../src/usage.mjs');
-        const r = await Promise.race([call('usage.report', { vendor: args._[0], payload: scrub(JSON.parse(raw || '{}')) }), new Promise((_, no) => setTimeout(() => no(new Error('timeout')), 3000))]);
-        return out(r.text);
+        // --host: the delegator's own CLI (installed by setup); the user's previous status line, if any, is what shows.
+        const r = await Promise.race([call(args.host ? 'usage.host' : 'usage.report', { vendor: args._[0], payload: scrub(JSON.parse(raw || '{}')) }), new Promise((_, no) => setTimeout(() => no(new Error('timeout')), 3000))]).catch(() => null);
+        if (args.host) { const { chained } = await import('../src/hoststatus.mjs'); const c = chained(args._[0], raw); if (c != null) return out(c); }
+        return out(r?.text || 'hauptling');
       } catch { return out('hauptling'); }
     }
     case 'report': {
