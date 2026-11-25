@@ -31,7 +31,7 @@ USER root
 RUN apt-get update && apt-get install -y --no-install-recommends cargo
 ```
 
-Containers reach only hosts in `~/.hauptling/egress/allow.txt` (blocked attempts: `~/.hauptling/egress/egress.log`). After updating hauptling, restart the broker (`hauptling broker stop`; the next command starts it) and rebuild the image (`hauptling image`, also done by setup).
+Containers reach only hosts in `~/.hauptling/egress/allow.txt` (blocked attempts: `~/.hauptling/egress/egress.log`). After updating hauptling, restart the broker (`hauptling broker restart`) and rebuild the image (`hauptling image`, also done by setup).
 
 Then start Claude, Codex or agy in that Linux shell and run `/delegator`.
 

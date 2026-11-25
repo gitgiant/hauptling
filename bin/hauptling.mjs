@@ -42,7 +42,7 @@ Setup:
   key budget VENDOR USD|off [--resets-on DAY] API first up to USD a month (new API spawns stop at 90%), then slot sign-ins
   login SLOT VENDOR [--force]              sign one slot in to claude|codex|agy (refused while a worker of that vendor runs on the slot)
   init [DIR]                               write the detected hauptling.json
-  broker start|stop|status|run
+  broker start|stop|restart|status|run
 Internal: hook VENDOR EVENT, prepare VENDOR DIR, usage VENDOR (status line), egress, test-exec`;
 
 const out = (v) => console.log(typeof v === 'string' ? v : JSON.stringify(v, null, 2));
@@ -59,6 +59,10 @@ async function main() {
     case 'broker': {
       const sub = args._[0];
       if (sub === 'run') { const { runBroker } = await import('../src/server.mjs'); await runBroker(); return new Promise(() => {}); }
+      if (sub === 'restart') {
+        const { restartBroker } = await import('../src/broker-control.mjs');
+        return out(await restartBroker());
+      }
       const { ensureBroker } = await import('../src/client.mjs');
       const { readBrokerFile } = await import('../src/brokerfile.mjs');
       if (sub === 'start') { const i = await ensureBroker(); return out(`broker ${i.pid} on 127.0.0.1:${i.port}`); }
@@ -70,7 +74,7 @@ async function main() {
         await fetch(`http://127.0.0.1:${info.port}/api/shutdown`, { method: 'POST', headers: { authorization: `Bearer ${info.adminToken}` } });
         return out('stopped');
       }
-      throw new Error('broker start|stop|status|run');
+      throw new Error('broker start|stop|restart|status|run');
     }
 
     // ----- delegator -----
