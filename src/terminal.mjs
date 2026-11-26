@@ -9,6 +9,8 @@ import { shellLine } from './util.mjs';
  *   agent sessions:  `<agent id>`            the worker's tmux in its container (host.tmuxScreen/tmuxKeys)
  *   login sessions:  `login-<slot>-<vendor>`  a vendor sign-in on the host (browser OAuth callbacks reach
  *                    the host, not containers), in tmux on a private socket, slot credentials via env
+ *   remote sessions: `<agent id>` of an agent on a satellite (part 3): its screen and keys go through the hub's
+ *                    `rpc` (`term.screen`, `term.keys`); the input switch stays here, on the hub.
  * Input is off until switched on and turns itself off 10 minutes after the last key.
  */
 
@@ -18,6 +20,9 @@ const KEYS = new Set(['Enter', 'BSpace', 'Tab', 'BTab', 'Escape', 'Up', 'Down', 
   ...'abcdefghijklmnopqrstuvwxyz'.split('').map(c => `C-${c}`)]);
 const LOGIN = { claude: ['claude'], codex: ['codex', 'login'], agy: ['agy'] };
 const LOGIN_RE = /^login-(hl-[\w-]+)-(claude|codex|agy)$/;
+const LIVE = ['spawning', 'restarting', 'paused', 'working', 'blocked', 'done'];
+/** A relayed screen is cut to this (a tmux screen is a few KB; this only guards against a runaway pane). */
+export const SCREEN_MAX = 256 * 1024;
 
 const tmux = (args, { timeout = 10e3 } = {}) => new Promise((resolve, reject) => {
   execFile('tmux', [...SOCKET, ...args], { timeout }, (err, stdout, stderr) => (err ? reject(new Error((stderr || err.message).trim())) : resolve(stdout)));
@@ -34,7 +39,33 @@ export function checkKeys(keys) {
   return keys;
 }
 
-export function createTerminals({ db, host, slotDir, log = () => {}, now = () => Date.now() }) {
+/**
+ * Raw terminal input (what `hauptling attach` reads from stdin in raw mode) → a keys batch. Ctrl-] is the
+ * detach key: everything from it on is dropped and `detach` is set.
+ */
+export function keysFromBytes(str) {
+  const SEQ = { '[A': 'Up', '[B': 'Down', '[C': 'Right', '[D': 'Left', '[H': 'Home', '[F': 'End', 'OA': 'Up', 'OB': 'Down', 'OC': 'Right', 'OD': 'Left', 'OH': 'Home', 'OF': 'End',
+    '[1~': 'Home', '[4~': 'End', '[2~': 'IC', '[3~': 'DC', '[5~': 'PPage', '[6~': 'NPage', '[Z': 'BTab' };
+  const keys = [];
+  const lit = (c) => { const p = keys[keys.length - 1]; if (p?.t === 'lit' && p.v.length < 4000) p.v += c; else keys.push({ t: 'lit', v: c }); };
+  const key = (v) => keys.push({ t: 'key', v });
+  for (let i = 0; i < str.length; i++) {
+    const c = str[i], code = c.charCodeAt(0);
+    if (c === '\x1d') return { keys, detach: true };
+    if (c === '\x1b') {
+      const seq = Object.keys(SEQ).find(k => str.startsWith(k, i + 1));
+      if (seq) { key(SEQ[seq]); i += seq.length; } else key('Escape');
+    } else if (c === '\r' || c === '\n') key('Enter');
+    else if (c === '\t') key('Tab');
+    else if (c === '\x7f' || c === '\b') key('BSpace');
+    else if (code >= 1 && code <= 26) key(`C-${String.fromCharCode(96 + code)}`);
+    else if (code >= 32) lit(c);
+  }
+  return { keys, detach: false };
+}
+
+/** `rpc(host, op, args)`: on the hub, a request to a satellite over its link (hub.rpc); null elsewhere. */
+export function createTerminals({ db, host, slotDir, rpc = null, log = () => {}, now = () => Date.now() }) {
   const inputUntil = new Map(); // session → epoch ms
 
   const agentRow = (id) => db.prepare('SELECT * FROM agents WHERE id = ?').get(id);
@@ -43,14 +74,25 @@ export function createTerminals({ db, host, slotDir, log = () => {}, now = () =>
     const m = LOGIN_RE.exec(sid);
     if (m) return { kind: 'login', sid, slot: m[1], vendor: m[2] };
     const a = agentRow(sid);
-    if (a && a.host && a.host !== 'hub') throw new Error(`${sid} runs on ${a.host}; its terminal is there`);
-    if (!a || !a.slot || !['spawning', 'restarting', 'paused', 'working', 'blocked', 'done'].includes(a.state)) throw new Error(`No live session ${sid}`);
+    if (!a || !a.slot || !LIVE.includes(a.state)) throw new Error(`No live session ${sid}`);
+    if (a.host && a.host !== 'hub') {
+      if (!rpc) throw new Error(`${sid} runs on ${a.host}; its terminal is there`);
+      return { kind: 'remote', sid, host: a.host, id: a.id, state: a.state };
+    }
     return { kind: 'agent', sid, slot: a.slot, id: a.id, state: a.state };
   }
 
-  async function screen(sid) {
+  /**
+   * The screen now. Remote sessions pass `since` (the hash of the last screen they got): an unchanged screen comes
+   * back as `text: null`, and `hash` names the new one.
+   */
+  async function screen(sid, since = null) {
     const s = resolve(sid);
     if (s.state === 'paused' || s.state === 'restarting') return { text: null, alive: true };
+    if (s.kind === 'remote') {
+      const r = await rpc(s.host, 'term.screen', { agent: s.id, since });
+      return r?.same || typeof r?.text !== 'string' ? { text: null, alive: r?.alive !== false } : { text: r.text.slice(0, SCREEN_MAX), hash: r.hash, alive: r.alive !== false };
+    }
     if (s.kind === 'agent') return { text: await host.tmuxScreen(s.slot, s.id), alive: await host.tmuxAlive(s.slot, s.id) };
     const dead = await tmux(['display-message', '-p', '-t', `${sid}:`, '#{pane_dead}']).then(o => o.trim() === '1', () => null);
     if (dead === null) return { text: '', alive: false, gone: true };
@@ -79,6 +121,12 @@ export function createTerminals({ db, host, slotDir, log = () => {}, now = () =>
     checkKeys(batch);
     if (!inputState(sid).input) throw new Error('Input is off for this session: switch it on first');
     inputUntil.set(sid, now() + INPUT_IDLE_MS);
+    if (s.kind === 'remote') {
+      await rpc(s.host, 'term.keys', { agent: s.id, keys: batch }).catch(e => {
+        throw /offline/.test(e.message) ? new Error(`${s.host} is offline; keys are not queued`) : e;
+      });
+      return inputState(sid);
+    }
     for (const k of batch) {
       const args = k.t === 'lit' ? ['-l', k.v] : [k.v];
       if (s.kind === 'agent') await host.tmuxKeys(s.slot, s.id, args);
@@ -87,10 +135,23 @@ export function createTerminals({ db, host, slotDir, log = () => {}, now = () =>
     return inputState(sid);
   }
 
-  /** Starts a vendor sign-in on the host in tmux, input on. Same env as `hauptling login`. */
+  /**
+   * On a satellite: keys the hub relays for one of its agents (the hub keeps the input switch; `hauptling attach`
+   * on the hub has none). Never a login session.
+   */
+  async function relayKeys(id, batch) {
+    const s = resolve(id);
+    if (s.kind !== 'agent') throw new Error(`No live session ${id}`);
+    if (['paused', 'restarting'].includes(s.state)) throw new Error(`Session is ${s.state}`);
+    checkKeys(batch);
+    for (const k of batch) await host.tmuxKeys(s.slot, s.id, k.t === 'lit' ? ['-l', k.v] : [k.v]);
+    return { ok: true };
+  }
+
   /** A worker of this vendor running on the slot: it refreshes the same credential file. */
   const runningOn = (slot, vendor) => db.prepare("SELECT id FROM agents WHERE slot = ? AND vendor = ? AND state IN ('spawning','restarting','paused','working','blocked','done')").get(slot, vendor)?.id || null;
 
+  /** Starts a vendor sign-in on the host in tmux, input on. Same env as `hauptling login`. */
   async function startLogin(slot, vendor) {
     if (!/^hl-[\w-]+$/.test(slot) || !LOGIN[vendor]) throw new Error('slot and vendor (claude, codex, agy) are required');
     // Refresh tokens rotate (Claude, Codex; agy's MCP tokens): a second process refreshing the same file signs the other out.
@@ -120,5 +181,5 @@ export function createTerminals({ db, host, slotDir, log = () => {}, now = () =>
     await tmux(['kill-session', '-t', sid]).catch(() => {});
   }
 
-  return { resolve, screen, input, inputState, keys, startLogin, stopLogin, runningOn };
+  return { resolve, screen, input, inputState, keys, relayKeys, startLogin, stopLogin, runningOn };
 }

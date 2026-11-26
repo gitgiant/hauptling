@@ -84,6 +84,13 @@ export function brokerHandler({ core, hub, dash, adminToken, log = () => {}, rec
   };
 }
 
+/** A satellite's newest usage reading per vendor and window, for the hub's Usage page (part 3). */
+export const usageReadings = (db) => {
+  const seen = new Set();
+  return db.prepare('SELECT vendor, window, used_pct, resets_at, at FROM slot_usage ORDER BY at DESC').all()
+    .filter(r => !seen.has(`${r.vendor}:${r.window}`) && seen.add(`${r.vendor}:${r.window}`)).slice(0, 30);
+};
+
 /** Runs the broker in this process (normally started detached by `ensureBroker`). */
 export async function runBroker({ port = BROKER_PORT } = {}) {
   mkdirSync(home(), { recursive: true, mode: 0o700 });
@@ -108,12 +115,13 @@ export async function runBroker({ port = BROKER_PORT } = {}) {
       const vendors = {};
       for (const l of logins(await core.call('slots.get'), VENDORS)) if (l.ok) (vendors[l.vendor] ||= []).push(l.slot);
       const free = Object.fromEntries(Object.entries(vendors).map(([v, signed]) => [v, core.freeSlots(v).filter(s => signed.includes(s)).length]));
-      return { vendors, free, gpu, maxWorkers: dockerConfig().maxWorkers };
+      return { vendors, free, gpu, maxWorkers: dockerConfig().maxWorkers, usage: usageReadings(db) };
     };
-    satellite = createSatellite({ db, config: joined, capabilities, onCommand: (c) => core.command(c), log });
+    // rpc: the hub's dashboard asking for one of this host's agents' terminal, diff or timeline (PRD "Part 3").
+    satellite = createSatellite({ db, config: joined, capabilities, onCommand: (c) => core.command(c), onRpc: (op, args) => dash.remote(op, args), log });
   }
   const core = createCore({ db, host, github, notify: plat.notify, workerUrl: WORKER_BROKER_URL, publicUrl: base, runnerToken, hub, satellite, log });
-  const dash = createDashboard({ db, dbPath, core, host, log, slotDir, logins, report: { gh: github.gh, logPath, config: dockerConfig, secrets: () => [adminToken, runnerToken] } });
+  const dash = createDashboard({ db, dbPath, core, host, hub, log, slotDir, logins, report: { gh: github.gh, logPath, config: dockerConfig, secrets: () => [adminToken, runnerToken] } });
 
   const recovery = core.recover();
   const handler = brokerHandler({ core, hub, dash, adminToken, log, recovery });

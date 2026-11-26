@@ -5,7 +5,7 @@ import { cpus, freemem, totalmem } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { kvGet, kvSet } from './db.mjs';
 import { readOnlyQuery } from './dbquery.mjs';
-import { createTerminals } from './terminal.mjs';
+import { createTerminals, SCREEN_MAX } from './terminal.mjs';
 import { token as newToken } from './util.mjs';
 import { buildBody, checkImage, brokerFacts, fileIssue, issueRepo, originUrl, scrubText } from './report.mjs';
 
@@ -18,6 +18,10 @@ import { buildBody, checkImage, brokerFacts, fileIssue, issueRepo, originUrl, sc
  *   POST /dash/db/query     ad-hoc read-only SQL
  *   POST /dash/do/<call>    actions (answer, reply, pause, unpause, restart, kill, merge, gpu.*), need `X-Hauptling: 1`
  *   POST /dash/report/preview|send   F2 "Report an issue": the scrubbed body, and filing it with `gh issue create`
+ *   POST /dash/hosts/token  a satellite join token and the `hauptling satellite join` line (part 3, hub only)
+ * With satellites (PRD "Part 3") the board carries host chips and offline states, the Usage page a Hosts panel,
+ * and a satellite agent's terminal, diff and timeline come from its host over the link (`hub.rpc`); on a
+ * satellite, `remote(op, args)` answers those requests.
  * Only requests to 127.0.0.1 are served (containers reach the broker on docker0 through the
  * egress relay and get 403). Token and nonce values are masked in everything the explorer shows.
  */
@@ -25,6 +29,13 @@ import { buildBody, checkImage, brokerFacts, fileIssue, issueRepo, originUrl, sc
 const WEB = fileURLToPath(new URL('../web/dashboard/', import.meta.url));
 const ENDED = ['merged', 'killed', 'closed', 'handed-off'];
 const NO_SESSION = [...ENDED, 'failed', 'queued', 'waiting'];
+/** States in which an agent still has (or waits for) a worker on its host, so that host going offline matters. */
+const HOST_LIVE = ['queued', 'waiting', 'spawning', 'restarting', 'paused', 'working', 'blocked', 'done'];
+const WORKER_LIVE = ['spawning', 'restarting', 'paused', 'working', 'blocked', 'done'];
+/** A terminal relayed from a satellite ends after this many bytes; reopening starts a new one. */
+export const RELAY_MAX = 32 << 20;
+/** A diff a satellite sends is cut to fit in its reply. */
+const DIFF_MAX = 3 << 20;
 /**
  * One plain sentence for the human watching the board: what the agent is doing or waiting on now.
  * `a` is a board row (agent columns plus `status`, `test` and `ask` as the snapshot builds them).
@@ -41,6 +52,8 @@ export function headline(a) {
   const kind = t ? `${t.gpu ? 'GPU ' : ''}${t.purpose === 'gate' ? 'merge gate' : 'tests'}` : 'tests';
   const pending = t && !t.status ? (t.state === 'running' ? `Running ${kind}${t.retry ? `, ${t.retry}` : ''}` : t.retry ? `${cap(kind)} ${t.retry}${t.position ? `, ${ordinal(t.position)} in line` : ''}` : t.position ? `${cap(kind)} queued, ${ordinal(t.position)} in line` : `Waiting to run ${kind}`) : null;
   const why = (a.status || '').replace(/^[a-z-]+:\s*/, '');
+  if (a.host_state === 'lost') return `Host lost: ${a.host} (offline over 24 h)`;
+  if (a.host_state === 'offline') return `Host offline: ${a.host}`;
   switch (a.state) {
     case 'paused': return 'Paused by you';
     case 'restarting': return 'Restarting its session';
@@ -76,7 +89,7 @@ export function headline(a) {
   }
 }
 
-const ACTIONS = new Set(['answer', 'reply', 'pause', 'unpause', 'restart', 'kill', 'merge', 'delegator.set', 'gpu.pause', 'gpu.resume', 'test.run', 'models.prefer']);
+const ACTIONS = new Set(['answer', 'reply', 'pause', 'unpause', 'restart', 'kill', 'merge', 'delegator.set', 'gpu.pause', 'gpu.resume', 'test.run', 'models.prefer', 'satellite.revoke']);
 const COOKIE = 'hl_dash';
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml' };
 
@@ -110,8 +123,24 @@ export function masker(db) {
   };
 }
 
-export function createDashboard({ db, dbPath, core, host, log = () => {}, slotDir = () => { throw new Error('no slots'); }, logins = () => [], report = {} }) {
-  const terms = createTerminals({ db, host, slotDir, log });
+/**
+ * The `hauptling satellite join` line for "Add host": the hub URL is the address the browser used (the
+ * `tailscale serve` name) unless that is loopback, which a satellite can't reach; then a placeholder.
+ */
+export function joinLine(headers, tok) {
+  const name = String(headers['x-forwarded-host'] || headers.host || '').split(',')[0].trim();
+  const bare = name.replace(/:\d+$/, '');
+  const ok = /^[a-z0-9.-]+(:\d{1,5})?$/i.test(name) && !/^(localhost|127\.\d+\.\d+\.\d+|0\.0\.0\.0)$/i.test(bare);
+  const proto = String(headers['x-forwarded-proto'] || '').split(',')[0].trim() || (bare.endsWith('.ts.net') ? 'https' : 'http');
+  const hubUrl = ok ? `${proto === 'https' ? 'https' : 'http'}://${name}` : null;
+  return { hubUrl, line: `hauptling satellite join ${hubUrl || '<hub-url>'} ${tok}` };
+}
+
+/** `hub`: on the hub, its satellites (src/hub.mjs), for the Hosts panel and the relayed terminal, diff and timeline. */
+export function createDashboard({ db, dbPath, core, host, hub = null, log = () => {}, slotDir = () => { throw new Error('no slots'); }, logins = () => [], report = {} }) {
+  const terms = createTerminals({ db, host, slotDir, log, rpc: hub ? (name, op, args) => hub.rpc(name, op, args) : null });
+  const satellites = () => db.prepare('SELECT name, online, lost_at FROM hosts ORDER BY name').all();
+  const offline = (e) => /is offline/.test(e.message);
   const json = (res, code, body) => { res.writeHead(code, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(body)); };
   const agentRow = (id) => db.prepare('SELECT * FROM agents WHERE id = ?').get(id);
   /** Scrubbed title and body for "Report an issue"; preview and send both come through here, so the preview is exactly what is sent. */
@@ -181,6 +210,9 @@ export function createDashboard({ db, dbPath, core, host, log = () => {}, slotDi
     const gpuLine = db.prepare("SELECT id FROM tests WHERE state = 'queued' AND gpu = 1 ORDER BY created_at, rowid").all().map(r => r.id);
     const since = new Date(Date.now() - 24 * 3600e3).toISOString();
     const rows = db.prepare(`SELECT * FROM agents WHERE state NOT IN (${ENDED.map(s => `'${s}'`).join(',')}) OR updated_at >= ? ORDER BY created_at`).all(since);
+    // With satellites: agents on a host that is offline (or lost) say so instead of their last state.
+    const sats = satellites();
+    const down = new Map(sats.filter(h => !h.online).map(h => [h.name, h.lost_at ? 'lost' : 'offline']));
     const agents = rows.map(a => {
       const t = db.prepare('SELECT id, state, gpu, purpose, report, created_at, done_at, attempt, retry_note FROM tests WHERE agent = ? ORDER BY created_at DESC LIMIT 1').get(a.id);
       const r = t?.report ? JSON.parse(t.report) : null;
@@ -194,6 +226,7 @@ export function createDashboard({ db, dbPath, core, host, log = () => {}, slotDi
         test: t ? { id: t.id, state: t.state, gpu: Boolean(t.gpu), purpose: t.purpose, status: r?.status || null, passed: r?.passed ?? null, failed: r?.failed ?? null, at: t.done_at || t.created_at,
           position: t.state === 'queued' ? ((t.gpu ? gpuLine : tq.line).indexOf(t.id) + 1 || null) : null, retry: retryLabel(t) } : null,
         ask: ask ? { id: ask.id, question: ask.question, choices: JSON.parse(ask.choices), at: ask.at } : null,
+        ...(down.has(a.host) && HOST_LIVE.includes(a.state) ? { host_state: down.get(a.host) } : {}),
       };
     }).map(a => ({ ...a, headline: headline(a) }));
     const delegators = db.prepare(`
@@ -201,7 +234,8 @@ export function createDashboard({ db, dbPath, core, host, log = () => {}, slotDi
       FROM delegators WHERE active = 1 ORDER BY created_at
     `).all().map(d => ({ ...d, gate: Boolean(d.gate), automerge: Boolean(d.automerge), handoff_waiting: Boolean(d.handoff_waiting) }));
     const { line: _l, ...tests } = tq;
-    return { agents, delegators, gpu: await gpu(), tests, blocked: agents.filter(a => a.state === 'blocked').length };
+    return { agents, delegators, gpu: await gpu(), tests, blocked: agents.filter(a => a.state === 'blocked').length,
+      ...(sats.length ? { hosts: [{ name: 'hub', online: true, lost: false }, ...sats.map(h => ({ name: h.name, online: Boolean(h.online), lost: Boolean(h.lost_at) }))] } : {}) };
   }
 
   // One ticker for all open streams; it only runs while someone is watching.
@@ -228,7 +262,12 @@ export function createDashboard({ db, dbPath, core, host, log = () => {}, slotDi
 
   // ---------- agent detail ----------
   async function diff(a) {
-    if (a.host && a.host !== 'hub') return { stat: '', files: [], note: `Runs on ${a.host}; its clone is there` };
+    if (a.host && a.host !== 'hub') {
+      if (!hub) return { stat: '', files: [], note: `Runs on ${a.host}; its clone is there` };
+      if (NO_SESSION.includes(a.state)) return { stat: '', files: [], note: `No clone (${a.state})` };
+      try { return await hub.rpc(a.host, 'diff', { agent: a.id }); }
+      catch (e) { return { stat: '', files: [], note: offline(e) ? `${a.host} is offline; the diff is on that host` : e.message }; }
+    }
     if (!a.dir || !a.slot || NO_SESSION.includes(a.state)) return { stat: '', files: [], note: `No clone (${a.state})` };
     const g = async (args) => (await host.run(a.slot, ['git', '-C', a.dir, ...args], { timeout: 30e3 })).stdout;
     const base = await g(['merge-base', `origin/${a.base}`, 'HEAD']).then(s => s.trim(), () => `origin/${a.base}`);
@@ -260,6 +299,46 @@ export function createDashboard({ db, dbPath, core, host, log = () => {}, slotDi
       }),
     ].map(i => ({ ...i, text: mask(i.text) }));
     return { items: items.sort((x, y) => (x.at < y.at ? 1 : -1)).slice(0, 500), report: a.report, brief: a.brief };
+  }
+
+  /** The Events pane: for a satellite agent, the hub's timeline plus the mail its host holds (not twice). */
+  async function events(a) {
+    const t = timeline(a);
+    if (!a.host || a.host === 'hub' || !hub) return t;
+    let theirs;
+    try { theirs = (await hub.rpc(a.host, 'timeline', { agent: a.id }))?.items || []; }
+    catch (e) { return { ...t, note: offline(e) ? `${a.host} is offline: mail kept on that host is not shown` : e.message }; }
+    const mask = masker(db);
+    const known = new Set(t.items.map(i => `${i.kind}\n${i.text}`));
+    const more = theirs.filter(i => i && typeof i.text === 'string' && !known.has(`${i.kind}\n${mask(i.text)}`))
+      .map(i => ({ at: String(i.at), kind: String(i.kind).slice(0, 20), text: mask(i.text.slice(0, 4000)), host: a.host }));
+    return { ...t, items: [...t.items, ...more].sort((x, y) => (x.at < y.at ? 1 : -1)).slice(0, 500) };
+  }
+
+  /**
+   * On a satellite: the hub's `rpc`s for one of this host's agents (terminal, diff, timeline). Never a login
+   * session or another sid: only agent rows this broker has.
+   */
+  async function remote(op, { agent, since = null, keys } = {}) {
+    const a = typeof agent === 'string' && agentRow(agent);
+    if (!a) throw new Error(`No agent ${agent} on this host`);
+    if (op === 'term.screen') {
+      const s = await terms.screen(a.id);
+      if (s.text == null) return { text: null, alive: s.alive };
+      const text = s.text.slice(0, SCREEN_MAX);
+      const hash = createHash('sha1').update(text).digest('hex');
+      return hash === since ? { same: true, alive: s.alive } : { text, hash, alive: s.alive };
+    }
+    if (op === 'term.keys') return terms.relayKeys(a.id, keys);
+    if (op === 'diff') {
+      const d = await diff(a);
+      let size = (d.stat?.length || 0) + 1000;
+      const files = [];
+      for (const f of d.files || []) { size += f.patch.length + f.path.length + 50; if (size > DIFF_MAX) break; files.push(f); }
+      return files.length < (d.files?.length || 0) ? { ...d, files, truncated: `${d.files.length - files.length} more files not shown (too big to relay)` } : d;
+    }
+    if (op === 'timeline') return { items: timeline(a).items.filter(i => i.kind === 'mail') };
+    throw new Error(`Unknown rpc ${op}`);
   }
 
   function history(q = '') {
@@ -296,7 +375,30 @@ export function createDashboard({ db, dbPath, core, host, log = () => {}, slotDi
         })),
       };
     });
-    return { vendors, spend: spend(), prefer: await core.call('models.prefer') };
+    // With satellites: their readings under each vendor (labelled by host), and the Hosts panel.
+    const sats = hub && satellites().length ? hub.list() : [];
+    if (sats.length) {
+      for (const v of vendors) {
+        v.hosts = sats.map(h => ({ host: h.name, online: h.online, limits: (Array.isArray(h.capabilities?.usage) ? h.capabilities.usage : [])
+          .filter(l => l?.vendor === v.vendor && typeof l.used_pct === 'number').map(({ window, used_pct, resets_at, at }) => ({ window, used_pct, resets_at, at })) }))
+          .filter(x => x.limits.length);
+      }
+    }
+    return { vendors, spend: spend(), prefer: await core.call('models.prefer'), ...(sats.length ? { hosts: hostsPanel(sats) } : {}) };
+  }
+
+  /** The Hosts panel: each satellite's link state, sign-ins, free slots, GPU and live workers against its cap. */
+  function hostsPanel(sats) {
+    const live = db.prepare(`SELECT COUNT(*) n FROM agents WHERE host = ? AND slot IS NOT NULL AND state IN (${WORKER_LIVE.map(() => '?').join(',')})`);
+    return sats.map(h => {
+      const c = h.capabilities || {};
+      return {
+        name: h.name, online: h.online, revoked: h.revoked, lost: h.lost, lastSeen: h.lastSeen, offlineSince: h.offlineSince, joinedAt: h.joinedAt,
+        vendors: c.vendors && typeof c.vendors === 'object' ? c.vendors : {}, free: c.free && typeof c.free === 'object' ? c.free : {},
+        gpu: c.gpu ?? null, maxWorkers: c.maxWorkers ?? null, workers: live.get(h.name, ...WORKER_LIVE).n, pendingCommands: h.pendingCommands,
+        revoke: `hauptling satellite revoke ${h.name}`,
+      };
+    });
   }
 
   /** Totals of agents' (final) usage per day, vendor and repo; API-equivalent where vendors don't report cost. */
@@ -322,19 +424,31 @@ export function createDashboard({ db, dbPath, core, host, log = () => {}, slotDi
 
   // ---------- web terminal ----------
   /** SSE: a frame whenever the screen changes (polled ~5×/s while open), the input state, and `end`. */
+  /**
+   * A satellite agent's screen comes over the link (`term.screen` with the last hash, so an unchanged screen costs
+   * a few bytes), one request at a time, at most RELAY_MAX bytes per stream; polling stops when the browser closes.
+   */
   function termStream(req, res, sid) {
-    terms.resolve(sid);
+    const first = terms.resolve(sid);
+    const remote = first.kind === 'remote';
     res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive' });
     res.write('retry: 2000\n\n');
-    let lastText = null; let lastInput = ''; let closed = false; let busy = false; let errors = 0;
+    let lastText = null; let lastHash = null; let lastInput = ''; let closed = false; let busy = false; let errors = 0; let relayed = 0; let away = false;
     const send = (ev, data) => res.write(`event: ${ev}\ndata: ${JSON.stringify(data)}\n\n`);
     const step = async () => {
       if (closed || busy) return;
+      if (remote && res.writableLength > 1 << 20) return; // the browser is behind: skip, the next frame replaces this one
       busy = true;
       try {
-        const s = await terms.screen(sid);
+        const s = await terms.screen(sid, lastHash);
+        if (closed) return;
         errors = 0;
-        if (s.text !== null && s.text !== lastText) { lastText = s.text; send('frame', { text: s.text }); }
+        if (away) { away = false; send('note', { text: '' }); }
+        if (s.text !== null && s.text !== lastText) {
+          lastText = s.text; lastHash = s.hash ?? null;
+          send('frame', { text: s.text });
+          if (remote && (relayed += Buffer.byteLength(s.text)) > RELAY_MAX) { send('end', { reason: `relay limit reached (${RELAY_MAX >> 20} MB); reopen the terminal` }); stop(); return; }
+        }
         const inp = JSON.stringify(terms.inputState(sid));
         if (inp !== lastInput) { lastInput = inp; send('input', JSON.parse(inp)); }
         if (!s.alive) {
@@ -346,10 +460,12 @@ export function createDashboard({ db, dbPath, core, host, log = () => {}, slotDi
           stop();
         }
       } catch (e) {
+        if (closed) return;
+        if (remote && offline(e)) { if (!away) { away = true; send('note', { text: `${first.host} is offline; waiting for it to reconnect` }); } return; }
         if (++errors >= 5) { send('end', { reason: e.message }); stop(); }
       } finally { busy = false; }
     };
-    const timer = setInterval(step, 200);
+    const timer = setInterval(step, remote ? 250 : 200);
     timer.unref?.();
     const stop = () => { closed = true; clearInterval(timer); res.end(); };
     req.on('close', () => { closed = true; clearInterval(timer); });
@@ -430,7 +546,7 @@ export function createDashboard({ db, dbPath, core, host, log = () => {}, slotDi
         if (m) {
           const a = agentRow(m[1]);
           if (!a) { json(res, 404, { error: `No agent ${m[1]}` }); return true; }
-          json(res, 200, m[2] === 'diff' ? await diff(a) : timeline(a));
+          json(res, 200, m[2] === 'diff' ? await diff(a) : await events(a));
           return true;
         }
       }
@@ -442,6 +558,11 @@ export function createDashboard({ db, dbPath, core, host, log = () => {}, slotDi
         const body = await readBody(req, p === '/dash/report/send' ? 8e6 : 64e3);
         if (p === '/dash/db/query') { json(res, 200, await query(body.sql)); return true; }
         if (p === '/dash/term/login') { json(res, 200, await terms.startLogin(body.slot, body.vendor)); return true; }
+        if (p === '/dash/hosts/token') {
+          const t = await core.call('hub.token');
+          json(res, 200, { ...t, ...joinLine(req.headers, t.token) });
+          return true;
+        }
         const tp = /^\/dash\/term\/([\w.-]+)\/(input|keys|stop)$/.exec(p);
         if (tp) {
           const [, sid, what] = tp;
@@ -475,5 +596,5 @@ export function createDashboard({ db, dbPath, core, host, log = () => {}, slotDi
     return true;
   }
 
-  return { handle, snapshot, hostLoad, table, query, timeline, history, usage, spend, terms };
+  return { handle, snapshot, hostLoad, table, query, timeline, events, history, usage, spend, terms, remote };
 }

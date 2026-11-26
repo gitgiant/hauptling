@@ -71,15 +71,20 @@ async function* sseMessages(body) {
   }
 }
 
+/** At most this many hub `rpc`s run at once; more are answered "busy". */
+const RPC_MAX = 16;
+const REPLY_MAX = 4 << 20;
+
 /**
- * The satellite's link. `capabilities()` → {vendors: {vendor: [signed-in slots]}, free: {vendor: n}, gpu, maxWorkers}.
- * `onCommand(cmd)` receives hub commands (part 2). Timers and randomness are injectable for tests.
+ * The satellite's link. `capabilities()` → {vendors: {vendor: [signed-in slots]}, free: {vendor: n}, gpu, maxWorkers, usage}.
+ * `onCommand(cmd)` receives hub commands (part 2); `onRpc(op, args)` answers the hub's `rpc`s (part 3: terminal,
+ * diff, timeline). Timers and randomness are injectable for tests.
  */
-export function createSatellite({ db, config, capabilities = async () => ({}), onCommand = () => {}, log = () => {}, fetchImpl = fetch, heartbeatMs = 30e3, minDelayMs = 1e3, maxDelayMs = 60e3, random = Math.random }) {
+export function createSatellite({ db, config, capabilities = async () => ({}), onCommand = () => {}, onRpc = async (op) => { throw new Error(`Unknown rpc ${op}`); }, log = () => {}, fetchImpl = fetch, heartbeatMs = 30e3, minDelayMs = 1e3, maxDelayMs = 60e3, random = Math.random }) {
   const { hub, host, key } = config;
   const headers = { authorization: `Bearer ${key}`, 'x-hauptling-host': host };
   let stopped = false, connected = false, revoked = false;
-  let ctl = null, loop = null, flushing = Promise.resolve(), delay = minDelayMs, wake = null;
+  let ctl = null, loop = null, flushing = Promise.resolve(), delay = minDelayMs, wake = null, rpcs = 0;
 
   // A new join restarts the hub's event ids for this host; whatever an old membership left queued is dropped.
   if (kvGet(db, 'satellite_joined') !== String(config.joinedAt)) {
@@ -146,6 +151,21 @@ export function createSatellite({ db, config, capabilities = async () => ({}), o
     return run;
   }
 
+  /** A hub `rpc`: answered on /hub/reply, not through the outbox (nothing to replay: the hub stopped waiting). */
+  async function rpc(m) {
+    const { req, op, ...args } = m;
+    let r;
+    if (rpcs >= RPC_MAX) r = { req, ok: false, error: 'busy' };
+    else {
+      rpcs++;
+      try {
+        r = { req, ok: true, result: (await onRpc(op, args)) ?? null };
+        if (JSON.stringify(r).length > REPLY_MAX) r = { req, ok: false, error: `${op} answer too large` };
+      } catch (e) { r = { req, ok: false, error: e.message }; } finally { rpcs--; }
+    }
+    await post('/hub/reply', r).catch(e => log(`satellite: reply to ${op} failed: ${e.message}`));
+  }
+
   async function beat() {
     await post('/hub/state', { capabilities: await capabilities() });
     await flush();
@@ -166,6 +186,7 @@ export function createSatellite({ db, config, capabilities = async () => ({}), o
       for await (const m of sseMessages(res.body)) {
         if (m.event === 'hello') prune(JSON.parse(m.data).acked);
         else if (m.event === 'command') { try { command(JSON.parse(m.data)); } catch (e) { log(`satellite: bad command: ${e.message}`); } }
+        else if (m.event === 'rpc') { try { rpc(JSON.parse(m.data)); } catch (e) { log(`satellite: bad rpc: ${e.message}`); } }
         else if (m.event === 'revoked') { const why = JSON.parse(m.data).why; if (why === 'revoked') markRevoked(); else log(`satellite: hub closed the link (${why})`); break; }
       }
       await first;
@@ -188,7 +209,7 @@ export function createSatellite({ db, config, capabilities = async () => ({}), o
   }
 
   return {
-    queue, flush, command,
+    queue, flush, command, rpc,
     start() { if (!loop) { stopped = false; revoked = false; delay = minDelayMs; loop = run(); } return this; },
     async stop() { stopped = true; ctl?.abort(); wake?.(); await loop; loop = null; },
     status: () => ({ hub, host, connected, revoked, queued: queued() }),
