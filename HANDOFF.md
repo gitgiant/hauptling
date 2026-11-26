@@ -1,7 +1,7 @@
 # Handoff — 2026-11-26
 ## Needs a real run to confirm
 
-- Scrollback (branch `scrollback`, not merged; image rebuilt, broker restarted): the Terminal tab's 500 lines above the screen are unseen in a browser. Codex workers started before it still run on the alternate screen (no history) until restarted; agy's TUI is unchecked.
+- Scrollback (on main; image rebuilt, broker restarted): the Terminal tab's 500 lines above the screen are unseen in a browser. Codex workers started before it still run on the alternate screen (no history) until restarted; agy's TUI is unchecked.
 - Agent lifecycle controls passed stubbed tests. A Docker host is still needed to verify freeze/unfreeze, vendor session resume and container recreation from the existing clone, and to rebuild the worker image and restart the broker. External-merge cancellation was tested with a fake host. The live broker still needs to run the updated code. Test jobs surviving a broker restart and `[merge-failed]` (PRD "Merge gate"): tested with fake Docker/`gh` only. Needs `hauptling broker restart`; then restart again during a real test job (CPU and GPU) and check it is adopted and reported once.
 - CodeGraph with a real task: whether agents (and their subagents) actually use it; first-index time on a large repo (nullpunkt). The container path itself is verified (index 3 s / 1 s from cache on this repo, no MCP prompt, repo `.mcp.json` ignored).
 - Headroom routing (PRD "Token economy" stage 3): tested with a fake host only. Needs `hauptling broker restart` (no image); check a real `[headroom]` toast and a queued spawn starting after a reset.
