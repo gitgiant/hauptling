@@ -67,3 +67,23 @@ test('runner loop: broker errors are retried, not fatal', async () => {
   await runnerLoop({ call, gpu: true, root: mkdtempSync(join(tmpdir(), 'hl-runner-')), retryMs: 1, stop: () => n >= 3 });
   assert.equal(n, 3);
 });
+
+test('runner loop: heartbeats carry the job id and its progress (step, latest line, results so far)', async () => {
+  const r = repo(['node', '-e', "console.log('ok   one'); console.log('ok   two'); setTimeout(() => {}, 300)"]);
+  const root = mkdtempSync(join(tmpdir(), 'hl-runner-'));
+  const job = { id: 't_p', url: r.dir, sha: r.sha, timeout_s: 60, gpu: true };
+  const beats = [];
+  let claims = 0;
+  const call = async (name, args) => {
+    if (name === 'test.claim') return { job: ++claims === 1 ? job : null };
+    if (name === 'test.heartbeat') beats.push(args);
+    return { ok: true };
+  };
+  const report = await runnerLoop({ call, gpu: true, once: true, root, progressMs: 0 });
+  assert.equal(report.status, 'pass', report.notes);
+  const last = beats.filter(b => b.progress).pop();
+  assert.equal(last.id, 't_p');
+  assert.equal(last.progress.step, 'tests');
+  assert.equal(last.progress.results, 2);
+  assert.equal(last.progress.line, 'ok   two');
+});

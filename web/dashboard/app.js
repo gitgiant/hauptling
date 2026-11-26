@@ -3,6 +3,7 @@ import { ansiFragment } from './ansi.js';
 import { vendorBadge } from './vendors.js';
 import { openReport, shouldOpenReport, terminalInputFocused } from './report.js';
 import { keyFor, TOUCH_KEYS } from './termkeys.js';
+import { testProgress } from './progress.js';
 import { STACKED_QUERY, HANDLE_PX, DRAG_IGNORE, clampRatio, parseRatio, defaultRatio, splitKey, keyRatio, collapseAfterDrag, HEADER_STEPS, stepClasses, pickStep, handleKey } from './layout.js';
 // Text from the store is always set with textContent (h() below), never parsed as HTML.
 
@@ -354,9 +355,17 @@ const testsTip = (q) => `CPU test jobs, up to ${q.limit} at once, one per repo${
   ...q.running.map(r => `${r.id} ${r.purpose}${r.agent ? ` · ${r.agent}` : ''} · ${r.repo} · ${ago(r.claimed_at)}${r.retry ? ` · ${r.retry}` : ''}`),
   ...(q.retrying || []).map(r => `${r.id} ${r.purpose}${r.agent ? ` · ${r.agent}` : ''} · ${r.repo} · ${r.retry}`)].join('\n')}` : ''}`;
 function testDetails(q) {
-  return [q.running.map(r => h('span', { class: 'mono', text: `▶ ${r.agent || r.id} ${r.repo.split('/').pop()} ${ago(r.claimed_at)}${r.retry ? ` ${r.retry}` : ''}` })),
+  return [q.running.map(r => h('span', { class: 'mono' }, `▶ ${r.agent || r.id} ${r.repo.split('/').pop()}${r.retry ? ` ${r.retry}` : ''} `, progressBar(r))),
     (q.retrying || []).map(r => h('span', { class: 'mono', text: `↻ ${r.agent || r.id} ${r.retry}` })),
     q.queued ? h('span', { text: `· ${q.queued} queued` }) : null];
+}
+
+/** A running job's progress: a bar (time against the typical run; sliding when there is none yet) and "1:23 / ~3:10 · 4 done". */
+function progressBar(t) {
+  const p = testProgress(t);
+  return h('span', { class: `tprog${p.over ? ' over' : ''}`, title: p.tip },
+    h('span', { class: `track${p.pct == null ? ' busy' : ''}` }, h('span', { class: 'fill', style: p.pct == null ? '' : `width:${Math.round(p.pct * 100)}%` })),
+    h('span', { class: 'val', text: p.label }));
 }
 
 /** "Run now" for a queued CPU test job: starts it past the concurrency limit. */
@@ -377,7 +386,7 @@ function renderGpu(g, tq) {
   const running = g.running[0];
   const details = () => [
     h('span', { title: 'Free VRAM / what a job waits for', text: `${g.freeMB ?? '?'} MiB free` }),
-    running ? h('span', { class: 'mono', text: `▶ ${running.id}${running.agent ? ` (${running.agent})` : ''}` }) : null,
+    running ? h('span', { class: 'mono' }, `▶ ${running.id}${running.agent ? ` (${running.agent})` : ''} `, progressBar(running)) : null,
     g.queued.length ? h('span', { text: `${g.queued.length} queued${g.queued.some(q => q.waiting_since) ? ' · waiting for VRAM' : ''}` }) : null,
     g.paused
       ? h('button', { onclick: () => act('gpu.resume', {}, 'GPU queue resumed') }, 'Resume')
@@ -428,8 +437,17 @@ function card(a) {
 function testChip(t) {
   if (!t) return null;
   const label = `${t.gpu ? 'GPU ' : ''}${t.purpose === 'gate' ? 'gate' : 'test'}`;
+  if (t.state === 'running') return h('span', { class: 'chip run', title: testProgress(t).tip }, `${label} `, progressBar(t));
   if (!t.status) return h('span', { class: 'chip run', text: `${label} ${t.state}` });
   return h('span', { class: `chip ${t.status}`, title: `${t.id} ${clock(t.at)}`, text: `${label} ${t.status} ${t.passed ?? 0}/${(t.passed ?? 0) + (t.failed ?? 0)}` });
+}
+
+/** Agent detail: the running test job's bar and its latest output line. */
+function testRunning(t) {
+  const p = testProgress(t);
+  return h('div', { class: 'testrun' },
+    h('div', {}, h('b', { text: `${t.gpu ? 'GPU ' : ''}${t.purpose === 'gate' ? 'gate' : 'test'} ${p.step || 'running'} ` }), progressBar(t)),
+    p.line ? h('div', { class: 'mono tline', title: p.line, text: p.line }) : null);
 }
 
 const kfmt = (n) => (n == null ? '?' : n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n));
@@ -559,6 +577,7 @@ function renderDetailHead(a, el) {
     a.ask ? h('div', { class: 'ask' }, h('p', { text: a.ask.question }),
       h('div', { class: 'choices' }, a.ask.choices.map((c, i) => h('button', { class: 'primary', onclick: () => act('answer', { ask: a.ask.id, choice: i }, `Answered: ${c}`) }, c)))) : null,
     a.report ? h('div', { class: 'report' }, h('b', { text: 'Report: ' }), a.report) : null,
+    a.test?.state === 'running' ? testRunning(a.test) : null,
     a.spend ? h('div', { class: 'resets', title: 'Tokens, cost, usage-window points this task used, test rounds', text: `Spent: ${a.spend}` }) : null,
     a.ended ? null : reply,
     a.ended ? null : h('div', { class: 'actions' },

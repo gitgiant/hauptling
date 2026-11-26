@@ -20,14 +20,14 @@ function git(args, cwd) {
 }
 
 /** Runs one claimed job to a report (never throws: failures become an error report). */
-export async function runClaimed(job, { root, exec = execTests, checkout = defaultCheckout }) {
+export async function runClaimed(job, { root, exec = execTests, checkout = defaultCheckout, onProgress }) {
   const dir = join(root, job.id), out = join(root, `${job.id}-artifacts`);
   rmSync(dir, { recursive: true, force: true });
   rmSync(out, { recursive: true, force: true });
   mkdirSync(out, { recursive: true });
   try { checkout(job, dir); } catch (e) { return errorReport(job, `checkout failed: ${e.message}`); }
   try {
-    const report = await exec(dir, { selector: job.selector || '', timeout_s: job.timeout_s || 1800, artifacts: job.artifacts || [], gpu: job.gpu }, out);
+    const report = await exec(dir, { selector: job.selector || '', timeout_s: job.timeout_s || 1800, artifacts: job.artifacts || [], gpu: job.gpu }, out, { onProgress });
     return { ...report, id: job.id, sha: job.sha };
   } catch (e) {
     return errorReport(job, `runner: ${e.message}`);
@@ -43,7 +43,8 @@ function defaultCheckout(job, dir) {
 
 /**
  * Claim → run → report, until `once` has run a job or `stop()` returns true. `call` is the broker client.
- * Heartbeats (test.heartbeat) go out while a job runs.
+ * Heartbeats (test.heartbeat, with the job id and its progress) go out while a job runs: every HEARTBEAT_MS,
+ * and on new progress at most every `progressMs`.
  */
 export async function runnerLoop({ call, gpu = false, once = false, root, log = () => {}, stop = () => false, ...opts }) {
   mkdirSync(root, { recursive: true });
@@ -57,9 +58,12 @@ export async function runnerLoop({ call, gpu = false, once = false, root, log = 
     }
     if (!job) continue;
     log(`runner: ${job.id} ${job.url} ${job.sha.slice(0, 7)}${job.selector ? ` (${job.selector})` : ''}`);
-    const beat = setInterval(() => call('test.heartbeat', {}).catch(() => {}), HEARTBEAT_MS);
+    let progress = null; let sent = 0;
+    const beat = () => { sent = Date.now(); call('test.heartbeat', { id: job.id, ...(progress ? { progress } : {}) }).catch(() => {}); };
+    const timer = setInterval(beat, HEARTBEAT_MS);
+    const onProgress = (p) => { progress = p; if (Date.now() - sent >= (opts.progressMs ?? 5e3)) beat(); };
     let report;
-    try { report = await runClaimed(job, { root, ...opts }); } finally { clearInterval(beat); }
+    try { report = await runClaimed(job, { root, ...opts, onProgress }); } finally { clearInterval(timer); }
     log(`runner: ${job.id} ${report.status} (${report.passed} passed, ${report.failed} failed) ${report.notes || ''}`);
     try { await call('test.report', { id: job.id, report }); } catch (e) { log(`runner: report ${job.id}: ${e.message}`); }
     if (once) return report;

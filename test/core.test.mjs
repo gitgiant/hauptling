@@ -488,6 +488,22 @@ test('gpuRunner host: no GPU container; runner claims one job at a time, behind 
   assert.equal((await g.core.call('test.claim', { gpu: true, wait: 0 }, runner)).job.id, b.id);
 });
 
+test('test.heartbeat: an external runner\'s progress is kept while its job runs, ignored for another attempt, cleared on report', async () => {
+  const g = await gpuSetup({ gpu: ['run-gpu'] });
+  g.host.gpuRunner = () => 'host';
+  const runner = g.core.authenticate('RUN', 'ADMIN');
+  const a = await g.core.call('test.request', { gpu: true }, g.who);
+  await g.core.call('test.heartbeat', { id: a.id, progress: { step: 'tests', line: 'early', results: 1 } }, runner);
+  assert.equal(g.core.testProgress(a.id), null, 'not running yet: dropped');
+  const { job } = await g.core.call('test.claim', { gpu: true, wait: 0 }, runner);
+  await g.core.call('test.heartbeat', { id: job.id, progress: { step: 'tests', line: 'ok   claude-boids', results: 3 } }, runner);
+  const claimed = g.state(job.id).claimed_at;
+  assert.deepEqual({ ...g.core.testProgress(job.id, claimed), at: 0 }, { step: 'tests', line: 'ok   claude-boids', results: 3, at: 0 });
+  assert.equal(g.core.testProgress(job.id, new Date(Date.now() + 60e3).toISOString()), null, 'progress from before this claim is an earlier attempt');
+  await g.core.call('test.report', { id: job.id, report: g.pass(job) }, runner);
+  assert.equal(g.core.testProgress(job.id), null);
+});
+
 test('gpu pause: holds new jobs, lets the running one finish; --now kills and requeues it without a new round; resume', async () => {
   const g = await gpuSetup({ gpu: ['run-gpu'] });
   const a = await g.core.call('test.request', { gpu: true }, g.who);

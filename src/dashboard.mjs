@@ -197,10 +197,20 @@ export function createDashboard({ db, dbPath, core, host, hub = null, log = () =
     sample().catch(() => {});
   }
 
+  /** Typical run time in seconds for a repo's CPU or GPU jobs with this selector: the median of the last 5 finished, or null. */
+  function expectedSecs(repo, gpu, selector) {
+    const d = db.prepare("SELECT report FROM tests WHERE repo = ? AND gpu = ? AND COALESCE(selector, '') = ? AND state = 'done' AND report IS NOT NULL ORDER BY done_at DESC LIMIT 5").all(repo, gpu ? 1 : 0, selector || '')
+      .map(r => { try { const j = JSON.parse(r.report); return ['pass', 'fail'].includes(j.status) ? Number(j.duration_s) : NaN; } catch { return NaN; } })
+      .filter(n => n > 0).sort((a, b) => a - b);
+    return d.length ? Math.round(d[Math.floor(d.length / 2)]) : null;
+  }
+  /** Live fields for a running job: progress (step, latest line, results so far) and the typical run time. */
+  const live = (t) => ({ claimed_at: t.claimed_at, progress: core.testProgress?.(t.id, t.claimed_at) ?? null, expect_s: expectedSecs(t.repo, t.gpu, t.selector) });
+
   /** CPU test queue for the header: running jobs and queued ids in line order (GPU jobs are in gpu.status). */
   function testQueue() {
-    const running = db.prepare("SELECT t.id, t.agent, t.repo, t.purpose, t.claimed_at, t.attempt, t.retry_note FROM tests t WHERE state = 'running' AND gpu = 0 ORDER BY claimed_at").all()
-      .map(({ attempt, retry_note, ...r }) => ({ ...r, retry: retryLabel({ state: 'running', attempt, retry_note }) }));
+    const running = db.prepare("SELECT t.id, t.agent, t.repo, t.selector, t.purpose, t.claimed_at, t.attempt, t.retry_note FROM tests t WHERE state = 'running' AND gpu = 0 ORDER BY claimed_at").all()
+      .map(({ attempt, retry_note, ...r }) => ({ ...r, ...live({ ...r, gpu: 0 }), retry: retryLabel({ state: 'running', attempt, retry_note }) }));
     const queuedRows = db.prepare("SELECT id, agent, repo, purpose, attempt, retry_note FROM tests WHERE state = 'queued' AND gpu = 0 ORDER BY created_at, rowid").all();
     const retrying = queuedRows.filter(r => r.attempt > 1).map(({ attempt, retry_note, ...r }) => ({ ...r, retry: retryLabel({ state: 'queued', attempt, retry_note }) }));
     return { running, queued: queuedRows.length, retrying, limit: Math.max(1, Number(host.testConcurrency?.() ?? 3) || 3), line: queuedRows.map(r => r.id) };
@@ -215,7 +225,7 @@ export function createDashboard({ db, dbPath, core, host, hub = null, log = () =
     const sats = satellites();
     const down = new Map(sats.filter(h => !h.online).map(h => [h.name, h.lost_at ? 'lost' : 'offline']));
     const agents = rows.map(a => {
-      const t = db.prepare('SELECT id, state, gpu, purpose, report, created_at, done_at, attempt, retry_note FROM tests WHERE agent = ? ORDER BY created_at DESC LIMIT 1').get(a.id);
+      const t = db.prepare('SELECT id, state, gpu, purpose, repo, selector, report, created_at, claimed_at, done_at, attempt, retry_note FROM tests WHERE agent = ? ORDER BY created_at DESC LIMIT 1').get(a.id);
       const r = t?.report ? JSON.parse(t.report) : null;
       const ask = db.prepare('SELECT id, question, choices, at FROM asks WHERE agent = ? AND answered_at IS NULL ORDER BY id DESC LIMIT 1').get(a.id);
       return {
@@ -226,7 +236,8 @@ export function createDashboard({ db, dbPath, core, host, hub = null, log = () =
         headroom: core.headroomNote?.(a) ?? null,
         status: db.prepare('SELECT text FROM status WHERE identity = ?').get(a.id)?.text || null,
         test: t ? { id: t.id, state: t.state, gpu: Boolean(t.gpu), purpose: t.purpose, status: r?.status || null, passed: r?.passed ?? null, failed: r?.failed ?? null, at: t.done_at || t.created_at,
-          position: t.state === 'queued' ? ((t.gpu ? gpuLine : tq.line).indexOf(t.id) + 1 || null) : null, retry: retryLabel(t) } : null,
+          position: t.state === 'queued' ? ((t.gpu ? gpuLine : tq.line).indexOf(t.id) + 1 || null) : null, retry: retryLabel(t),
+          ...(t.state === 'running' ? live(t) : {}) } : null,
         ask: ask ? { id: ask.id, question: ask.question, choices: JSON.parse(ask.choices), at: ask.at } : null,
         ...(down.has(a.host) && HOST_LIVE.includes(a.state) ? { host_state: down.get(a.host) } : {}),
       };
@@ -236,7 +247,10 @@ export function createDashboard({ db, dbPath, core, host, hub = null, log = () =
       FROM delegators WHERE active = 1 ORDER BY created_at
     `).all().map(d => ({ ...d, gate: Boolean(d.gate), automerge: Boolean(d.automerge), handoff_waiting: Boolean(d.handoff_waiting) }));
     const { line: _l, ...tests } = tq;
-    return { agents, delegators, gpu: await gpu(), tests, blocked: agents.filter(a => a.state === 'blocked').length,
+    const g = await gpu();
+    // GPU status is cached for 10 s; the running job's progress is read fresh.
+    const gpuNow = g?.running ? { ...g, running: g.running.map(r => { const t = db.prepare('SELECT repo, selector FROM tests WHERE id = ?').get(r.id); return { ...r, ...live({ ...r, repo: t?.repo, selector: t?.selector, gpu: 1 }) }; }) } : g;
+    return { agents, delegators, gpu: gpuNow, tests, blocked: agents.filter(a => a.state === 'blocked').length,
       ...(sats.length ? { hosts: [{ name: 'hub', online: true, lost: false }, ...sats.map(h => ({ name: h.name, online: Boolean(h.online), lost: Boolean(h.lost_at) }))] } : {}) };
   }
 

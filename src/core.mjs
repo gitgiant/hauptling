@@ -1289,6 +1289,31 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     return { paused: true, requeued: running.map(r => r.id) };
   }
   function gpuResume() { kvDel(db, 'gpu:paused'); pump().catch(e => log(`test pump: ${e.message}`)); return { paused: false }; }
+  /**
+   * An external runner's heartbeat: `{ id, progress }` for the job it runs. The progress (step, latest line, result
+   * count; see runner.mjs progressTracker) is kept for the dashboard while the job runs.
+   */
+  function testHeartbeat({ id, progress } = {}) {
+    kvSet(db, 'runner_seen', Date.now());
+    if (!id || !progress || typeof progress !== 'object') return { ok: true };
+    if (!db.prepare("SELECT 1 FROM tests WHERE id = ? AND state = 'running'").get(id)) return { ok: true };
+    const { step, line, results } = progress;
+    kvSet(db, `test:progress:${id}`, JSON.stringify({ step: String(step || '').slice(0, 16), line: String(line || '').slice(0, 160), results: Number(results) || 0, at: Date.now() }));
+    return { ok: true };
+  }
+
+  /**
+   * A running job's live progress: the external runner's last heartbeat, else the test container's progress.json.
+   * Progress from before `claimedAt` belongs to an earlier attempt (requeued) and is ignored.
+   */
+  function testProgress(id, claimedAt) {
+    const since = claimedAt ? Date.parse(claimedAt) : 0;
+    let p = null;
+    try { p = JSON.parse(kvGet(db, `test:progress:${id}`) || 'null'); } catch {}
+    if (!p || p.at < since) p = host.testProgress?.(id) ?? null;
+    return p && p.at >= since ? p : null;
+  }
+
   async function gpuStatus() {
     const c = gpuCfg();
     const running = db.prepare("SELECT id, agent, purpose, claimed_at, timeout_s FROM tests WHERE state = 'running' AND gpu = 1 AND host = 'hub'").all();
@@ -1399,6 +1424,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     testSynced(id);
     kvDel(db, `gpu:need:${id}`);
     kvDel(db, `gpu:wait:${id}`);
+    kvDel(db, `test:progress:${id}`);
     bus.emit(`test:${id}`);
     if (t.purpose === 'gate' && t.agent) await gateResult(agentRow(t.agent), t, report);
     return { ok: true };
@@ -1962,7 +1988,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
       return gpuRequest({ requester: 'user', ...a }, null);
     },
     'test.wait': testWait, 'test.get': testGet, 'test.run': testRunNow,
-    'test.claim': claim, 'test.report': testReport, 'test.heartbeat': () => kvSet(db, 'runner_seen', Date.now()),
+    'test.claim': claim, 'test.report': testReport, 'test.heartbeat': testHeartbeat,
     'usage.report': (a, who) => usageReport(who, a),
     'usage.host': ({ vendor, payload }) => {
       if (!isFamily(vendor)) throw new Error(`Vendor must be claude, codex or agy, got "${vendor}"`);
@@ -2011,5 +2037,5 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   hub?.bind({ receive, onState: placeSoon, onResult: commandDone });
   if (satellite) syncTests();
 
-  return { call, authenticate, emit, keyOut, command, startAll, syncTests, freeSlots, headroomNote, spend, poll, watch, watchTests, startQueued, bus, askForPage, answer, pump, recover, gpuReady, refreshUsage, recordUsage, budgetState, billingFor };
+  return { call, authenticate, emit, keyOut, command, startAll, syncTests, freeSlots, headroomNote, spend, testProgress, poll, watch, watchTests, startQueued, bus, askForPage, answer, pump, recover, gpuReady, refreshUsage, recordUsage, budgetState, billingFor };
 }
