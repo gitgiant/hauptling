@@ -1,4 +1,4 @@
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { createHash, timingSafeEqual, randomUUID } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { join, normalize } from 'node:path';
 import { cpus, freemem, totalmem } from 'node:os';
@@ -320,7 +320,7 @@ export function createDashboard({ db, dbPath, core, host, hub = null, log = () =
    * On a satellite: the hub's `rpc`s for one of this host's agents (terminal, diff, timeline). Never a login
    * session or another sid: only agent rows this broker has.
    */
-  async function remote(op, { agent, since = null, keys } = {}) {
+  async function remote(op, { agent, since = null, keys, size = null } = {}) {
     const a = typeof agent === 'string' && agentRow(agent);
     if (!a) throw new Error(`No agent ${agent} on this host`);
     if (op === 'term.screen') {
@@ -331,6 +331,7 @@ export function createDashboard({ db, dbPath, core, host, hub = null, log = () =
       return hash === since ? { same: true, alive: s.alive } : { text, hash, alive: s.alive };
     }
     if (op === 'term.keys') return terms.relayKeys(a.id, keys);
+    if (op === 'term.resize') return terms.relayResize(a.id, size);
     if (op === 'diff') {
       const d = await diff(a);
       let size = (d.stat?.length || 0) + 1000;
@@ -425,8 +426,10 @@ export function createDashboard({ db, dbPath, core, host, hub = null, log = () =
   }
 
   // ---------- web terminal ----------
-  /** SSE: a frame whenever the screen changes (polled ~5×/s while open), the input state, and `end`. */
   /**
+   * SSE: this stream's `viewer` id (for `size`), a frame whenever the screen changes (polled ~5×/s while open), the
+   * input state, and `end`.
+   *
    * A satellite agent's screen comes over the link (`term.screen` with the last hash, so an unchanged screen costs
    * a few bytes), one request at a time, at most RELAY_MAX bytes per stream; polling stops when the browser closes.
    */
@@ -437,8 +440,13 @@ export function createDashboard({ db, dbPath, core, host, hub = null, log = () =
     res.write('retry: 2000\n\n');
     let lastText = null; let lastHash = null; let lastInput = ''; let closed = false; let busy = false; let errors = 0; let relayed = 0; let away = false;
     const send = (ev, data) => res.write(`event: ${ev}\ndata: ${JSON.stringify(data)}\n\n`);
+    const viewer = randomUUID();
+    terms.join(sid, viewer);
+    send('viewer', { id: viewer });
     const step = async () => {
-      if (closed || busy) return;
+      if (closed) return;
+      terms.sync(sid);
+      if (busy) return;
       if (remote && res.writableLength > 1 << 20) return; // the browser is behind: skip, the next frame replaces this one
       busy = true;
       try {
@@ -469,8 +477,9 @@ export function createDashboard({ db, dbPath, core, host, hub = null, log = () =
     };
     const timer = setInterval(step, remote ? 250 : 200);
     timer.unref?.();
-    const stop = () => { closed = true; clearInterval(timer); res.end(); };
-    req.on('close', () => { closed = true; clearInterval(timer); });
+    const quit = () => { closed = true; clearInterval(timer); terms.leave(sid, viewer); };
+    const stop = () => { quit(); res.end(); };
+    req.on('close', quit);
     step();
   }
 
@@ -567,10 +576,10 @@ export function createDashboard({ db, dbPath, core, host, hub = null, log = () =
           json(res, 200, { ...t, ...joinLine(req.headers, t.token) });
           return true;
         }
-        const tp = /^\/dash\/term\/([\w.-]+)\/(input|keys|stop)$/.exec(p);
+        const tp = /^\/dash\/term\/([\w.-]+)\/(input|keys|size|stop)$/.exec(p);
         if (tp) {
           const [, sid, what] = tp;
-          const r = what === 'input' ? terms.input(sid, Boolean(body.on)) : what === 'keys' ? await terms.keys(sid, body.keys) : await terms.stopLogin(sid);
+          const r = what === 'input' ? terms.input(sid, Boolean(body.on)) : what === 'keys' ? await terms.keys(sid, body.keys) : what === 'size' ? void terms.resize(sid, String(body.viewer), body.size ?? null) : await terms.stopLogin(sid);
           json(res, 200, r ?? { ok: true });
           return true;
         }

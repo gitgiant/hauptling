@@ -125,6 +125,7 @@ export async function runBroker({ port = BROKER_PORT } = {}) {
   const dash = createDashboard({ db, dbPath, core, host, hub: joined ? null : hub, log, slotDir, logins, report: { gh: github.gh, logPath, config: dockerConfig, secrets: () => [adminToken, runnerToken] } });
 
   const recovery = core.recover();
+  recovery.then(() => dash.terms.restoreSizes()).catch(e => log(`terminal sizes: ${e.message}`)); // nobody is watching yet
   const handler = brokerHandler({ core, hub, dash, adminToken, log, recovery });
   // 127.0.0.1 for you; the docker0 bridge address for the egress proxy's relay (containers never reach it directly).
   const docker0 = networkInterfaces().docker0?.find(a => a.family === 'IPv4')?.address;
