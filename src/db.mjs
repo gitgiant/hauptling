@@ -54,6 +54,18 @@ CREATE TABLE IF NOT EXISTS host_usage (
   vendor TEXT NOT NULL, window TEXT NOT NULL, used_pct REAL NOT NULL, resets_at TEXT, at TEXT NOT NULL,
   PRIMARY KEY (vendor, window)
 );
+-- Several hosts (PRD "Several hosts"): satellites joined to this hub. key_hash: SHA-256 of the satellite key.
+-- last_seq: highest event id taken from it (replays at or below it are skipped). capabilities: JSON.
+CREATE TABLE IF NOT EXISTS hosts (
+  name TEXT PRIMARY KEY, key_hash TEXT UNIQUE, created_at TEXT NOT NULL, last_seen INTEGER,
+  online INTEGER NOT NULL DEFAULT 0, offline_since INTEGER, lost_at INTEGER, capabilities TEXT,
+  last_seq INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS join_tokens (hash TEXT PRIMARY KEY, expires_at INTEGER NOT NULL, used_at INTEGER);
+-- On a satellite: events the hub hasn't acknowledged yet. AUTOINCREMENT so an id is never reused.
+CREATE TABLE IF NOT EXISTS outbox (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT, agent TEXT, kind TEXT NOT NULL, text TEXT NOT NULL, at TEXT NOT NULL
+);
 `;
 
 /** Opens (and migrates) the store. Only the broker process calls this. */
@@ -77,6 +89,10 @@ export function openDb(path) {
   // Per-delegator merge settings: gate (hauptling test job before merging), automerge (broker merges rather than stopping at [ready]).
   for (const col of ['gate INTEGER NOT NULL DEFAULT 1', 'automerge INTEGER NOT NULL DEFAULT 1']) {
     try { db.exec(`ALTER TABLE delegators ADD COLUMN ${col}`); } catch {}
+  }
+  // Several hosts: where an agent or test job runs ('hub' = this machine).
+  for (const t of ['agents', 'tests']) {
+    try { db.exec(`ALTER TABLE ${t} ADD COLUMN host TEXT NOT NULL DEFAULT 'hub'`); } catch {}
   }
   return db;
 }

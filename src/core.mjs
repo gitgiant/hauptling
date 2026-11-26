@@ -16,7 +16,8 @@ import * as keyStore from './keys.mjs';
  *   github – host gh wrapper (src/github.mjs)
  *   notify – platform notification (choices + links to the broker's answer page)
  *   publicUrl – where your browser reaches the broker (answer links)
- * `call(name, args, who)` is the whole API; who = {role: admin|agent|runner, agent?}.
+ *   hub    – satellites joined to this broker (src/hub.mjs); optional
+ * `call(name, args, who)` is the whole API; who = {role: admin|agent|runner|satellite, agent?, host?}.
  */
 
 const PAUSABLE = ['working', 'blocked', 'done'];
@@ -31,11 +32,13 @@ const ENDED = ['merged', 'killed', 'closed', 'handed-off'];
 export const CLONE_EXCLUDES = ['.hauptling/', '.pnpm-store/', 'node_modules/'];
 const AGENT_CALLS = new Set(['hook', 'report', 'ask', 'mail.send', 'mail.check', 'mail.status', 'mail.peers', 'test.request', 'test.wait', 'test.get', 'whoami', 'usage.report']);
 const RUNNER_CALLS = new Set(['test.claim', 'test.report', 'test.heartbeat']);
+/** What a satellite key may call on /api (part 2 adds its own agents' and tests' calls). Everything else is refused. */
+const SATELLITE_CALLS = new Set();
 
 const HANDOFF_PCT = 85;
 const WORKER_RULES = readFileSync(new URL('../prompts/worker-rules.md', import.meta.url), 'utf8').trim();
 
-export function createCore({ db, host, github, notify = () => false, models = loadModels, savePrefer = setPrefer, keys = keyStore, workerUrl, publicUrl = workerUrl, runnerToken, log = () => {}, stallMinutes = Number(process.env.HAUPTLING_STALL_MINUTES || 10), idleMinutes = Number(process.env.HAUPTLING_IDLE_MINUTES || 15) }) {
+export function createCore({ db, host, github, notify = () => false, models = loadModels, savePrefer = setPrefer, keys = keyStore, workerUrl, publicUrl = workerUrl, runnerToken, hub = null, log = () => {}, stallMinutes = Number(process.env.HAUPTLING_STALL_MINUTES || 10), idleMinutes = Number(process.env.HAUPTLING_IDLE_MINUTES || 15) }) {
   const changing = new Set();
   const merging = new Set();
   const bus = new EventEmitter();
@@ -49,8 +52,8 @@ export function createCore({ db, host, github, notify = () => false, models = lo
   };
   const slots = () => JSON.parse(kvGet(db, 'slots') || '["hl-w1","hl-w2","hl-w3"]');
 
-  function emit(delegator, agent, kind, text) {
-    db.prepare('INSERT INTO events (delegator, agent, kind, text, at) VALUES (?, ?, ?, ?, ?)').run(delegator, agent, kind, String(text).slice(0, 600), now());
+  function emit(delegator, agent, kind, text, at = now()) {
+    db.prepare('INSERT INTO events (delegator, agent, kind, text, at) VALUES (?, ?, ?, ?, ?)').run(delegator, agent, kind, String(text).slice(0, 600), at);
     bus.emit(`ev:${delegator}`);
     log(`event ${kind} ${agent || ''}: ${text}`);
   }
@@ -1274,9 +1277,14 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     'models.prefer': ({ value }) => (value ? savePrefer(value) : preferOf(models())),
     'slots.get': () => slots(),
     'slots.set': ({ slots: s }) => { kvSet(db, 'slots', JSON.stringify(s)); return s; },
+    'hub.token': () => mustHub().issueToken(),
+    'satellite.list': () => mustHub().list(),
+    'satellite.revoke': (a) => mustHub().revoke(a),
   };
+  const mustHub = () => { if (!hub) throw new Error('This broker has no hub'); return hub; };
 
   async function call(name, args = {}, who = { role: 'admin' }) {
+    if (who.role === 'satellite' && !SATELLITE_CALLS.has(name)) throw new Error(`${name} is not allowed for satellite ${who.host}`);
     const fn = handlers[name];
     if (!fn) throw new Error(`Unknown call ${name}`);
     if (who.role === 'agent' && !AGENT_CALLS.has(name)) throw new Error(`${name} is not allowed for workers`);
@@ -1290,14 +1298,14 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     return fn(args, who);
   }
 
-  /** Token → caller. */
-  function authenticate(tok, adminToken) {
+  /** Token → caller. `hostHeader`: X-Hauptling-Host, which a satellite key must match. */
+  function authenticate(tok, adminToken, hostHeader) {
     if (tok && tok === adminToken) return { role: 'admin' };
     if (tok && tok === runnerToken) return { role: 'runner' };
     const a = tok && db.prepare('SELECT id, state FROM agents WHERE token = ?').get(tok);
     if (a && !ENDED.includes(a.state)) return { role: 'agent', agent: a.id };
-    return null;
+    return hub?.authenticate(tok, hostHeader) || null;
   }
 
-  return { call, authenticate, spend, poll, watch, watchTests, startQueued, bus, askForPage, answer, pump, recover, gpuReady, refreshUsage, recordUsage, budgetState, billingFor };
+  return { call, authenticate, emit, freeSlots, spend, poll, watch, watchTests, startQueued, bus, askForPage, answer, pump, recover, gpuReady, refreshUsage, recordUsage, budgetState, billingFor };
 }

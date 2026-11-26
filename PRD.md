@@ -225,6 +225,34 @@ Goal: subscription usage windows last longer. Workers first, then the delegator;
 - Each agent records its billing (`api` or `plan`) at start. Period spend = sum of the reported cost of this vendor's `api` agents created since the last reset day (default the 1st, local time). Hauptling's own tally: an ordinary API key can't read the credit balance, and spend outside Hauptling isn't counted. An API spawn ignores the plan's 5h/week limits; a plan spawn waits for them as before.
 - At 90% one notification and an `api-budget` event to the delegator, once per period. The header shows an "API $63/$100" chip, the vendor card the same plus the reset date; spawn output and agent rows say `api` or `plan`.
 
+## Several hosts (2026-11-25)
+
+Built in three parts: 1 = this design, the store and the hub/satellite link; 2 = spawning, tests and GitHub on satellites, placement; 3 = dashboard.
+
+- **Hub and satellites.** This machine's broker is the **hub**: delegators, the store, the dashboard, the event stream and `wait` stay there. A **satellite** is a broker on another host that only runs workers and test jobs on its own slots, signed in with its own vendor accounts. Credentials never move between hosts (Claude refresh tokens rotate, so copies would sign each other out). With no satellites the hub works exactly as before.
+- **Link.** Satellites connect **out** to the hub over Tailscale (the hub URL is a tailnet address, e.g. the `tailscale serve` HTTPS name in front of the broker port) and keep one authenticated, long-lived connection: SSE from the hub for commands, POST for state and events back. No inbound port on satellites. The satellite refuses a hub URL that is plain `http` unless it is loopback or a tailnet address (`100.64.0.0/10`, `*.ts.net`), so the key never crosses an untrusted network in clear.
+- **Joining.** `hauptling hub token` on the hub prints a one-time join token (`hlj_…`, expires in 15 min; only its SHA-256 is stored). `hauptling satellite join <hub-url> <token> [--name H]` on the other host exchanges it for a revocable per-satellite key (`hls_…`; the hub stores only its SHA-256), saved in `~/.hauptling/satellite.json` (600, dir 700, like `broker.json` and the API keys); then `hauptling broker restart` makes the broker dial out. The name defaults to the host name (lowercase `[a-z0-9.-]`, not `hub`). Re-joining under an existing name replaces its key (the old one stops working) and starts its event numbering over. `hauptling satellite list|revoke <host>` on the hub; revoking drops the key and closes the open link at once.
+- **Scope.** A satellite key can only act for its own host's agents and tests: on `/api/*` it is role `satellite` and every call outside its (part 2) list is refused, so no delegator, admin, DB or other-host calls; events it sends for an agent on another host are dropped. Every satellite request is logged with the host (`broker.log`, `hub <host> …`).
+- **GitHub.** A satellite pushes branches, opens PRs and merges with **its own** `gh` login, as the hub does today. Only **GitHub repos** can run on satellites; local path repos stay on the hub. (Part 2.)
+- **Tests.** A satellite's workers use **that host's** test queue and GPU queue; the hub only shows them. (Part 2.)
+- **Placement.** `delegator start --host H` or `delegator set --host H` binds a delegator to a host. Unbound delegators auto-place: a host with a free slot signed in to the vendor (GPU tasks to GPU hosts), least busy first. `spawn --host H` overrides either. `hub` names this machine. (Part 2.)
+- **Offline.** If a satellite drops, its agents show "host offline" on the board and in `status`. Nothing is killed. The satellite queues its events while offline and replays them, in order and de-duplicated by id, when it reconnects. After 24 h offline each delegator with live agents on it gets one `[host-lost]` event (again only after the host has been back and drops again).
+
+### Store
+
+- `hosts`: `name`, `key_hash`, `created_at`, `last_seen`, `online`, `offline_since`, `lost_at`, `capabilities` (JSON: vendors → signed-in slots, `gpu`, `free` slots per vendor, `maxWorkers`), `last_seq` (highest event id taken from it). `join_tokens`: `hash`, `expires_at`, `used_at`.
+- `agents.host` and `tests.host`, default `hub`.
+- On a satellite, `outbox` (`seq` AUTOINCREMENT, so ids are never reused) holds events not yet acknowledged by the hub.
+
+### Protocol (all on the broker port, under `/hub/`)
+
+- **Auth header:** `Authorization: Bearer hls_…` plus `X-Hauptling-Host: <name>`; both must match a non-revoked host, else 401 (the satellite then stops dialling and logs "key revoked; join again").
+- `POST /hub/join` `{host, token}` → `{host, key}`. No auth header; the join token is single-use and refused once used or expired.
+- `GET /hub/link` → `text/event-stream`, held open. Messages: `hello` `{host, acked}` (the last event id the hub holds), `command` `{id, type, …}` (part 2: spawn, kill, …), `revoked` (then the stream ends), and a `: ping` comment every 15 s to keep proxies from idling it out. Opening the link counts as a heartbeat. A second link from the same host replaces the first.
+- `POST /hub/state` `{capabilities}` → `{acked}`. Sent on connect and every 30 s: it is the heartbeat. The hub marks a host online on any authenticated request and offline after 90 s without one (checked every 30 s).
+- `POST /hub/events` `{events: [{id, agent, kind, text, at}]}` → `{acked}`. Ids increase per satellite. The hub takes events in id order, skips any id ≤ `last_seq` (a replay), raises `last_seq` in the same transaction as the insert, and answers the new `last_seq`; the satellite deletes its outbox up to `acked`. So a lost answer just means a replay that the hub skips: exactly once, in order.
+- **Reconnect:** on a failed request or a closed stream the satellite retries the link with backoff 1 s, doubling to 60 s, ±20% jitter; it resets after a successful connect. Events raised meanwhile wait in `outbox`; on reconnect it sends its state, then replays the outbox in batches of 100.
+
 ## Turnkey deployment (goal)
 
 After phase 1–4 work, standing up Hauptling on a **new host is one command**: clone, run the installer, sign in when asked, `doctor` passes. Hosts may be **Windows, Ubuntu or macOS**; only Windows is available for testing now.

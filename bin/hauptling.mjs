@@ -43,6 +43,10 @@ Setup:
   login SLOT VENDOR [--force]              sign one slot in to claude|codex|agy (refused while a worker of that vendor runs on the slot)
   init [DIR]                               write the detected hauptling.json
   broker start|stop|restart|status|run
+  hub token                                one-time join token for a satellite (15 min)
+  satellite join HUB_URL TOKEN [--name H]  make this host a satellite of the hub (then \`broker restart\`)
+  satellite list | satellite revoke HOST   on the hub: joined satellites; cut one off
+  satellite status                         on a satellite: which hub it is joined to
 Internal: hook VENDOR EVENT, prepare VENDOR DIR, usage VENDOR (status line), egress, test-exec`;
 
 const out = (v) => console.log(typeof v === 'string' ? v : JSON.stringify(v, null, 2));
@@ -78,6 +82,37 @@ async function main() {
     }
 
     // ----- delegator -----
+    // ----- several hosts (PRD "Several hosts") -----
+    case 'hub': {
+      if (args._[0] !== 'token') throw new Error('hub token');
+      const r = await call('hub.token');
+      return out(`${r.token}\nOne use, expires ${r.expiresAt}. On the other host run:\n  hauptling satellite join <hub-url> ${r.token}\n<hub-url>: this broker's tailnet address, e.g. its \`tailscale serve\` https://<name>.<tailnet>.ts.net`);
+    }
+    case 'satellite': {
+      const sub = args._[0];
+      if (sub === 'join') {
+        const { joinHub } = await import('../src/satellite.mjs');
+        const r = await joinHub(args._[1], args._[2], args.name ? { name: args.name } : {});
+        return out(`Joined ${r.hub} as ${r.host}; key saved in ~/.hauptling/satellite.json. Run \`hauptling broker restart\` to connect.`);
+      }
+      if (sub === 'status') {
+        const { readSatellite } = await import('../src/satellite.mjs');
+        const s = readSatellite();
+        return out(s ? `satellite ${s.host} of ${s.hub} (joined ${s.joinedAt}); the link's state is in ~/.hauptling/broker.log` : 'Not a satellite (this host is a hub).');
+      }
+      if (sub === 'revoke') { const r = await call('satellite.revoke', { host: args._[1] }); return out(`${r.host}: key revoked; it can join again with a new \`hauptling hub token\`.`); }
+      if (sub === 'list' || !sub) {
+        const hosts = await call('satellite.list');
+        if (!hosts.length) return out('No satellites. `hauptling hub token` starts a join.');
+        return out(hosts.map(h => {
+          const c = h.capabilities || {};
+          const vendors = Object.entries(c.vendors || {}).map(([v, s]) => `${v} ${c.free?.[v] ?? '?'}/${s.length} free`).join(', ') || 'no sign-ins';
+          const state = h.revoked ? 'revoked' : h.online ? 'online' : `offline${h.offlineSince ? ` since ${h.offlineSince}` : ''}`;
+          return `${h.name.padEnd(16)} ${state.padEnd(10)} ${vendors}${c.gpu ? ', GPU' : ''}; ${h.agents} agents; last seen ${h.lastSeen || 'never'}`;
+        }).join('\n'));
+      }
+      throw new Error('satellite join|list|revoke|status');
+    }
     case 'delegator': {
       if (args._[0] === 'end') { const r = await call('delegator.end', { delegator: args.delegator }); return out(`Delegator ${r.delegator} ended.`); }
       if (args._[0] === 'set') {
