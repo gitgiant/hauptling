@@ -679,7 +679,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
       const checks = await github.requiredChecks(slug, a.base);
       if (checks.length) {
         update(id, { gate: 'ci' });
-        if (d.automerge) await github.prAutoMerge(slug, pr.number);
+        if (d.automerge) await mergeNow(agentRow(id));
         else emitReady(agentRow(id));
         return;
       }
@@ -700,15 +700,18 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
       return;
     }
     if (!delegatorRow(a.delegator).automerge) return emitReady(a);
-    await mergeNow(a);
+    if (await mergeNow(a)) return;
     if (githubSlug(a.repo)) await poll();
   }
 
-  /** Merges a reported agent's work: push to base (pushToMain), the GitHub PR, or the local branch. Emits `merged` (PRs: poll does). */
+  /**
+   * Merges a reported agent's work: push to base (pushToMain), the GitHub PR, or the local branch. Emits `merged`
+   * (PRs: poll does). Returns null, or why the merge failed, after telling the delegator.
+   */
   async function mergeNow(a) {
     if (merging.has(a.id)) throw new Error(`${a.id} already has a merge in progress`);
     merging.add(a.id);
-    try { await mergeAgent(a); }
+    try { return await mergeAgent(a); }
     finally { merging.delete(a.id); }
   }
 
@@ -725,23 +728,48 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
         update(a.id, { state: 'working' });
         emit(a.delegator, a.id, 'gate-failed', `${a.id} tests passed but pushing to ${a.base} failed: ${e.message.slice(0, 200)}`);
         await sendMail('hauptling', a.id, `Tests passed, but your branch no longer applies on ${a.base}. Rebase onto origin/${a.base}, fix conflicts, commit, report again.`);
-        return;
+        return `pushing to ${a.base} failed: ${e.message}`;
       }
       await cleanup(a, 'merged');
       emit(a.delegator, a.id, 'merged', `${a.id} pushed to ${a.base} (pushToMain)`);
     } else if (slug) {
-      if (a.gate === 'ci') await github.prAutoMerge(slug, a.pr_number); // GitHub's required checks still apply
-      else await github.prMerge(slug, a.pr_number); // the caller polls, which emits [merged]
+      try {
+        if (a.gate === 'ci') await github.prAutoMerge(slug, a.pr_number); // GitHub's required checks still apply
+        else await github.prMerge(slug, a.pr_number); // the caller polls, which emits [merged]
+      } catch (e) {
+        // gh can fail after the merge went through (e.g. deleting the branch).
+        const pr = await github.prView(slug, a.pr_number).catch(() => null);
+        if (pr?.state !== 'MERGED') return mergeFailed(a, e.message);
+      }
     } else {
-      const hostGit = (repo, args) => host.hostGit(repo, args);
-      const current = await hostGit(a.repo, ['rev-parse', '--abbrev-ref', 'HEAD']);
-      if (current === a.base) {
-        if (await hostGit(a.repo, ['status', '--porcelain', '--untracked-files=no'])) throw new Error(`${a.base} is checked out with uncommitted changes in ${a.repo}`);
-        await hostGit(a.repo, ['merge', '--no-ff', '-m', `Merge ${a.branch}: ${a.title}`, a.branch]);
-      } else await hostGit(a.repo, ['fetch', '.', `${a.branch}:${a.base}`]);
+      const hostGit = (args) => host.hostGit(a.repo, args);
+      let checkedOut;
+      try {
+        checkedOut = await hostGit(['rev-parse', '--abbrev-ref', 'HEAD']) === a.base;
+        if (checkedOut && await hostGit(['status', '--porcelain', '--untracked-files=no'])) throw new Error(`${a.base} is checked out with uncommitted changes in ${a.repo}`);
+      } catch (e) { return mergeFailed(a, e.message, { rework: false }); }
+      try {
+        if (checkedOut) await hostGit(['merge', '--no-ff', '-m', `Merge ${a.branch}: ${a.title}`, a.branch]);
+        else await hostGit(['fetch', '.', `${a.branch}:${a.base}`]);
+      } catch (e) {
+        if (checkedOut) await hostGit(['merge', '--abort']).catch(() => {});
+        return mergeFailed(a, e.message);
+      }
       await cleanup(a, 'merged');
       emit(a.delegator, a.id, 'merged', `${a.id} merged into ${a.base}`);
     }
+    return null;
+  }
+
+  /** A refused merge: the delegator is told, and with `rework` the worker gets it back to rebase and report again. */
+  async function mergeFailed(a, message, { rework = true } = {}) {
+    emit(a.delegator, a.id, 'merge-failed', `${a.id} merging into ${a.base} failed: ${message.slice(0, 400)}`);
+    const current = agentRow(a.id);
+    if (rework && !ENDED.includes(current.state)) {
+      update(a.id, ['paused', 'restarting'].includes(current.state) ? { paused_state: 'working' } : { state: 'working', idle: 0 });
+      await sendMail('hauptling', a.id, `Merge failed: ${message.slice(0, 120)}. Rebase onto origin/${a.base}, resolve conflicts, test, then report again.`.slice(0, MAIL_MAX));
+    }
+    return message;
   }
 
   /** Stores a question and notifies you; the answer page is keyed by a random nonce, not a token. */
@@ -874,14 +902,14 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
    * watchdog) has its result discarded. A report marked `lost` (container ended without a result) goes to
    * the watchdog. The watchdog can abandon the run, so a hung runner doesn't hold the GPU queue.
    */
-  async function runJob(job) {
+  async function runJob(job, collect) {
     let report;
     const run = { claimed_at: job.claimed_at };
     const abandoned = new Promise(r => { run.abandon = () => r(null); });
     localRuns.set(job.id, run);
     try {
-      const env = job.url.startsWith('https://github.com/') ? await github.gitAuthEnv() : {};
-      report = await Promise.race([host.runTestJob(job, { env }), abandoned]);
+      const start = collect || (async () => host.runTestJob(job, { env: job.url.startsWith('https://github.com/') ? await github.gitAuthEnv() : {} }));
+      report = await Promise.race([start(), abandoned]);
     } catch (e) { report = errorReport(job, e.message); }
     finally { if (localRuns.get(job.id) === run) localRuns.delete(job.id); }
     if (run.lost) { await run.lost; report = null; } // the watchdog took it: wait until it is requeued or failed
@@ -1031,16 +1059,35 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     return r;
   }
 
-  /** Broker start: cancel ended agents’ jobs and requeue the remaining interrupted jobs first in line. */
+  /**
+   * Broker start: cancel ended agents’ jobs; adopt the running jobs whose container still runs or left a result;
+   * requeue the rest first in line and remove their containers.
+   */
   async function recover() {
-    await host.removeTestContainers?.().catch(e => log(`remove test containers: ${e.message}`));
     const ended = [...ENDED, 'failed', 'exited'];
     const agents = db.prepare(`SELECT DISTINCT a.id, a.state FROM agents a JOIN tests t ON t.agent = a.id
       WHERE a.host = 'hub' AND a.state IN (${ended.map(() => '?').join(',')}) AND t.state IN ('queued', 'running')`).all(...ended);
     for (const a of agents) cancelAgentTests(a.id, a.state, { resumeQueue: false });
-    const r = db.prepare("UPDATE tests SET state = 'queued', claimed_at = NULL WHERE state = 'running' AND host = 'hub'").run();
-    if (r.changes) log(`requeued ${r.changes} test job(s) after restart`);
-    return { requeued: r.changes };
+    const adopted = [];
+    let requeued = 0;
+    for (const t of db.prepare("SELECT * FROM tests WHERE state = 'running' AND host = 'hub'").all()) {
+      const job = jobFor(t);
+      const found = await host.adoptTestJob?.(job).catch(e => { log(`adopt test ${t.id}: ${e.message}`); return null; });
+      if (found) { adopted.push({ job, collect: found.collect }); continue; }
+      db.prepare("UPDATE tests SET state = 'queued', claimed_at = NULL WHERE id = ?").run(t.id);
+      testSynced(t.id);
+      requeued++;
+    }
+    await host.removeTestContainers?.(adopted.map(x => x.job.id)).catch(e => log(`remove test containers: ${e.message}`));
+    if (requeued) log(`requeued ${requeued} test job(s) after restart`);
+    if (adopted.length) log(`adopted ${adopted.map(x => x.job.id).join(', ')} after restart`);
+    // An adopted GPU job holds the GPU queue until it ends.
+    const gpu = adopted.filter(x => x.job.gpu);
+    if (gpu.length) pumping.gpu = true;
+    const run = ({ job, collect }) => runJob(job, collect).catch(e => log(`test run ${job.id}: ${e.message}`));
+    for (const x of adopted.filter(x => !x.job.gpu)) run(x);
+    if (gpu.length) Promise.all(gpu.map(run)).then(() => { pumping.gpu = false; return pump(); }).catch(e => log(`test pump: ${e.message}`));
+    return { requeued, ...(adopted.length ? { adopted: adopted.length } : {}) };
   }
 
   async function agentTestRequest(who, args) {
@@ -1125,7 +1172,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     if (!delegatorRow(a.delegator).automerge) return emitReady(a, ' (gate tests passed)');
     if (a.gate === 'push') return mergeNow(a);
     if (githubSlug(a.repo)) {
-      await mergeNow(a);
+      if (await mergeNow(a)) return;
       emit(a.delegator, a.id, 'gate-passed', `${a.id} gate tests passed; PR ${a.pr_url} merged`);
       await poll();
     } else emit(a.delegator, a.id, 'gate-passed', `${a.id} tests passed; run \`hauptling merge ${a.id}\` to merge ${a.branch} into ${a.base}`);
@@ -1283,7 +1330,8 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
       const t = db.prepare("SELECT report FROM tests WHERE agent = ? AND purpose = 'gate' AND sha = ? AND state = 'done'").get(a.id, a.sha);
       if (!t || JSON.parse(t.report).status !== 'pass') throw new Error('No passing gate test job for the reported sha');
     }
-    await mergeNow(a);
+    const failed = await mergeNow(a);
+    if (failed) throw new Error(`Merge of ${a.id} failed: ${failed}`);
     if (githubSlug(a.repo)) await poll();
     return { merged: a.id };
   }

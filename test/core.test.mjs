@@ -947,3 +947,102 @@ test('maxWorkers caps live workers across every delegator; freeing one starts th
   await settle();
   assert.equal(db.prepare('SELECT state FROM agents WHERE id = ?').get(c.id).state, 'working');
 });
+
+/** A GitHub worker that has reported; `gate(status)` runs its gate job to the end. */
+async function reported(gh = fakeGithub()) {
+  const env = setup(gh);
+  const { core, db, host } = env;
+  await core.call('delegator.start', { repo: 'gitgiant/demo' });
+  const { id } = await core.call('spawn', { brief: 'task', vendor: 'claude', mode: 'cheapest' });
+  await settle();
+  const row = () => db.prepare('SELECT * FROM agents WHERE id = ?').get(id);
+  await core.call('report', { text: 'done' }, core.authenticate(row().token, 'ADMIN'));
+  await settle();
+  const events = () => db.prepare('SELECT kind, text FROM events ORDER BY id').all();
+  const mails = () => db.prepare("SELECT text FROM mail WHERE recipient = ? AND sender = 'hauptling'").all(id).map(m => m.text);
+  const passGate = async () => {
+    const { job } = await core.call('test.claim', { wait: 0 });
+    await core.call('test.report', { id: job.id, report: { sha: job.sha, status: 'pass', passed: 1, failed: 0 } });
+    await settle();
+  };
+  return { ...env, id, row, events, mails, passGate };
+}
+
+const refusing = (opts) => {
+  const gh = fakeGithub(opts);
+  const refuse = async () => { throw new Error('gh pr merge: Pull request #5 is not mergeable: the merge commit cannot be cleanly created.'); };
+  Object.assign(gh, { prMerge: refuse, prAutoMerge: refuse, prView: async () => ({ state: 'OPEN', headRefOid: 'abc1234def', statusCheckRollup: [] }) });
+  return gh;
+};
+
+function assertRefused(env) {
+  const failed = env.events().filter(e => e.kind === 'merge-failed');
+  assert.equal(failed.length, 1);
+  assert.match(failed[0].text, /not mergeable/);
+  assert.equal(env.row().state, 'working');
+  assert.equal(env.mails().length, 1);
+  assert.match(env.mails()[0], /Rebase onto origin\/main/);
+  assert.deepEqual(env.events().filter(e => ['gate-passed', 'merged', 'gate-error'].includes(e.kind)), []);
+}
+
+test('prMerge refused after a passing gate: delegator event, worker working again and mailed', async () => {
+  const env = await reported(refusing());
+  await env.passGate();
+  assertRefused(env);
+});
+
+test('prAutoMerge refused (required checks): same handling', async () => {
+  const env = await reported(refusing({ required: ['ci'] }));
+  assertRefused(env);
+});
+
+test('hauptling merge: a refused PR merge fails the call and tells the delegator', async () => {
+  const gh = refusing();
+  const env = await reported(gh);
+  await env.core.call('delegator.set', { delegator: env.row().delegator, automerge: false });
+  await env.passGate();
+  await assert.rejects(env.core.call('merge', { agent: env.id }), /not mergeable/);
+  assertRefused(env);
+});
+
+test('a gh error on a PR that did merge counts as merged', async () => {
+  const gh = refusing();
+  gh.prView = async () => ({ state: 'MERGED', headRefOid: 'abc1234def', statusCheckRollup: [] });
+  const env = await reported(gh);
+  await env.passGate();
+  assert.equal(env.row().state, 'merged');
+  assert.deepEqual(env.events().filter(e => e.kind === 'merge-failed'), []);
+});
+
+test('local merge failures reach the delegator: conflict sends the worker back, a dirty base leaves it done', async () => {
+  const { core, db, host } = setup();
+  await core.call('delegator.start', { repo: '/home/me/demo' });
+  const { id } = await core.call('spawn', { brief: 'task', vendor: 'claude', mode: 'cheapest' });
+  await settle();
+  const row = () => db.prepare('SELECT * FROM agents WHERE id = ?').get(id);
+  await core.call('report', { text: 'done' }, core.authenticate(row().token, 'ADMIN'));
+  await settle();
+  const { job } = await core.call('test.claim', { wait: 0 });
+  await core.call('test.report', { id: job.id, report: { sha: job.sha, status: 'pass', passed: 1, failed: 0 } });
+  let dirty = ' M file';
+  const git = [];
+  host.hostGit = async (repo, args) => {
+    git.push(args.join(' '));
+    if (args[0] === 'rev-parse') return 'main';
+    if (args[0] === 'status') return dirty;
+    if (args[0] === 'merge' && args[1] !== '--abort') throw new Error('CONFLICT (content): file');
+    return '';
+  };
+  const kinds = () => db.prepare("SELECT text FROM events WHERE kind = 'merge-failed' ORDER BY id").all().map(e => e.text);
+
+  await assert.rejects(core.call('merge', { agent: id }), /uncommitted changes/);
+  assert.equal(row().state, 'done');
+  assert.match(kinds()[0], /uncommitted changes/);
+
+  dirty = '';
+  await assert.rejects(core.call('merge', { agent: id }), /CONFLICT/);
+  assert.equal(row().state, 'working');
+  assert.match(kinds()[1], /CONFLICT/);
+  assert.ok(git.includes('merge --abort'));
+  assert.match(db.prepare("SELECT text FROM mail WHERE recipient = ? AND sender = 'hauptling'").get(id).text, /Rebase onto origin\/main/);
+});
