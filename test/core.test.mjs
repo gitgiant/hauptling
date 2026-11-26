@@ -356,7 +356,7 @@ test('watch: idle without reporting → blocked + notified once; under threshold
   const st = id => db.prepare('SELECT state FROM agents WHERE id = ?').get(id).state;
   assert.equal(st(a), 'blocked');
   assert.equal(st(b), 'working');
-  assert.equal(st(c), 'done');
+  assert.equal(st(c), 'parked'); // reported and quiet: never blocked; it gives up its container (PRD "Parking")
   assert.equal(toasts.length, 1);
   assert.match(toasts[0].body, /I am stuck, which file\? \| please advise/);
   assert.doesNotMatch(toasts[0].body, /line zero/);
