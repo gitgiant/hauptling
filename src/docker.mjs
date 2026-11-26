@@ -321,6 +321,9 @@ export function workerRunArgs({ slot, id, dir, vendor, env = {}, apiKey = false,
     image, 'sleep', 'infinity'];
 }
 
+/** The size a worker's tmux window is created with, and goes back to when no web terminal sizes it. */
+export const TUI_SIZE = { cols: 220, rows: 50 };
+
 const mcpPath = (id) => join(home(), 'mcp', `${id}.json`);
 const sessionStore = (id) => join(home(), 'sessions', String(id).replace(/[^a-zA-Z0-9_-]/g, '-'));
 
@@ -345,7 +348,7 @@ export function dockerHost({ log = () => {}, docker: dockerCmd = docker } = {}) 
   };
 
   async function startTui(id, opts) {
-    await exec(id, ['tmux', 'new-session', '-d', '-s', 'main', '-x', '220', '-y', '50', '-c', '/work', cliCommand(opts)]);
+    await exec(id, ['tmux', 'new-session', '-d', '-s', 'main', '-x', String(TUI_SIZE.cols), '-y', String(TUI_SIZE.rows), '-c', '/work', cliCommand(opts)]);
     await exec(id, ['tmux', 'set-option', '-t', 'main', 'remain-on-exit', 'on']).catch(() => {});
   }
 
@@ -464,6 +467,17 @@ export function dockerHost({ log = () => {}, docker: dockerCmd = docker } = {}) 
     /** Raw send-keys args (web terminal input): ['-l', text] or [keyName]. */
     async tmuxKeys(_slot, id, args) {
       await exec(id, ['tmux', 'send-keys', '-t', 'main:', ...args], { timeout: 5e3 });
+    },
+    /**
+     * Web terminal size: `{ cols, rows }`, or null for the default. `resize-window` pins `window-size` to manual;
+     * unsetting it hands sizing back to tmux, which a real attached client always gets.
+     */
+    async tmuxResize(_slot, id, size) {
+      const attached = '[ -n "$(tmux list-clients -t main)" ]';
+      const to = ({ cols, rows }) => `tmux resize-window -t main: -x ${Number(cols)} -y ${Number(rows)}`;
+      const auto = 'tmux set-option -u -w -t main: window-size';
+      const script = size ? `if ${attached}; then ${auto}; else ${to(size)}; fi` : `${attached} || ${to(TUI_SIZE)}; ${auto}`;
+      await dockerCmd(['exec', container(id), 'sh', '-c', script], { timeout: 5e3 });
     },
     async tmuxType(_slot, id, text) {
       await exec(id, ['tmux', 'send-keys', '-t', 'main:', '-l', String(text).replace(/\s*\n\s*/g, ' ')], { timeout: 15e3 });

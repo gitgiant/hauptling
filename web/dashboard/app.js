@@ -642,6 +642,50 @@ async function loadEvents(id, body) {
 const NAMED = { Enter: 'Enter', Backspace: 'BSpace', Escape: 'Escape', ArrowUp: 'Up', ArrowDown: 'Down', ArrowLeft: 'Left', ArrowRight: 'Right',
   Home: 'Home', End: 'End', PageUp: 'PPage', PageDown: 'NPage', Delete: 'DC', Insert: 'IC' };
 
+/**
+ * Watches the terminal's size and sends it (debounced 150 ms) as character cells: the width of `pre`, and the rows
+ * that fit under its max height and inside the detail pane.
+ */
+function fitTerminal(pre, post) {
+  let id = null; let on = false; let sent; let timer = null;
+  const pane = () => pre.closest('.detail');
+  const measure = () => {
+    if (!pre.clientWidth) return null; // hidden
+    const css = getComputedStyle(pre);
+    const probe = h('span', { text: 'x'.repeat(100) });
+    probe.style.cssText = 'position:absolute;visibility:hidden;white-space:pre';
+    pre.append(probe);
+    const cellW = probe.getBoundingClientRect().width / 100;
+    probe.remove();
+    const cellH = parseFloat(css.lineHeight);
+    const px = (...keys) => keys.reduce((n, k) => n + (parseFloat(css[k]) || 0), 0);
+    const bar = pre.previousElementSibling?.offsetHeight || 0;
+    const tall = Math.min(parseFloat(css.maxHeight) || innerHeight * .65, pane() ? pane().clientHeight - bar - 24 : Infinity);
+    const cols = Math.floor((pre.clientWidth - px('paddingLeft', 'paddingRight')) / cellW);
+    const rows = Math.floor((tall - px('paddingTop', 'paddingBottom', 'borderTopWidth', 'borderBottomWidth')) / cellH);
+    return Number.isFinite(cols) && Number.isFinite(rows) ? { cols, rows: Math.max(rows, 1) } : null;
+  };
+  const send = () => {
+    timer = null;
+    if (!id) return;
+    const size = on ? measure() : null;
+    const key = JSON.stringify(size);
+    if (key === sent) return;
+    sent = key;
+    post(size, id).catch(() => { sent = undefined; });
+  };
+  const soon = () => { clearTimeout(timer); timer = setTimeout(send, 150); };
+  const watch = new ResizeObserver(soon);
+  watch.observe(pre);
+  if (pane()) watch.observe(pane());
+  addEventListener('resize', soon);
+  return {
+    viewer(v) { id = v; sent = undefined; if (pane()) watch.observe(pane()); },
+    update(want) { on = want; soon(); },
+    close() { id = null; clearTimeout(timer); watch.disconnect(); removeEventListener('resize', soon); },
+  };
+}
+
 /** A live terminal for an agent or login session inside `container`. Returns { close }. */
 function openTerminal(container, sid, { autoInput = false, onEnd } = {}) {
   let inputOn = false; let queue = []; let flushing = null; let ended = false;
@@ -654,9 +698,7 @@ function openTerminal(container, sid, { autoInput = false, onEnd } = {}) {
     pre.classList.toggle('live', st.input);
     note.textContent = st.state === 'paused' ? 'Paused by you' : st.state === 'restarting' ? 'Restarting session…' : st.input ? `Input on until ${new Date(st.until).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} (extends while you type). Click the screen, then type or paste.` : '';
   };
-  const setWrap = (on) => { wrapBox.checked = on; pre.classList.toggle('nowrap', !on); };
-  setWrap(localStorage.getItem('hl-term-wrap') !== '0');
-  wrapBox.addEventListener('change', () => { localStorage.setItem('hl-term-wrap', wrapBox.checked ? '1' : '0'); setWrap(wrapBox.checked); });
+  wrapBox.checked = localStorage.getItem('hl-term-wrap') !== '0';
   box.addEventListener('change', async () => {
     try { setInput(await api.post(`/dash/term/${encodeURIComponent(sid)}/input`, { on: box.checked })); if (box.checked) pre.focus(); }
     catch (e) { toast(e.message, true); box.checked = inputOn; }
@@ -686,6 +728,11 @@ function openTerminal(container, sid, { autoInput = false, onEnd } = {}) {
   });
   pre.addEventListener('paste', (e) => { if (!inputOn) return; e.preventDefault(); const t = e.clipboardData.getData('text'); if (t) send({ t: 'lit', v: t.slice(0, 4000) }); });
   const es = new EventSource(`/dash/term/${encodeURIComponent(sid)}/stream`);
+  // "Word wrap" on: the worker's tmux window takes this pane's size in cells. Off (or hidden): this viewer has none.
+  const fit = fitTerminal(pre, (size, viewer) => api.post(`/dash/term/${encodeURIComponent(sid)}/size`, { viewer, size }));
+  const wanted = () => fit.update(wrapBox.checked);
+  wrapBox.addEventListener('change', () => { localStorage.setItem('hl-term-wrap', wrapBox.checked ? '1' : '0'); wanted(); });
+  es.addEventListener('viewer', (e) => { fit.viewer(JSON.parse(e.data).id); wanted(); }); // again after every reconnect
   es.addEventListener('frame', (e) => {
     const atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 20;
     pre.replaceChildren(ansiFragment(JSON.parse(e.data).text.replace(/\s+$/, '')));
@@ -699,14 +746,14 @@ function openTerminal(container, sid, { autoInput = false, onEnd } = {}) {
     if (autoInput && !st.input && !ended) { autoInput = false; box.checked = true; box.dispatchEvent(new Event('change')); }
   });
   es.addEventListener('end', (e) => {
-    ended = true; es.close();
+    ended = true; es.close(); fit.close();
     const d = JSON.parse(e.data);
     note.textContent = `Ended: ${d.reason}${d.signed_in === true ? ' — signed in ✓' : d.signed_in === false ? ' — still not signed in' : ''}`;
     pre.classList.remove('live'); box.disabled = true;
     onEnd?.(d);
   });
   es.onerror = () => { if (!ended) note.textContent = 'Reconnecting…'; };
-  return { sid, get ended() { return ended; }, close() { ended = true; es.close(); clearTimeout(flushing); } };
+  return { sid, get ended() { return ended; }, close() { ended = true; es.close(); fit.close(); clearTimeout(flushing); } };
 }
 function closeTerm() { state.term?.close(); state.term = null; }
 

@@ -12,9 +12,20 @@ import { shellLine } from './util.mjs';
  *   remote sessions: `<agent id>` of an agent on a satellite (part 3): its screen and keys go through the hub's
  *                    `rpc` (`term.screen`, `term.keys`); the input switch stays here, on the hub.
  * Input is off until switched on and turns itself off 10 minutes after the last key.
+ * Agent windows follow the smallest viewer that asks for a size (PRD "Web terminal size"); sign-in sessions don't.
  */
 
 export const INPUT_IDLE_MS = 10 * 60e3;
+/** Bounds a viewer's size is clamped to: [min, max]. */
+export const SIZE_COLS = [40, 400];
+export const SIZE_ROWS = [10, 150];
+/** At most one resize per agent in this long; an unchanged size is re-applied every RESIZE_REFRESH_MS while viewed. */
+export const RESIZE_GAP_MS = 500;
+export const RESIZE_REFRESH_MS = 2000;
+/** On a satellite: a relayed size not refreshed for this long is undone. */
+export const RESIZE_LEASE_MS = 15e3;
+/** A restore with no viewer left is given up after this many failures. */
+const RESTORE_TRIES = 5;
 const SOCKET = ['-L', 'hauptling'];
 const KEYS = new Set(['Enter', 'BSpace', 'Tab', 'BTab', 'Escape', 'Up', 'Down', 'Left', 'Right', 'Home', 'End', 'PPage', 'NPage', 'DC', 'IC', 'Space',
   ...'abcdefghijklmnopqrstuvwxyz'.split('').map(c => `C-${c}`)]);
@@ -64,9 +75,21 @@ export function keysFromBytes(str) {
   return { keys, detach: false };
 }
 
+/** A viewer's `{ cols, rows }`, rounded down and clamped; throws unless both are numbers. */
+export function clampSize(size) {
+  const clamp = (v, [min, max]) => {
+    if (!Number.isFinite(v)) throw new Error('size: { cols, rows } as numbers, or null');
+    return Math.min(Math.max(Math.floor(v), min), max);
+  };
+  return { cols: clamp(size?.cols, SIZE_COLS), rows: clamp(size?.rows, SIZE_ROWS) };
+}
+
 /** `rpc(host, op, args)`: on the hub, a request to a satellite over its link (hub.rpc); null elsewhere. */
-export function createTerminals({ db, host, slotDir, rpc = null, log = () => {}, now = () => Date.now() }) {
+export function createTerminals({ db, host, slotDir, rpc = null, log = () => {}, now = () => Date.now(), later = (fn, ms) => { const t = setTimeout(fn, ms); t.unref?.(); return () => clearTimeout(t); } }) {
   const inputUntil = new Map(); // session → epoch ms
+  /** session → { views: viewer → size|null, sent: last applied key, held: a web size may be in force, at, busy, cancel, fails } */
+  const sizing = new Map();
+  const leases = new Map(); // on a satellite: agent → cancel of the pending restore
 
   const agentRow = (id) => db.prepare('SELECT * FROM agents WHERE id = ?').get(id);
   /** Resolves a session id to what it drives; throws for anything else. */
@@ -151,6 +174,97 @@ export function createTerminals({ db, host, slotDir, rpc = null, log = () => {},
   /** A worker of this vendor running on the slot: it refreshes the same credential file. */
   const runningOn = (slot, vendor) => db.prepare("SELECT id FROM agents WHERE slot = ? AND vendor = ? AND state IN ('spawning','restarting','paused','working','blocked','done')").get(slot, vendor)?.id || null;
 
+  // ---------- window size ----------
+  const sizeEntry = (sid) => {
+    let z = sizing.get(sid);
+    if (!z) sizing.set(sid, z = { views: new Map(), sent: null, held: false, at: -Infinity, busy: null, cancel: null, fails: 0 });
+    return z;
+  };
+  /** A viewer (one open terminal stream) arrives; it counts for the size once it sends one. */
+  function join(sid, viewer) {
+    if (!LOGIN_RE.test(sid)) sizeEntry(sid).views.set(viewer, null);
+  }
+  /** A viewer's size, or null to stop counting it. Unknown viewers (a closed stream) are ignored. */
+  function resize(sid, viewer, size) {
+    const clean = size == null ? null : clampSize(size);
+    const z = sizing.get(sid);
+    if (!z?.views.has(viewer)) return Promise.resolve();
+    z.views.set(viewer, clean);
+    return sync(sid);
+  }
+  function leave(sid, viewer) {
+    return sizing.get(sid)?.views.delete(viewer) ? sync(sid) : Promise.resolve();
+  }
+  function drop(sid) {
+    sizing.get(sid)?.cancel?.();
+    sizing.delete(sid);
+  }
+  /** Runs `sync` again in `ms`: the rate limit, and a restore that no open stream would retry. */
+  function again(sid, z, ms) {
+    z.cancel ||= later(() => { z.cancel = null; return sync(sid); }, ms);
+  }
+  /** Brings the agent's window to what its viewers want; called on every change and on each stream poll. */
+  function sync(sid) {
+    const z = sizing.get(sid);
+    if (!z) return Promise.resolve();
+    if (z.busy) return z.busy;
+    const sizes = [...z.views.values()].filter(Boolean);
+    const want = sizes.length ? { cols: Math.min(...sizes.map(s => s.cols)), rows: Math.min(...sizes.map(s => s.rows)) } : null;
+    if (!want && !z.held) {
+      if (!z.views.size) drop(sid);
+      return Promise.resolve();
+    }
+    const key = want ? `${want.cols}x${want.rows}` : '';
+    const wait = z.at + (key !== z.sent ? RESIZE_GAP_MS : RESIZE_REFRESH_MS) - now();
+    if (wait > 0) {
+      if (key !== z.sent || !want) again(sid, z, wait); // a restore may have no stream left to retry it
+      return Promise.resolve();
+    }
+    let s;
+    try { s = resolve(sid); } catch { drop(sid); return Promise.resolve(); } // the agent ended: its window is gone
+    if (s.state === 'paused' || s.state === 'restarting') {
+      if (!want) again(sid, z, RESIZE_REFRESH_MS);
+      return Promise.resolve();
+    }
+    z.at = now();
+    if (want) z.held = true;
+    z.busy = (async () => {
+      if (s.kind === 'remote') await rpc(s.host, 'term.resize', { agent: s.id, size: want });
+      else await host.tmuxResize(s.slot, s.id, want);
+    })().then(() => {
+      z.busy = null; z.sent = key; z.fails = 0;
+      if (!want) z.held = false;
+      return sync(sid); // a viewer changed meanwhile
+    }, (e) => {
+      z.busy = null; z.sent = key;
+      if (!z.fails++) log(`terminal size ${sid}: ${e.message}`);
+      if (want) return;
+      if (z.fails < RESTORE_TRIES) again(sid, z, RESIZE_REFRESH_MS);
+      else { z.held = false; if (!z.views.size) drop(sid); }
+    });
+    return z.busy;
+  }
+
+  /** On a satellite: the size the hub relays for one of its agents (null restores). */
+  async function relayResize(id, size) {
+    const clean = size == null ? null : clampSize(size);
+    const s = resolve(id);
+    if (s.kind !== 'agent') throw new Error(`No live session ${id}`);
+    leases.get(id)?.();
+    leases.delete(id);
+    const expire = () => { leases.set(id, later(() => relayResize(id, null).catch(e => log(`terminal size ${id}: ${e.message}`)), RESIZE_LEASE_MS)); };
+    if (s.state === 'paused' || s.state === 'restarting') { expire(); return { ok: true }; } // restored once it is live
+    if (clean) expire();
+    await host.tmuxResize(s.slot, s.id, clean);
+    return { ok: true };
+  }
+
+  /** At broker start nobody is watching yet: this host's agents get their default size back. */
+  async function restoreSizes() {
+    const rows = db.prepare(`SELECT id, slot FROM agents WHERE slot IS NOT NULL AND (host IS NULL OR host = 'hub') AND state IN ('spawning','working','blocked','done')`).all();
+    await Promise.all(rows.filter(a => !sizing.has(a.id)).map(a => Promise.resolve(host.tmuxResize?.(a.slot, a.id, null)).catch(e => log(`terminal size ${a.id}: ${e.message}`))));
+  }
+
   /** Starts a vendor sign-in on the host in tmux, input on. Same env as `hauptling login`. */
   async function startLogin(slot, vendor) {
     if (!/^hl-[\w-]+$/.test(slot) || !LOGIN[vendor]) throw new Error('slot and vendor (claude, codex, agy) are required');
@@ -181,7 +295,7 @@ export function createTerminals({ db, host, slotDir, rpc = null, log = () => {},
     await tmux(['kill-session', '-t', sid]).catch(() => {});
   }
 
-  return { resolve, screen, input, inputState, keys, relayKeys, startLogin, stopLogin, runningOn };
+  return { resolve, screen, input, inputState, keys, relayKeys, join, resize, leave, sync, relayResize, restoreSizes, startLogin, stopLogin, runningOn };
 }
 
 /**

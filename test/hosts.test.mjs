@@ -313,6 +313,8 @@ function fakeHost({ gpu = false, maxWorkers = 6 } = {}) {
     screen: 'hello from the satellite\n', screens: 0, keys: [],
     async tmuxScreen() { this.screens++; return this.screen; },
     async tmuxKeys(slot, id, args) { this.keys.push([id, ...args]); },
+    sizes: [],
+    async tmuxResize(slot, id, size) { this.sizes.push([id, size]); },
     async runTestJob(job) { calls.push(['test', job.id]); return { id: job.id, sha: job.sha, status: 'pass', passed: 3, failed: 0, skipped: 0, failures: [], duration_s: 1 }; },
     gpuAvailable: async () => gpu,
     maxWorkers: () => maxWorkers,
@@ -756,6 +758,7 @@ test('web terminal through the hub: frames and keys round-trip over the link, th
   const res = await fetch(`${hub.url}/dash/term/${id}/stream`, { headers: { cookie: `hl_dash=${dashToken(hub.db)}` }, signal: ctl.signal });
   assert.equal(res.status, 200);
   let ev = await sseUntil(res, e => e.some(x => x.ev === 'frame') && e.some(x => x.ev === 'input'));
+  const ev0 = ev;
   assert.equal(ev.find(x => x.ev === 'frame').data.text, 'hello from the satellite\n');
   assert.equal(ev.find(x => x.ev === 'input').data.input, false);
   sat.host.screen = 'second screen\n';
@@ -770,8 +773,15 @@ test('web terminal through the hub: frames and keys round-trip over the link, th
   assert.deepEqual(sat.host.keys, [[id, '-l', 'yes'], [id, 'Enter']]);
   assert.match((await hub.dashReq(`/dash/term/${id}/keys`, { method: 'POST', body: { keys: [{ t: 'key', v: 'rm -rf' }] } })).json.error, /key/i);
 
+  // The pane's size goes over the link, clamped; closing the last viewer restores the default.
+  const viewer = ev0.find(x => x.ev === 'viewer').data.id;
+  assert.equal((await hub.dashReq(`/dash/term/${id}/size`, { method: 'POST', body: { viewer, size: { cols: 20, rows: 30 } } })).status, 200);
+  await waitFor(() => sat.host.sizes.length, 'resize relayed');
+  assert.deepEqual(sat.host.sizes[0], [id, { cols: 40, rows: 30 }]);
+
   // The browser closes: the hub stops asking sat1 for screens.
   ctl.abort();
+  await waitFor(() => sat.host.sizes.at(-1)[1] === null, 'default size restored on sat1');
   await new Promise(r => setTimeout(r, 400));
   const n = sat.host.screens;
   await new Promise(r => setTimeout(r, 600));
