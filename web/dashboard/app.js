@@ -733,11 +733,16 @@ function openTerminal(container, sid, { autoInput = false, onEnd } = {}) {
   const wanted = () => fit.update(wrapBox.checked);
   wrapBox.addEventListener('change', () => { localStorage.setItem('hl-term-wrap', wrapBox.checked ? '1' : '0'); wanted(); });
   es.addEventListener('viewer', (e) => { fit.viewer(JSON.parse(e.data).id); wanted(); }); // again after every reconnect
-  es.addEventListener('frame', (e) => {
+  // Scrollback (`history`, sent when lines scroll off) sits above the screen (`frame`, sent when it changes).
+  const histEl = h('span', { class: 'term-history' }), screenEl = h('span');
+  const paint = (el, text) => {
     const atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 20;
-    pre.replaceChildren(ansiFragment(JSON.parse(e.data).text.replace(/\s+$/, '')));
+    if (!pre.contains(screenEl)) pre.replaceChildren(histEl, screenEl);
+    el.replaceChildren(text);
     if (atBottom) pre.scrollTop = pre.scrollHeight;
-  });
+  };
+  es.addEventListener('history', (e) => { const t = JSON.parse(e.data).text.replace(/\s+$/, ''); paint(histEl, t ? ansiFragment(`${t}\n`) : ''); });
+  es.addEventListener('frame', (e) => paint(screenEl, ansiFragment(JSON.parse(e.data).text.replace(/\s+$/, ''))));
   // A satellite agent's terminal relayed by the hub: "<host> is offline; waiting…", cleared ('') when it is back.
   es.addEventListener('note', (e) => { note.textContent = JSON.parse(e.data).text; });
   es.addEventListener('input', async (e) => {

@@ -809,6 +809,11 @@ test('hauptling attach on the hub relays a satellite agent: screen, keys, Ctrl-]
   const s = (await hub.api('term.screen', { agent: id })).result;
   assert.equal(s.text, 'hello from the satellite\n');
   assert.deepEqual((await hub.api('term.screen', { agent: id, since: s.hash })).result, { same: true, alive: true });
+  sat.host.tmuxHistory = async () => 'scrolled off\n';
+  const h1 = (await hub.api('term.screen', { agent: id, since: s.hash })).result;
+  assert.equal(h1.history, 'scrolled off\n', 'scrollback relayed even when the screen is unchanged');
+  assert.deepEqual((await hub.api('term.screen', { agent: id, since: s.hash, sinceHistory: h1.historyHash })).result, { same: true, alive: true }, 'unchanged scrollback is not resent');
+  delete sat.host.tmuxHistory;
   assert.match((await hub.api('term.screen', { agent: id }, `tok-${id}`)).error ?? 'refused', /not allowed|refused|Unauthorized|Bad/i);
 
   const { EventEmitter } = await import('node:events');

@@ -689,7 +689,9 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     changing.add(id);
     try {
       update(id, { idle: 0 }); // wake() types only into idle TUIs: mail arriving now waits for the unpark
-      const screen = await Promise.resolve(host.tmuxScreen?.(a.slot, a.id)).catch(() => null);
+      // With its scrollback, so the parked Screen view shows more than the last page.
+      const [hist, visible] = await Promise.all([Promise.resolve(host.tmuxHistory?.(a.slot, a.id)).catch(() => null), Promise.resolve(host.tmuxScreen?.(a.slot, a.id)).catch(() => null)]);
+      const screen = visible == null ? null : `${hist ? `${hist.replace(/\n*$/, '')}\n` : ''}${visible}`;
       let saved = [];
       if (a.session_id) saved = await Promise.resolve(host.saveSession?.({ slot: a.slot, vendor: a.vendor, id: a.id, sessionId: a.session_id })).catch(e => { log(`park ${id}: saving the session failed: ${e.message}`); return []; }) || [];
       if (agentRow(id).state !== 'done') { // reworked meanwhile: it keeps its container
@@ -1941,7 +1943,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
       return { argv: host.attachArgv(a.slot, a.id) };
     },
     // `hauptling attach` on the hub for an agent on a satellite (PRD "Part 3"): its screen and keys over the link.
-    'term.screen': ({ agent, since = null }) => { const a = onSatellite(agent); return hub.rpc(a.host, 'term.screen', { agent: a.id, since }); },
+    'term.screen': ({ agent, since = null, sinceHistory = null }) => { const a = onSatellite(agent); return hub.rpc(a.host, 'term.screen', { agent: a.id, since, sinceHistory }); },
     'term.keys': ({ agent, keys }) => { const a = onSatellite(agent); return hub.rpc(a.host, 'term.keys', { agent: a.id, keys: checkKeys(keys) }); },
     'delegator.start': delegatorStart, 'delegator.end': delegatorEnd, 'delegator.set': delegatorSet, 'delegator.list': () => db.prepare('SELECT * FROM delegators ORDER BY created_at DESC').all(),
     handoff, resume,

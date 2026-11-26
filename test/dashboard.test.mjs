@@ -171,6 +171,9 @@ test('web terminal: frames from the agent pane; input off until switched on, gat
   let t = 1_000_000;
   const terms = createTerminals({ db: s.db, host: s.host, slotDir: () => '/x', now: () => t });
   assert.equal((await terms.screen(s.id)).text, '\x1b[32mgreen\x1b[0m prompt> ');
+  assert.equal((await terms.screen(s.id)).history, null, 'no scrollback from a host without tmuxHistory');
+  s.host.tmuxHistory = async () => 'older line\n';
+  assert.equal((await terms.screen(s.id)).history, 'older line\n');
   await assert.rejects(terms.keys(s.id, [{ t: 'lit', v: 'y' }]), /Input is off/);
   terms.input(s.id, true);
   await terms.keys(s.id, [{ t: 'lit', v: 'yes' }, { t: 'key', v: 'Enter' }, { t: 'key', v: 'C-c' }]);

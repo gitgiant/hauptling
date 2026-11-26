@@ -5,7 +5,7 @@ import { cpus, freemem, totalmem } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { kvGet, kvSet } from './db.mjs';
 import { readOnlyQuery } from './dbquery.mjs';
-import { createTerminals, SCREEN_MAX } from './terminal.mjs';
+import { createTerminals, HISTORY_MAX, SCREEN_MAX } from './terminal.mjs';
 import { token as newToken } from './util.mjs';
 import { buildBody, checkImage, brokerFacts, fileIssue, issueRepo, originUrl, scrubText } from './report.mjs';
 
@@ -321,15 +321,19 @@ export function createDashboard({ db, dbPath, core, host, hub = null, log = () =
    * On a satellite: the hub's `rpc`s for one of this host's agents (terminal, diff, timeline). Never a login
    * session or another sid: only agent rows this broker has.
    */
-  async function remote(op, { agent, since = null, keys, size = null } = {}) {
+  async function remote(op, { agent, since = null, sinceHistory = null, keys, size = null } = {}) {
     const a = typeof agent === 'string' && agentRow(agent);
     if (!a) throw new Error(`No agent ${agent} on this host`);
     if (op === 'term.screen') {
       const s = await terms.screen(a.id);
-      if (s.text == null) return { text: null, alive: s.alive };
+      const sha = (t) => createHash('sha1').update(t).digest('hex');
+      const history = typeof s.history === 'string' ? s.history.slice(-HISTORY_MAX) : null;
+      const historyHash = history === null ? null : sha(history);
+      const hist = history !== null && historyHash !== sinceHistory ? { history, historyHash } : {};
+      if (s.text == null) return { text: null, alive: s.alive, ...hist };
       const text = s.text.slice(0, SCREEN_MAX);
-      const hash = createHash('sha1').update(text).digest('hex');
-      return hash === since ? { same: true, alive: s.alive } : { text, hash, alive: s.alive };
+      const hash = sha(text);
+      return hash === since ? { same: true, alive: s.alive, ...hist } : { text, hash, alive: s.alive, ...hist };
     }
     if (op === 'term.keys') return terms.relayKeys(a.id, keys);
     if (op === 'term.resize') return terms.relayResize(a.id, size);
@@ -439,7 +443,7 @@ export function createDashboard({ db, dbPath, core, host, hub = null, log = () =
     const remote = first.kind === 'remote';
     res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive' });
     res.write('retry: 2000\n\n');
-    let lastText = null; let lastHash = null; let lastInput = ''; let closed = false; let busy = false; let errors = 0; let relayed = 0; let away = false;
+    let lastText = null; let lastHash = null; let lastHistory = null; let lastHistoryHash = null; let lastInput = ''; let closed = false; let busy = false; let errors = 0; let relayed = 0; let away = false;
     const send = (ev, data) => res.write(`event: ${ev}\ndata: ${JSON.stringify(data)}\n\n`);
     const viewer = randomUUID();
     terms.join(sid, viewer);
@@ -451,7 +455,7 @@ export function createDashboard({ db, dbPath, core, host, hub = null, log = () =
       if (remote && res.writableLength > 1 << 20) return; // the browser is behind: skip, the next frame replaces this one
       busy = true;
       try {
-        const s = await terms.screen(sid, lastHash);
+        const s = await terms.screen(sid, lastHash, lastHistoryHash);
         if (closed) return;
         errors = 0;
         if (away) { away = false; send('note', { text: '' }); }
@@ -459,6 +463,11 @@ export function createDashboard({ db, dbPath, core, host, hub = null, log = () =
           lastText = s.text; lastHash = s.hash ?? null;
           send('frame', { text: s.text });
           if (remote && (relayed += Buffer.byteLength(s.text)) > RELAY_MAX) { send('end', { reason: `relay limit reached (${RELAY_MAX >> 20} MB); reopen the terminal` }); stop(); return; }
+        }
+        if (typeof s.history === 'string' && s.history !== lastHistory) {
+          lastHistory = s.history; lastHistoryHash = s.historyHash ?? null;
+          send('history', { text: s.history });
+          if (remote) relayed += Buffer.byteLength(s.history);
         }
         const inp = JSON.stringify(terms.inputState(sid));
         if (inp !== lastInput) { lastInput = inp; send('input', JSON.parse(inp)); }

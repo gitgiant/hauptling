@@ -58,6 +58,9 @@ export function config() {
   return { memory: '2560m', cpus: 3, gpu: true, gpuMemory: '6g', gpuCpus: 4, gpuMemMB: 6144, gpuWaitMinutes: 30, testConcurrency: 3, maxWorkers: 6, testStallSec: 300, testRetries: 2, ...c };
 }
 
+/** Scrollback the web terminal shows above the screen (tmux keeps 2000). */
+export const HISTORY_LINES = 500;
+
 // ---------- GPU (phase 3) ----------
 /** nvidia-smi on PATH, or WSL's copy (the Windows driver exposes it there). */
 let smiPath; // probed once per process: the probe is a synchronous spawn
@@ -459,6 +462,10 @@ export function dockerHost({ log = () => {}, docker: dockerCmd = docker } = {}) 
     },
     async tmuxCapture(_slot, id, lines = 20) {
       return (await exec(id, ['tmux', 'capture-pane', '-p', '-t', 'main:', '-S', `-${lines}`], { timeout: 15e3 })).stdout;
+    },
+    /** Up to `lines` lines of scrollback above the visible pane, with colour codes (web terminal history). */
+    async tmuxHistory(_slot, id, lines = HISTORY_LINES) {
+      return (await exec(id, ['tmux', 'capture-pane', '-p', '-e', '-t', 'main:', '-S', `-${lines}`, '-E', '-1'], { timeout: 5e3 })).stdout;
     },
     /** Visible pane with colour codes (web terminal frames). */
     async tmuxScreen(_slot, id) {

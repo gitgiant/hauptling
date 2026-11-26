@@ -34,6 +34,8 @@ const LOGIN_RE = /^login-(hl-[\w-]+)-(claude|codex|agy)$/;
 const LIVE = ['spawning', 'restarting', 'paused', 'working', 'blocked', 'done'];
 /** A relayed screen is cut to this (a tmux screen is a few KB; this only guards against a runaway pane). */
 export const SCREEN_MAX = 256 * 1024;
+/** Relayed scrollback is cut to its last this-many bytes (500 lines with colour codes stay well under). */
+export const HISTORY_MAX = 1024 * 1024;
 
 const tmux = (args, { timeout = 10e3 } = {}) => new Promise((resolve, reject) => {
   execFile('tmux', [...SOCKET, ...args], { timeout }, (err, stdout, stderr) => (err ? reject(new Error((stderr || err.message).trim())) : resolve(stdout)));
@@ -106,20 +108,27 @@ export function createTerminals({ db, host, slotDir, rpc = null, log = () => {},
   }
 
   /**
-   * The screen now. Remote sessions pass `since` (the hash of the last screen they got): an unchanged screen comes
-   * back as `text: null`, and `hash` names the new one.
+   * The screen now, and `history`: the scrollback above it (null when unknown). Remote sessions pass `since` and
+   * `sinceHistory` (hashes of the last screen and history they got): an unchanged one comes back as null, and
+   * `hash` / `historyHash` name new ones.
    */
-  async function screen(sid, since = null) {
+  async function screen(sid, since = null, sinceHistory = null) {
     const s = resolve(sid);
-    if (s.state === 'paused' || s.state === 'restarting') return { text: null, alive: true };
+    if (s.state === 'paused' || s.state === 'restarting') return { text: null, history: null, alive: true };
     if (s.kind === 'remote') {
-      const r = await rpc(s.host, 'term.screen', { agent: s.id, since });
-      return r?.same || typeof r?.text !== 'string' ? { text: null, alive: r?.alive !== false } : { text: r.text.slice(0, SCREEN_MAX), hash: r.hash, alive: r.alive !== false };
+      const r = await rpc(s.host, 'term.screen', { agent: s.id, since, sinceHistory });
+      const text = r?.same || typeof r?.text !== 'string' ? null : r.text.slice(0, SCREEN_MAX);
+      const history = typeof r?.history === 'string' ? r.history.slice(-HISTORY_MAX) : null;
+      return { text, hash: text === null ? undefined : r.hash, history, historyHash: history === null ? undefined : r.historyHash, alive: r?.alive !== false };
     }
-    if (s.kind === 'agent') return { text: await host.tmuxScreen(s.slot, s.id), alive: await host.tmuxAlive(s.slot, s.id) };
+    if (s.kind === 'agent') {
+      const [text, history, alive] = await Promise.all([host.tmuxScreen(s.slot, s.id), Promise.resolve(host.tmuxHistory?.(s.slot, s.id)).catch(() => null), host.tmuxAlive(s.slot, s.id)]);
+      return { text, history: history ?? null, alive };
+    }
     const dead = await tmux(['display-message', '-p', '-t', `${sid}:`, '#{pane_dead}']).then(o => o.trim() === '1', () => null);
-    if (dead === null) return { text: '', alive: false, gone: true };
-    return { text: await tmux(['capture-pane', '-p', '-e', '-t', `${sid}:`]), alive: !dead };
+    if (dead === null) return { text: '', history: null, alive: false, gone: true };
+    const [text, history] = await Promise.all([tmux(['capture-pane', '-p', '-e', '-t', `${sid}:`]), tmux(['capture-pane', '-p', '-e', '-t', `${sid}:`, '-S', '-500', '-E', '-1']).catch(() => null)]);
+    return { text, history, alive: !dead };
   }
 
   function input(sid, on) {

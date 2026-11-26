@@ -74,6 +74,7 @@
         "never",
         "-c",
         "mcp_servers={}",
+        "--no-alt-screen",
         "{prompt}"
       ],
       "effortArgs": [

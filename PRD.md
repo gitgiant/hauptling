@@ -145,7 +145,7 @@ Phases 2–4 get their own grill at phase start.
 
 ### Phase 4b decisions (2026-11-24)
 
-- **Web terminal**: watch-only by default; a per-agent "Enable input" switch turns itself off after 10 min without typing.
+- **Web terminal**: watch-only by default; a per-agent "Enable input" switch turns itself off after 10 min without typing. **Scrollback** (2026-11-26): the last 500 lines above the screen (`tmux capture-pane -S -500 -E -1`) come as their own `history` event, sent only when lines scroll off, so frames stay screen-sized (and relays stay under their 32 MB); a parked worker's saved Screen includes them. Codex runs with `--no-alt-screen` (its alternate screen keeps no scrollback); Claude draws on the normal screen already.
 - **Web terminal size** (2026-11-26): the worker's tmux window follows the dashboard pane, so the vendor TUI redraws at that width instead of the browser wrapping 220-column lines.
   - The terminal's "Word wrap" switch (default on, remembered per browser) decides: **on**, the page measures the pane in character cells and sends cols × rows when the terminal opens and, debounced 150 ms, on every size change; **off**, this viewer sends no size (it leaves the minimum) and sees the native width with horizontal scroll. The page never soft-wraps a frame (`white-space: pre`), so until a redraw arrives it scrolls sideways.
   - The broker clamps to 40–400 × 10–150 and runs `tmux resize-window` (tmux 3.4 in the worker image; this sets the window's `window-size` to `manual`), at most once per 500 ms per agent, and re-applies every 2 s while viewed (a restarted session starts at the default size).
