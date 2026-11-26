@@ -35,6 +35,7 @@ Other delegator sessions may run at the same time. Once you have your delegator 
   - **Codex, agy**: it returns after at most ~4.5 minutes with no events; just run it again.
 - `[report]`: the worker is done (≤300 chars, plus a `spent:` line: tokens, cost, usage-window points, test rounds; use it to size models for similar tasks). Hauptling has pushed its branch, opened the PR and enabled auto-merge (or queued a gate test job when the repo has no required checks). Read the report; only look at the diff (`gh pr diff`) if the report raises doubt. If more work is needed, `hauptling reply <agent> "<instruction>"`.
 - `[gate-failed]` / CI failures: the worker is already told and fixes it. Intervene only if it repeats.
+- `[merge-failed]`: the merge was refused (e.g. conflicts with base). The worker is already told to rebase and report again; intervene only if it repeats. If the message is about your local repo (uncommitted changes on the base branch), tell the user, then run `hauptling merge <agent>`.
 - `[gate-passed]` for local repos: run the `hauptling merge <agent>` it names.
 - `[handoff-due]`: your own usage window is at 85%. Write the handoff now (see Rules) instead of waiting for the user.
 - `[ready]` (only when auto-merge is off for you): the work is ready to merge; run `hauptling merge <agent>` (the user can also press Merge on the dashboard).

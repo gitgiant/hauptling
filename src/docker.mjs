@@ -307,7 +307,7 @@ export function workerRunArgs({ slot, id, dir, vendor, env = {}, apiKey = false,
 
 const mcpPath = (id) => join(home(), 'mcp', `${id}.json`);
 
-export function dockerHost({ log = () => {} } = {}) {
+export function dockerHost({ log = () => {}, docker: dockerCmd = docker } = {}) {
   const exec = (id, args, opts) => docker(['exec', container(id), ...args], opts);
   const workRoot = join(home(), 'work');
 
@@ -339,6 +339,56 @@ export function dockerHost({ log = () => {} } = {}) {
     } catch (e) {
       if (/No such (container|object)/i.test(e.message)) return 'missing';
       throw e;
+    }
+  }
+
+  // ---------- test jobs ----------
+  function jobPaths(job) {
+    const name = job.attempt > 1 ? `${job.id}.${job.attempt}` : job.id;
+    const dir = join(home(), 'jobs', name);
+    return { dir, art: `${dir}-artifacts` };
+  }
+  /** Past this (timeout_s plus install time) after the container started, the job fails as a timeout. */
+  const hardCapMs = (job) => ((job.timeout_s || 1800) + 1200) * 1000;
+  const failed = (job, notes, extra = {}) => ({ id: job.id, sha: job.sha, status: 'error', passed: 0, failed: 0, skipped: 0, failures: [], artifacts: [], duration_s: 0, log_path: join(jobPaths(job).art, 'test.log'), notes: notes.slice(0, 300), ...extra });
+  /** The runner's report.json, or null while it is missing or half written. */
+  function readReport(art) {
+    try { return JSON.parse(readFileSync(join(art, 'report.json'), 'utf8')); } catch { return null; }
+  }
+  /** The runner's report with host paths; drops the job's checkout. */
+  function finished(job, report) {
+    const { dir, art } = jobPaths(job);
+    rmSync(dir, { recursive: true, force: true });
+    const hostPath = (p) => (p && p.startsWith('/artifacts') ? join(art, p.slice('/artifacts'.length)) : p);
+    return { ...report, id: job.id, sha: job.sha, log_path: hostPath(report.log_path), artifacts: (report.artifacts || []).map(hostPath) };
+  }
+  /**
+   * Waits for the job's container (`launch` resolves to its id), reads the report, removes the container.
+   * Removal is by id: a later attempt reuses the name.
+   */
+  async function collect(job, startedAt, launch) {
+    const { art } = jobPaths(job);
+    const live = { at: Date.now(), art };
+    testRuns.set(job.id, live);
+    let id = null;
+    let error = null;
+    try {
+      id = await launch();
+      const { stdout } = await dockerCmd(['wait', id], { timeout: Math.max(30e3, startedAt + hardCapMs(job) - Date.now()) });
+      if (!readReport(art)) {
+        const logs = await dockerCmd(['logs', '--tail', '5', id]).then(r => `${r.stdout}${r.stderr || ''}`.trim(), () => '');
+        error = new Error(`exit ${stdout.trim()}${logs ? `: ${logs}` : ''}`);
+      }
+    } catch (e) { error = e; }
+    try {
+      const report = readReport(art);
+      if (report) return finished(job, report);
+      // Past the hard cap: fail as a timeout, never rerun.
+      if (error.killed) return failed(job, `test container timed out: ${error.message}`, { status: 'timeout' });
+      return failed(job, `test container failed: ${error.message}`, { lost: `container ended without a result: ${error.message}`.slice(0, 200) });
+    } finally {
+      await dockerCmd(['rm', '-f', id || testContainer(job.id)]).catch(() => {});
+      if (testRuns.get(job.id) === live) testRuns.delete(job.id);
     }
   }
 
@@ -411,45 +461,54 @@ export function dockerHost({ log = () => {} } = {}) {
     attachArgv: (_slot, id) => dockerArgv(['exec', '-it', container(id), 'tmux', 'attach', '-t', 'main']),
 
     /**
-     * Runs one test job: checkout on the host, tests in a fresh container; returns the report. A container
-     * that ends without a report (removed, crashed, docker failed) gives an error report with `lost` set:
-     * the broker's watchdog reruns those. Each attempt gets its own checkout and artifacts dir.
+     * Runs one test job: checkout on the host, tests in a fresh detached container; returns the report. A
+     * container that ends without a report (removed, crashed, docker failed) gives an error report with `lost`
+     * set: the broker's watchdog reruns those. Each attempt gets its own checkout and artifacts dir.
      */
     async runTestJob(job, { env = {} } = {}) {
-      const root = join(home(), 'jobs');
-      const name = job.attempt > 1 ? `${job.id}.${job.attempt}` : job.id;
-      const dir = join(root, name);
-      const art = join(root, `${name}-artifacts`);
+      const { dir, art } = jobPaths(job);
       rmSync(dir, { recursive: true, force: true });
       rmSync(art, { recursive: true, force: true });
       mkdirSync(art, { recursive: true });
-      const fail = (notes, extra = {}) => ({ id: job.id, sha: job.sha, status: 'error', passed: 0, failed: 0, skipped: 0, failures: [], artifacts: [], duration_s: 0, log_path: join(art, 'test.log'), notes: notes.slice(0, 300), ...extra });
       try {
         await run(null, ['git', 'clone', '--quiet', '--no-checkout', job.url, dir], { env });
         await run(null, ['git', '-C', dir, 'checkout', '--quiet', '--detach', job.sha]);
-      } catch (e) { return fail(`checkout failed: ${e.message}`); }
+      } catch (e) { return failed(job, `checkout failed: ${e.message}`); }
       await ensureNetwork({ log });
-      const image = await imageFor(dir, { log }).catch(e => { throw e; });
+      const image = await imageFor(dir, { log });
       const c = config();
       const limits = job.gpu ? ['--gpus', 'all', '--memory', String(c.gpuMemory), '--cpus', String(c.gpuCpus)] : ['--memory', String(c.memory), '--cpus', String(c.cpus)];
-      const live = { at: Date.now(), art };
-      testRuns.set(job.id, live);
-      try {
-        await docker(['run', '--rm', '--init', '--name', testContainer(job.id), '--user', uid(), '--network', NET, ...limits,
+      return collect(job, Date.now(), async () => {
+        await dockerCmd(['rm', '-f', testContainer(job.id)]).catch(() => {});
+        // Detached and without --rm, so the container and its result outlive a broker restart.
+        const { stdout } = await dockerCmd(['run', '-d', '--init', '--name', testContainer(job.id), '--user', uid(), '--network', NET, ...limits,
           '--label', `hauptling.test=${job.id}`, '-v', `${dir}:/work`, '-v', `${art}:/artifacts`, ...proxyEnv(),
           image, 'hauptling', 'test-exec', ...(job.gpu ? ['--gpu'] : []), '--selector', job.selector || '', '--timeout', String(job.timeout_s || 1800), '--artifacts', JSON.stringify(job.artifacts || [])],
-        { timeout: ((job.timeout_s || 1800) + 1200) * 1000 });
-      } catch (e) {
-        if (!existsSync(join(art, 'report.json'))) {
-          // Past the hard cap (timeout_s plus install time): fail as a timeout, never rerun.
-          if (e.killed) { await docker(['rm', '-f', testContainer(job.id)]).catch(() => {}); return fail(`test container timed out: ${e.message}`, { status: 'timeout' }); }
-          return fail(`test container failed: ${e.message}`, { lost: `container ended without a result: ${e.message}`.slice(0, 200) });
-        }
-      } finally { if (testRuns.get(job.id) === live) testRuns.delete(job.id); }
-      const report = JSON.parse(readFileSync(join(art, 'report.json'), 'utf8'));
-      rmSync(dir, { recursive: true, force: true });
-      const hostPath = (p) => (p && p.startsWith('/artifacts') ? join(art, p.slice('/artifacts'.length)) : p);
-      return { ...report, id: job.id, sha: job.sha, log_path: hostPath(report.log_path), artifacts: (report.artifacts || []).map(hostPath) };
+        { timeout: hardCapMs(job) });
+        return stdout.trim();
+      });
+    },
+
+    /**
+     * Broker start: `{ collect() }` for a job whose container from before the restart still runs or whose
+     * report is written; null when there is no result to recover.
+     */
+    async adoptTestJob(job) {
+      const { art } = jobPaths(job);
+      let found = null;
+      try {
+        const [id, status, startedAt] = (await dockerCmd(['inspect', '-f', '{{.Id}} {{.State.Status}} {{.State.StartedAt}}', testContainer(job.id)], { timeout: 20e3 })).stdout.trim().split(' ');
+        found = { id, status, startedAt: Date.parse(startedAt) || Date.now() };
+      } catch (e) { if (!readReport(art) && !/no such (object|container)/i.test(e.message)) throw e; }
+      if (found && ['running', 'paused', 'restarting'].includes(found.status)) return { collect: () => collect(job, found.startedAt, async () => found.id) };
+      if (!readReport(art)) return null;
+      return {
+        collect: async () => {
+          const report = finished(job, readReport(art));
+          if (found) await dockerCmd(['rm', '-f', found.id]).catch(() => {});
+          return report;
+        },
+      };
     },
 
     /**
@@ -464,7 +523,7 @@ export function dockerHost({ log = () => {} } = {}) {
       const mtime = (f) => { try { return statSync(join(live.art, f)).mtimeMs; } catch { return 0; } };
       const activity = Math.max(live.at, mtime('heartbeat'), mtime('test.log'));
       let state;
-      try { state = (await docker(['inspect', '-f', '{{.State.Status}}', testContainer(id)], { timeout: 20e3 })).stdout.trim(); } catch (e) { state = /no such (object|container)/i.test(e.message) ? 'gone' : 'unknown'; }
+      try { state = (await dockerCmd(['inspect', '-f', '{{.State.Status}}', testContainer(id)], { timeout: 20e3 })).stdout.trim(); } catch (e) { state = /no such (object|container)/i.test(e.message) ? 'gone' : 'unknown'; }
       if (existsSync(join(live.art, 'report.json'))) return { state: 'done' };
       if (state === 'gone' && Date.now() - live.at < 60e3) state = 'running'; // `docker run` may not have created it yet
       return { state: ['created', 'running', 'restarting', 'paused'].includes(state) ? 'running' : ['gone', 'unknown'].includes(state) ? state : 'exited', activity };
@@ -472,11 +531,12 @@ export function dockerHost({ log = () => {} } = {}) {
     testWatchdog: () => { const c = config(); return { stallSec: c.testStallSec, retries: c.testRetries }; },
 
     /** `gpu pause --now`: stop a running test job's container (the broker has already requeued it). */
-    async killTestJob(id) { await docker(['rm', '-f', testContainer(id)]).catch(() => {}); },
-    /** Broker start: remove test containers left from before a restart. */
-    async removeTestContainers() {
-      const ids = (await docker(['ps', '-aq', '--filter', 'label=hauptling.test'])).stdout.split('\n').filter(Boolean);
-      if (ids.length) await docker(['rm', '-f', ...ids]);
+    async killTestJob(id) { await dockerCmd(['rm', '-f', testContainer(id)]).catch(() => {}); },
+    /** Broker start: remove test containers left from before a restart, except those of the `keep` jobs. */
+    async removeTestContainers(keep = []) {
+      const lines = (await dockerCmd(['ps', '-a', '--filter', 'label=hauptling.test', '--format', '{{.ID}} {{.Label "hauptling.test"}}'])).stdout.split('\n');
+      const ids = lines.map(l => l.trim().split(' ')).filter(([id, job]) => id && !keep.includes(job)).map(([id]) => id);
+      if (ids.length) await dockerCmd(['rm', '-f', ...ids]);
     },
     gpuAvailable, gpuFreeMB, gpuUtil,
     /** Last `token_count` payload of the newest Codex session log in the slot written since `since` (ISO), or null. */
