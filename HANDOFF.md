@@ -23,7 +23,6 @@
 - Several hosts part 3 (PRD "Part 3"): host chips, offline/lost headlines, Hosts panel (Add host, Revoke), terminal/diff/events relayed over the link, `hauptling attach` relay, per-host usage chips. Tested with two in-process brokers only; the browser UI is unseen (no headless browser in the worker: `node scripts/dash-preview.mjs --hosts --shots DIR --only usage-1366x768`). Needs `hauptling broker restart` on the hub and every satellite; check that "Add host" through `tailscale serve` shows the https URL (`X-Forwarded-Host`/`Host`), and that the relayed terminal feels responsive (250 ms polls).
 
 ## Open
-
 - Placement's `startable` only knows the hub's own accounts; satellites' usage readings are shown on the Usage page but not used for placement.
 - nullpunkt: commit `b9a0f6e8` (drops the coagent mailbox for `hauptling mail`) sits in `nullpunkt/.worktrees/claude_opus-5-5_d72c0`, unpushed. Before `node scripts/worktree.mjs sync claude_opus-5-5_d72c0`, discard the main checkout's local edits to `.mcp.json` and `.codex/hooks.json` (the commit replaces both). Sync restarts the user's game.
 - Codex/agy: can either exclude a repo's own MCP servers? (CodeGraph reaches them via the CLI only.) agy's bare config (MCP off) is unknown.
@@ -34,7 +33,6 @@
 - Merged branches to delete: `phase-1`, `phase-3`, `phase-4`, `phase-4b`, `signin-guard`, `api-keys`, `handoff-rule`, `usage-per-vendor`, `egress-race`, `cli-fixes`.
 
 ## This machine now
-
 - Slots `hl-w1..3` signed in to claude, codex and agy; no API keys set.
 - Host has `codegraph` (npm, telemetry on unless `CODEGRAPH_TELEMETRY=0`), `uv` and `graphify` (`~/.local/bin`); this repo is indexed (`.codegraph-wsl/`, git hooks resync it).
 - Tailscale serve is on: `https://old.tailff0f31.ts.net/` → the dashboard. Off: `"/mnt/c/Program Files/Tailscale/tailscale.exe" serve --https=443 off`.
