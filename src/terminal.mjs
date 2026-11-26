@@ -43,6 +43,7 @@ export function createTerminals({ db, host, slotDir, log = () => {}, now = () =>
     const m = LOGIN_RE.exec(sid);
     if (m) return { kind: 'login', sid, slot: m[1], vendor: m[2] };
     const a = agentRow(sid);
+    if (a && a.host && a.host !== 'hub') throw new Error(`${sid} runs on ${a.host}; its terminal is there`);
     if (!a || !a.slot || !['spawning', 'restarting', 'paused', 'working', 'blocked', 'done'].includes(a.state)) throw new Error(`No live session ${sid}`);
     return { kind: 'agent', sid, slot: a.slot, id: a.id, state: a.state };
   }

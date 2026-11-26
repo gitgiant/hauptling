@@ -1,7 +1,7 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { join } from 'node:path';
-import { kvGet, kvSet } from './db.mjs';
+import { kvDel, kvGet, kvSet } from './db.mjs';
 import { home, now } from './util.mjs';
 
 /*
@@ -45,6 +45,11 @@ export async function joinHub(hubUrl, joinToken, { name = defaultName(), fetchIm
   return { hub, host: body.host };
 }
 
+/** Event kinds that carry JSON for the hub's mirror (PRD "Part 2"); they may be longer than an event's 600 characters. */
+export const MIRROR_KINDS = new Set(['state', 'test', 'ask', 'mail', 'notify', 'cmd']);
+const MIRROR_MAX = 64 * 1024;
+const BATCH_BYTES = 512 * 1024;
+
 /** Parses a text/event-stream body into {event, data} messages; `:` comments (pings) are skipped. */
 async function* sseMessages(body) {
   const decoder = new TextDecoder();
@@ -79,8 +84,10 @@ export function createSatellite({ db, config, capabilities = async () => ({}), o
   // A new join restarts the hub's event ids for this host; whatever an old membership left queued is dropped.
   if (kvGet(db, 'satellite_joined') !== String(config.joinedAt)) {
     db.exec('DELETE FROM outbox');
+    kvDel(db, 'satellite_cmd_last');
     kvSet(db, 'satellite_joined', String(config.joinedAt));
   }
+  const chains = new Map(); // agent (or '') → promise: one agent's commands run in order
 
   const queued = () => db.prepare('SELECT COUNT(*) n FROM outbox').get().n;
   const markRevoked = () => { if (!revoked) log(`satellite: the hub refused this host's key; run \`hauptling satellite join\` again with a new token`); revoked = true; ctl?.abort(); };
@@ -99,7 +106,8 @@ export function createSatellite({ db, config, capabilities = async () => ({}), o
   function flush() {
     const run = async () => {
       for (;;) {
-        const batch = db.prepare('SELECT * FROM outbox ORDER BY seq LIMIT 100').all();
+        let size = 0;
+        const batch = db.prepare('SELECT * FROM outbox ORDER BY seq LIMIT 100').all().filter((r, i) => (size += r.text.length + 200) <= BATCH_BYTES || i === 0);
         if (!batch.length) return;
         const { acked } = await post('/hub/events', { events: batch.map(r => ({ id: r.seq, agent: r.agent, kind: r.kind, text: r.text, at: r.at })) });
         prune(acked);
@@ -112,9 +120,30 @@ export function createSatellite({ db, config, capabilities = async () => ({}), o
 
   /** Queues an event for the hub; sent at once when linked, else on reconnect. */
   function queue(agent, kind, text, at = now()) {
-    const { lastInsertRowid } = db.prepare('INSERT INTO outbox (agent, kind, text, at) VALUES (?, ?, ?, ?)').run(agent ?? null, kind, String(text).slice(0, 600), at);
+    const { lastInsertRowid } = db.prepare('INSERT INTO outbox (agent, kind, text, at) VALUES (?, ?, ?, ?)').run(agent ?? null, kind, String(text).slice(0, MIRROR_KINDS.has(kind) ? MIRROR_MAX : 600), at);
     if (connected) flush().catch(e => log(`satellite: sending events failed: ${e.message}`));
     return Number(lastInsertRowid);
+  }
+
+  /**
+   * A hub command, exactly once: ids at or below the last one started are resends and skipped. The id is
+   * recorded before it runs; its result goes back as a `cmd` event through the outbox. One agent's commands
+   * run in order, without holding up the link (a restart can take a while).
+   */
+  function command(cmd) {
+    const id = Number(cmd?.id);
+    if (!Number.isSafeInteger(id) || id <= Number(kvGet(db, 'satellite_cmd_last') || 0)) return null;
+    kvSet(db, 'satellite_cmd_last', id);
+    const key = typeof cmd.agent === 'string' ? cmd.agent : cmd.agent?.id || '';
+    const run = (chains.get(key) || Promise.resolve()).then(async () => {
+      let r;
+      try { r = { id, ok: true, result: (await onCommand(cmd)) ?? null }; }
+      catch (e) { r = { id, ok: false, error: e.message }; log(`satellite: command ${id} ${cmd.type} failed: ${e.message}`); }
+      queue(key || null, 'cmd', JSON.stringify(r));
+    });
+    chains.set(key, run);
+    run.then(() => { if (chains.get(key) === run) chains.delete(key); });
+    return run;
   }
 
   async function beat() {
@@ -136,7 +165,7 @@ export function createSatellite({ db, config, capabilities = async () => ({}), o
       first.catch(() => {});
       for await (const m of sseMessages(res.body)) {
         if (m.event === 'hello') prune(JSON.parse(m.data).acked);
-        else if (m.event === 'command') { try { await onCommand(JSON.parse(m.data)); } catch (e) { log(`satellite: command failed: ${e.message}`); } }
+        else if (m.event === 'command') { try { command(JSON.parse(m.data)); } catch (e) { log(`satellite: bad command: ${e.message}`); } }
         else if (m.event === 'revoked') { const why = JSON.parse(m.data).why; if (why === 'revoked') markRevoked(); else log(`satellite: hub closed the link (${why})`); break; }
       }
       await first;
@@ -159,9 +188,9 @@ export function createSatellite({ db, config, capabilities = async () => ({}), o
   }
 
   return {
-    queue, flush,
-    start() { loop ||= run(); return this; },
-    async stop() { stopped = true; ctl?.abort(); wake?.(); await loop; },
+    queue, flush, command,
+    start() { if (!loop) { stopped = false; revoked = false; delay = minDelayMs; loop = run(); } return this; },
+    async stop() { stopped = true; ctl?.abort(); wake?.(); await loop; loop = null; },
     status: () => ({ hub, host, connected, revoked, queued: queued() }),
   };
 }

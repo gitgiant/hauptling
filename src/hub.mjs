@@ -8,6 +8,8 @@ import { token } from './util.mjs';
  *   GET  /hub/link    text/event-stream: hello, command, revoked, `: ping`
  *   POST /hub/state   {capabilities} → {acked}         the 30 s heartbeat
  *   POST /hub/events  {events:[{id, agent, kind, text, at}]} → {acked}
+ * Commands (part 2) are stored in `commands` and resent, in id order, every time the link opens, until the
+ * satellite's `cmd` event acknowledges them (core's `receive` calls `ack`).
  * Auth: `Authorization: Bearer hls_…` and `X-Hauptling-Host: <name>`. Only SHA-256 hashes of keys and tokens are stored.
  */
 
@@ -41,7 +43,12 @@ export function checkHostName(name) {
  */
 export function createHub({ db, emit, log = () => {}, clock = () => Date.now(), pingMs = 15e3 }) {
   const links = new Map(); // host → open SSE response
-  let commandId = 0;
+  const waiters = new Map(); // command id → resolve
+  // Core binds these (it is created after the hub): `receive` takes each new satellite event inside the events
+  // transaction (default: a plain delegator event); `onState` runs after a heartbeat (placement may now fit).
+  let receive = (host, a, kind, text, at) => emit(a.delegator, a.id, kind, text, at);
+  let onState = () => {};
+  let onResult = () => {}; // (host, command, result) once a command is acknowledged
   const row = (name) => db.prepare('SELECT * FROM hosts WHERE name = ?').get(name);
 
   function issueToken() {
@@ -88,6 +95,7 @@ export function createHub({ db, emit, log = () => {}, clock = () => Date.now(), 
     const json = JSON.stringify(capabilities);
     if (json.length > 16384) throw new HubError(400, 'capabilities too large');
     db.prepare('UPDATE hosts SET capabilities = ? WHERE name = ?').run(json, name);
+    try { onState(name); } catch (e) { log(`hub ${name} state: ${e.message}`); }
     return { acked: row(name).last_seq };
   }
 
@@ -100,14 +108,21 @@ export function createHub({ db, emit, log = () => {}, clock = () => Date.now(), 
       for (const e of sorted) {
         if (e.id <= last) continue;
         last = e.id;
-        const a = typeof e.agent === 'string' && db.prepare('SELECT id, delegator, host FROM agents WHERE id = ?').get(e.agent);
+        if (e.kind === 'cmd') { // a command's result; not tied to one agent (`delegator` commands)
+          let r = null;
+          try { r = JSON.parse(e.text); } catch {}
+          if (!r || !ack(name, r.id, r)) log(`hub ${name} dropped event ${e.id} (cmd): no pending command ${r?.id ?? '?'} for ${name}`);
+          continue;
+        }
+        const a = typeof e.agent === 'string' && db.prepare('SELECT id, delegator, host, state FROM agents WHERE id = ?').get(e.agent);
         const kind = String(e.kind || '');
         if (!a || a.host !== name || !KIND.test(kind) || HUB_KINDS.has(kind)) {
           log(`hub ${name} dropped event ${e.id} (${kind || '?'} for ${e.agent || 'no agent'}): not an agent on ${name}, or a bad kind`);
           continue;
         }
         const at = typeof e.at === 'string' && !Number.isNaN(Date.parse(e.at)) ? e.at : undefined;
-        emit(a.delegator, a.id, kind, String(e.text ?? ''), at);
+        try { receive(name, a, kind, String(e.text ?? ''), at); }
+        catch (err) { log(`hub ${name} event ${e.id} (${kind} for ${a.id}) not applied: ${err.message}`); }
       }
       db.prepare('UPDATE hosts SET last_seq = ? WHERE name = ?').run(last, name);
       return { acked: last };
@@ -121,6 +136,7 @@ export function createHub({ db, emit, log = () => {}, clock = () => Date.now(), 
     res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', 'x-accel-buffering': 'no' });
     links.set(name, res);
     sse(res, 'hello', { host: name, acked: row(name).last_seq });
+    for (const c of pending(name)) sse(res, 'command', c);
     const ping = setInterval(() => res.write(': ping\n\n'), pingMs);
     ping.unref?.();
     const done = () => { clearInterval(ping); if (links.get(name) === res) links.delete(name); };
@@ -135,13 +151,46 @@ export function createHub({ db, emit, log = () => {}, clock = () => Date.now(), 
     try { sse(res, 'revoked', { why }); res.end(); } catch {}
   }
 
-  /** Part 2: commands to a satellite (spawn, kill, …). False when it has no open link. */
-  function send(name, command) {
+  const pending = (name) => db.prepare('SELECT id, type, body FROM commands WHERE host = ? AND acked_at IS NULL ORDER BY id').all(name)
+    .map(c => ({ ...JSON.parse(c.body), id: c.id, type: c.type }));
+
+  /**
+   * Stores a command for a satellite and sends it if the link is open (else when it next opens).
+   * → {id, sent}. Callers inside a transaction get it stored with their own writes.
+   */
+  function command(name, type, body = {}) {
+    const { lastInsertRowid } = db.prepare('INSERT INTO commands (host, type, body, created_at) VALUES (?, ?, ?, ?)').run(name, type, JSON.stringify(body), iso(clock()));
+    const id = Number(lastInsertRowid);
     const res = links.get(name);
-    if (!res) return false;
-    sse(res, 'command', { id: ++commandId, ...command });
+    if (res) sse(res, 'command', { ...body, id, type });
+    log(`hub ${name} command ${id} ${type}${body.agent ? ` ${typeof body.agent === 'string' ? body.agent : body.agent.id}` : ''}${res ? '' : ' (queued: offline)'}`);
+    return { id, sent: Boolean(res) };
+  }
+
+  /** The satellite's `cmd` event: the command ran (once); `result` is {ok, result|error}. */
+  function ack(name, id, result) {
+    const r = db.prepare('UPDATE commands SET acked_at = ?, result = ? WHERE id = ? AND host = ? AND acked_at IS NULL').run(iso(clock()), JSON.stringify(result ?? null), Number(id), name);
+    if (!r.changes) return false;
+    const c = db.prepare('SELECT type, body FROM commands WHERE id = ?').get(Number(id));
+    try { onResult(name, { ...JSON.parse(c.body), id: Number(id), type: c.type }, result); } catch (e) { log(`hub ${name} command ${id} result: ${e.message}`); }
+    waiters.get(Number(id))?.(result);
     return true;
   }
+
+  /** Resolves with the command's result, or null after `ms`. */
+  function result(id, ms = 30e3) {
+    const done = db.prepare('SELECT result FROM commands WHERE id = ? AND acked_at IS NOT NULL').get(id);
+    if (done) return Promise.resolve(JSON.parse(done.result));
+    return new Promise(resolve => {
+      const timer = setTimeout(() => { waiters.delete(id); resolve(null); }, ms);
+      timer.unref?.();
+      waiters.set(id, (r) => { clearTimeout(timer); waiters.delete(id); resolve(r); });
+    });
+  }
+
+  const linked = (name) => links.has(name);
+  /** Core's hooks; see `receive` and `onState` above. */
+  function bind(hooks = {}) { ({ receive = receive, onState = onState, onResult = onResult } = hooks); }
 
   function revoke({ host } = {}) {
     const name = String(host || '').toLowerCase();
@@ -160,11 +209,13 @@ export function createHub({ db, emit, log = () => {}, clock = () => Date.now(), 
       lastSeen: iso(h.last_seen), offlineSince: iso(h.offline_since), joinedAt: h.created_at,
       capabilities: h.capabilities ? JSON.parse(h.capabilities) : null,
       agents: db.prepare(`SELECT COUNT(*) n FROM agents WHERE host = ? AND state IN (${LIVE.map(() => '?').join(',')})`).get(h.name, ...LIVE).n,
+      pendingCommands: db.prepare('SELECT COUNT(*) n FROM commands WHERE host = ? AND acked_at IS NULL').get(h.name).n,
     }));
   }
 
-  /** Every 30 s: silence → offline; 24 h offline → one `[host-lost]` per delegator with live agents there. */
+  /** Every 30 s: silence → offline; 24 h offline → one `[host-lost]` per delegator with live agents there; acknowledged commands kept a week. */
   function tick(at = clock()) {
+    db.prepare('DELETE FROM commands WHERE acked_at IS NOT NULL AND acked_at < ?').run(iso(at - 7 * 24 * 3600e3));
     for (const h of db.prepare('SELECT name, last_seen FROM hosts WHERE online = 1 AND (last_seen IS NULL OR last_seen < ?)').all(at - OFFLINE_AFTER_MS)) {
       db.prepare('UPDATE hosts SET online = 0, offline_since = ? WHERE name = ?').run(h.last_seen ?? at, h.name);
       log(`hub ${h.name} offline (silent since ${iso(h.last_seen)})`);
@@ -210,5 +261,5 @@ export function createHub({ db, emit, log = () => {}, clock = () => Date.now(), 
 
   const close = () => { for (const name of [...links.keys()]) { const r = links.get(name); links.delete(name); r.end(); } };
 
-  return { handle, authenticate, issueToken, join, revoke, list, tick, send, close };
+  return { handle, authenticate, issueToken, join, revoke, list, tick, command, ack, result, linked, bind, close };
 }

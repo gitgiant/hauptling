@@ -228,6 +228,7 @@ export function createDashboard({ db, dbPath, core, host, log = () => {}, slotDi
 
   // ---------- agent detail ----------
   async function diff(a) {
+    if (a.host && a.host !== 'hub') return { stat: '', files: [], note: `Runs on ${a.host}; its clone is there` };
     if (!a.dir || !a.slot || NO_SESSION.includes(a.state)) return { stat: '', files: [], note: `No clone (${a.state})` };
     const g = async (args) => (await host.run(a.slot, ['git', '-C', a.dir, ...args], { timeout: 30e3 })).stdout;
     const base = await g(['merge-base', `origin/${a.base}`, 'HEAD']).then(s => s.trim(), () => `origin/${a.base}`);
@@ -277,7 +278,7 @@ export function createDashboard({ db, dbPath, core, host, log = () => {}, slotDi
     const keyOf = new Map(all.filter(l => l.key).map(l => [l.vendor, l.key]));
     const rows = db.prepare('SELECT * FROM slot_usage ORDER BY at DESC').all();
     // A slot runs one worker per vendor: key by both, or a codex worker would hide the claude one on the same slot.
-    const busy = new Map(db.prepare("SELECT slot, id, vendor FROM agents WHERE slot IS NOT NULL AND state IN ('spawning','restarting','paused','working','blocked','done')").all().map(r => [`${r.slot}:${r.vendor}`, r.id]));
+    const busy = new Map(db.prepare("SELECT slot, id, vendor FROM agents WHERE slot IS NOT NULL AND host = 'hub' AND state IN ('spawning','restarting','paused','working','blocked','done')").all().map(r => [`${r.slot}:${r.vendor}`, r.id]));
     // One account per vendor (signed in on every slot, or one API key): the newest reading of each window, from any slot.
     const vendors = VENDOR_LIST.map(vendor => {
       const latest = new Map();
