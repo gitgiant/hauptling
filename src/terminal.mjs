@@ -183,3 +183,52 @@ export function createTerminals({ db, host, slotDir, rpc = null, log = () => {},
 
   return { resolve, screen, input, inputState, keys, relayKeys, startLogin, stopLogin, runningOn };
 }
+
+/**
+ * `hauptling attach` on the hub for an agent on a satellite (PRD "Part 3"): redraws the relayed screen when it
+ * changes and sends keystrokes (`stdin` in raw mode); Ctrl-] detaches. `call(name, args)` is the broker API.
+ * Resolves with the reason it stopped.
+ */
+export function attachRemote({ call, agent, host, stdin = process.stdin, stdout = process.stdout, everyMs = 250 }) {
+  return new Promise((resolveDone) => {
+    let hash = null, busy = false, stopped = false, status = '', sending = Promise.resolve();
+    const draw = (text) => stdout.write(`\x1b[H\x1b[2J${text.replace(/\r?\n/g, '\r\n')}`);
+    const say = (text) => { if (text !== status) { status = text; stdout.write(`\r\n\x1b[7m ${text} \x1b[0m`); } };
+    const stop = (why) => {
+      if (stopped) return;
+      stopped = true;
+      clearInterval(timer);
+      stdin.off('data', onData);
+      try { stdin.setRawMode?.(false); } catch {}
+      stdin.pause?.();
+      stdout.write('\r\n');
+      resolveDone(why);
+    };
+    const tick = async () => {
+      if (busy || stopped) return;
+      busy = true;
+      try {
+        const s = await call('term.screen', { agent, since: hash });
+        if (stopped) return;
+        if (typeof s?.text === 'string') { hash = s.hash ?? null; status = ''; draw(s.text); }
+        else if (status) { status = ''; hash = null; } // back online: force a redraw on the next poll
+        if (s && s.alive === false) stop('session ended');
+      } catch (e) {
+        if (/is offline/.test(e.message)) say(`${host} is offline; waiting for it to reconnect (Ctrl-] detaches)`);
+        else if (/No (live session|agent)/.test(e.message)) stop(e.message);
+        else say(e.message);
+      } finally { busy = false; }
+    };
+    const onData = (chunk) => {
+      const { keys, detach } = keysFromBytes(chunk.toString('utf8'));
+      if (keys.length) sending = sending.then(() => call('term.keys', { agent, keys })).catch(e => say(/is offline/.test(e.message) ? `${host} is offline; keys are not queued` : e.message));
+      if (detach) stop('detached');
+    };
+    try { stdin.setRawMode?.(true); } catch {}
+    stdin.on('data', onData);
+    stdin.resume?.();
+    const timer = setInterval(tick, everyMs);
+    timer.unref?.();
+    tick();
+  });
+}

@@ -38,6 +38,13 @@
     <p class="empty">One account per vendor, signed in once on each slot (or one API key for all). At 90% of a window you get a notification; at 100% new spawns of that vendor wait until it resets.</p>
     <div id="vendors"></div>
   </section>
+  <section id="hosts-panel" class="panel" hidden>
+    <details open>
+      <summary><h2>Hosts</h2></summary>
+      <p class="empty">Satellites that run workers for this hub. They dial in over the tailnet; nothing connects to them.</p>
+      <div id="hosts"></div>
+    </details>
+  </section>
   <section class="panel">
     <h2>Spend, last 30 days</h2>
     <p class="empty">API-equivalent estimates (~ marks costs estimated from models.json prices). Subscription plans are billed differently.</p>

@@ -121,7 +121,8 @@ export async function runBroker({ port = BROKER_PORT } = {}) {
     satellite = createSatellite({ db, config: joined, capabilities, onCommand: (c) => core.command(c), onRpc: (op, args) => dash.remote(op, args), log });
   }
   const core = createCore({ db, host, github, notify: plat.notify, workerUrl: WORKER_BROKER_URL, publicUrl: base, runnerToken, hub, satellite, log });
-  const dash = createDashboard({ db, dbPath, core, host, hub, log, slotDir, logins, report: { gh: github.gh, logPath, config: dockerConfig, secrets: () => [adminToken, runnerToken] } });
+  // The dashboard's host features (Hosts panel, relayed terminal/diff) are the hub's; a joined satellite has none.
+  const dash = createDashboard({ db, dbPath, core, host, hub: joined ? null : hub, log, slotDir, logins, report: { gh: github.gh, logPath, config: dockerConfig, secrets: () => [adminToken, runnerToken] } });
 
   const recovery = core.recover();
   const handler = brokerHandler({ core, hub, dash, adminToken, log, recovery });

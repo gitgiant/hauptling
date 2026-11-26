@@ -2,6 +2,7 @@
 // Serves web/dashboard with fake data, for looking at layout changes without a broker.
 //   node scripts/dash-preview.mjs                 → http://127.0.0.1:8411/ (Ctrl-C to stop)
 //   node scripts/dash-preview.mjs --shots DIR     → screenshots of every view at several sizes, then exits.
+//     --only usage-1366x768                       → just that one;  --hosts → with satellites (PRD "Part 3").
 // Screenshots use headless Edge or Chromium: $BROWSER, else msedge.exe (WSL) or chromium on PATH.
 // Each page shows a size label at the bottom left, red if anything sticks out past the right edge.
 import { createServer } from 'node:http';
@@ -58,6 +59,17 @@ const screen = { text: Array.from({ length: 40 }, (_, i) => `✓ step ${i}: ${TI
 
 // The fake data goes into the page itself (stub EventSource and fetch that answer in microtasks), so it is
 // rendered before the load event: headless --screenshot fires then, and --virtual-time-budget hangs on WSL Edge.
+// --hosts: two satellites (one offline), host chips, the Hosts panel and per-host usage.
+if (process.argv.includes('--hosts')) {
+  board.hosts = [{ name: 'hub', online: true, lost: false }, { name: 'gpu-box', online: true, lost: false }, { name: 'laptop', online: false, lost: false }];
+  board.agents.forEach((a, i) => { a.host = ['hub', 'gpu-box', 'laptop'][i % 3]; });
+  for (const a of board.agents.filter(x => x.host === 'laptop' && !x.ended)) { a.host_state = 'offline'; a.headline = 'Host offline: laptop'; }
+  usage.vendors[0].hosts = [{ host: 'gpu-box', online: true, limits: [{ window: '5h', used_pct: 64, resets_at: ago(-40) }, { window: '7d', used_pct: 30, resets_at: ago(-4000) }] }];
+  usage.hosts = [
+    { name: 'gpu-box', online: true, revoked: false, lost: false, lastSeen: ago(0.3), vendors: { claude: ['hl-w1', 'hl-w2'], codex: ['hl-w1'] }, free: { claude: 1, codex: 1 }, gpu: true, maxWorkers: 6, workers: 3, pendingCommands: 0, revoke: 'hauptling satellite revoke gpu-box' },
+    { name: 'laptop', online: false, revoked: false, lost: false, lastSeen: ago(25), vendors: { claude: ['hl-w1'] }, free: { claude: 0 }, gpu: false, maxWorkers: 2, workers: 1, pendingCommands: 2, revoke: 'hauptling satellite revoke laptop' },
+  ];
+}
 const FAKE = { board, host, usage, tables, screen,
   history: agents.map(a => ({ ...a, state: 'merged', report: 'Merged after review.' })),
   table: { offset: 0, total: 3, columns: ['id', 'state', 'repo', 'title'], rows: agents.slice(0, 3).map(a => [a.id, a.state, a.repo, a.title]) } };
@@ -123,8 +135,10 @@ server.listen(port, '127.0.0.1', async () => {
   mkdirSync(shots, { recursive: true });
   const sizes = [[390, 844], [768, 1024], [1366, 768], [1920, 1080], [3440, 1440]];
   const views = { board: `#agent=${agents[1].id}`, history: '#history', db: '#db', usage: '#usage' };
+  const only = args.includes('--only') ? args[args.indexOf('--only') + 1] : null;
   for (const [w, h] of sizes) {
     for (const [name, hash] of Object.entries(views)) {
+      if (only && only !== `${name}-${w}x${h}`) continue;
       const profile = mkdtempSync(join(win ? shots : tmpdir(), '.profile-'));
       const out = join(shots, `${name}-${w}x${h}.png`);
       try {
