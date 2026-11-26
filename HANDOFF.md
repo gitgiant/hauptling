@@ -1,5 +1,4 @@
 # Handoff — 2026-11-26
-
 ## Needs a real run to confirm
 
 - Agent lifecycle controls passed stubbed tests. A Docker host is still needed to verify freeze/unfreeze, vendor session resume and container recreation from the existing clone, and to rebuild the worker image and restart the broker. External-merge cancellation was tested with a fake host. The live broker still needs to run the updated code. Test jobs surviving a broker restart and `[merge-failed]` (PRD "Merge gate"): tested with fake Docker/`gh` only. Needs `hauptling broker restart`; then restart again during a real test job (CPU and GPU) and check it is adopted and reported once.
@@ -22,7 +21,6 @@
 - Slots per vendor (PRD "Security"): a slot runs one worker per vendor, containers mount only their vendor's dir, `maxWorkers` (default 6) caps the host. Unit-tested only. Needs `hauptling image` and `hauptling broker restart`; check a codex worker's container has no `.vendor/claude`.
 - Several hosts parts 1–2 (PRD "Several hosts", "Part 2"): link, placement, commands and the hub mirror are tested with two brokers in one process (Docker and `gh` stubbed) only. Needs `hauptling image` (the CLI gained `--host`/`--gpu`) and `hauptling broker restart`, then a real join from a second host through the `tailscale serve` URL: SSE through the proxy, a real spawn → PR → merge on the satellite with its own `gh`, and a satellite stall notification reaching this machine. Several hosts part 3 (PRD "Part 3"): host chips, offline/lost headlines, Hosts panel (Add host, Revoke), terminal/diff/events relayed over the link, `hauptling attach` relay, per-host usage chips. Tested with two in-process brokers only; the browser UI is unseen (no headless browser in the worker: `node scripts/dash-preview.mjs --hosts --shots DIR --only usage-1366x768`). Needs `hauptling broker restart` on the hub and every satellite; check that "Add host" through `tailscale serve` shows the https URL (`X-Forwarded-Host`/`Host`), and that the relayed terminal feels responsive (250 ms polls).
 - Parking (PRD "Parking", branch `hl/claude_opus-5-5_985e5`): stubbed tests only. Needs `hauptling broker restart`. Unchecked on real TUIs: that a Claude/Codex session copied into another slot resumes (`--resume` / `codex resume`), that mail arrives via SessionStart/first prompt after resume, the 3 s park delay vs. the TUI's last transcript write, and the saved screen in the Terminal tab.
-
 - Web terminal size (PRD "Web terminal size"): unit-tested, tmux commands checked on a local tmux 3.4; dashboard measuring unseen in a browser. Needs `hauptling broker restart` (hub and satellites; no image). Check a narrow pane with real Claude/Codex/agy TUIs, and whether narrow screens upset the stall watcher's screen matches.
 
 ## Open
