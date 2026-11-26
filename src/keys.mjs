@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { home } from './util.mjs';
 
@@ -35,6 +35,7 @@ export function setKey(vendor, key) {
   chmodSync(dir(), 0o700);
   writeFileSync(file(vendor), `${k}\n`, { mode: 0o600 });
   chmodSync(file(vendor), 0o600);
+  clearExhausted(vendor);
   return { vendor, hint: hint(k) };
 }
 
@@ -43,6 +44,7 @@ export function removeKey(vendor) {
   const had = existsSync(f);
   rmSync(f, { force: true });
   rmSync(budgetFile(vendor), { force: true });
+  clearExhausted(vendor);
   return { vendor, removed: had };
 }
 
@@ -63,13 +65,38 @@ export function getBudget(vendor) {
 /** `usd` null or 'off' removes the budget. `resetsOn`: day of month the credit renews (1–28). */
 export function setBudget(vendor, usd, resetsOn = 1) {
   const f = budgetFile(vendor);
-  if (usd == null || usd === 'off') { rmSync(f, { force: true }); return null; }
+  if (usd == null || usd === 'off') { rmSync(f, { force: true }); clearExhausted(vendor); return null; }
   const n = Number(usd), day = Number(resetsOn);
   if (!(n > 0)) throw new Error(`Budget must be a positive amount in USD, got "${usd}"`);
   if (!Number.isInteger(day) || day < 1 || day > 28) throw new Error(`--resets-on must be a day 1–28, got "${resetsOn}"`);
   mkdirSync(dir(), { recursive: true, mode: 0o700 });
   writeFileSync(f, `${JSON.stringify({ usd: n, resets_on: day })}\n`, { mode: 0o600 });
+  clearExhausted(vendor);
   return { usd: n, resets_on: day };
+}
+
+// ---------- out of credit ----------
+const outFile = (vendor) => `${file(vendor)}.out.json`;
+
+/** The vendor refused the key for lack of credit. `until`: the budget period's end, or null (until the key is reset). */
+export function markExhausted(vendor, until = null) {
+  mkdirSync(dir(), { recursive: true, mode: 0o700 });
+  writeFileSync(outFile(vendor), `${JSON.stringify({ at: new Date().toISOString(), until })}\n`, { mode: 0o600 });
+}
+
+/** { at, until } while the key counts as out of credit, else null. */
+export function getExhausted(vendor, at = new Date()) {
+  try {
+    const e = JSON.parse(readFileSync(outFile(vendor), 'utf8'));
+    return e.until && Date.parse(e.until) <= at.getTime() ? null : { at: e.at, until: e.until ?? null };
+  } catch { return null; }
+}
+
+export const clearExhausted = (vendor) => rmSync(outFile(vendor), { force: true });
+
+/** When the stored key was written, as ISO; null without a key. */
+export function keySetAt(vendor) {
+  try { return statSync(file(vendor)).mtime.toISOString(); } catch { return null; }
 }
 
 /** Start of the current budget period (local midnight on the last `resetsOn` day), as ISO. */

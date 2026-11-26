@@ -723,7 +723,8 @@ async function loadUsage() {
       return h('section', { class: 'vendor' },
         h('h3', { text: v.vendor }),
         v.budget ? budgetLine(v) : null,
-        v.key && !v.budget ? h('div', { class: 'ok', title: `Every slot uses this key; billed per token. hauptling key rm ${v.vendor} switches back to sign-ins.`, text: `✓ API key ${v.key}` })
+        v.out_of_credit && !v.budget ? h('div', { class: 'no', title: `Add funds, then: hauptling key set ${v.vendor} (or give it a budget: hauptling key budget ${v.vendor} USD)`, text: `✗ API key ${v.key}: credit ran out (${clock(v.out_of_credit.at)}) · new ${v.vendor} spawns are refused` })
+        : v.key && !v.budget ? h('div', { class: 'ok', title: `Every slot uses this key; billed per token. hauptling key rm ${v.vendor} switches back to sign-ins.`, text: `✓ API key ${v.key}` })
           : h('div', { class: signed === v.slots.length ? 'ok' : 'no', text: `${signed === v.slots.length ? '✓' : '✗'} signed in on ${signed}/${v.slots.length} slots${v.budget ? ' (after the API budget)' : ''}` }),
         v.limits.length ? v.limits.sort((a) => (a.window === '5h' ? -1 : 1)).map(meter) : h('p', { class: 'resets', text: 'No usage reported yet; workers report it while they run.' }),
         (v.hosts || []).map(x => h('div', { class: 'hostusage' }, h('span', { class: 'chip host', title: x.online ? 'online' : 'offline: last reading', text: x.host }),
@@ -743,9 +744,9 @@ async function loadUsage() {
 }
 /** Vendor card: API key with a monthly budget, used first. */
 function budgetLine(v) {
-  const b = v.budget, over = b.spent >= b.stop_at;
-  return h('div', { class: over ? 'no' : 'ok', title: `API key ${v.key}. New ${v.vendor} workers use the API while spend is under $${b.stop_at}, then the slots' sign-ins. Hauptling's own tally of its API workers' reported cost.` },
-    `${over ? '✗' : '✓'} API first: $${b.spent.toFixed(2)} of $${b.usd} (new API spawns stop at $${b.stop_at}) · resets ${new Date(b.until).toLocaleDateString()}`);
+  const b = v.budget, out = v.out_of_credit, over = Boolean(out) || b.spent >= b.stop_at;
+  return h('div', { class: over ? 'no' : 'ok', title: `API key ${v.key}. New ${v.vendor} workers use the API while spend is under $${b.stop_at}, then the slots' sign-ins. Hauptling's own tally of its API workers' cost.` },
+    `${over ? '✗' : '✓'} API first: $${b.spent.toFixed(2)} of $${b.usd} (${out ? `credit ran out ${clock(out.at)}: new spawns use the sign-ins` : `new API spawns stop at $${b.stop_at}`}) · resets ${new Date(b.until).toLocaleDateString()}`);
 }
 
 /** Header: one chip per vendor with tiny bars (5h on top, week below), an API budget chip where set, plus 30-day spend. */
@@ -766,8 +767,13 @@ function renderUsageBar(u) {
       h('span', { class: 'vname', text: `${v.vendor}@${x.host}` }),
       h('span', { class: 'minis' }, ls.map(l => h('span', { class: `mini ${level(l.used_pct)}` }, h('span', { style: `width:${Math.min(100, l.used_pct)}%` }))))));
   }
-  for (const v of u.vendors.filter(x => x.budget)) {
+  for (const v of u.vendors.filter(x => x.budget || x.out_of_credit)) {
     const b = v.budget;
+    if (v.out_of_credit) {
+      chips.push(h('span', { class: 'uchip spend full', title: `${v.vendor} API credit ran out; ${b ? `new workers use your plan until ${new Date(b.until).toLocaleDateString()}` : `new spawns are refused until hauptling key set ${v.vendor}`}` },
+        h('span', { class: 'vname', text: 'API' }), `${v.vendor} out${b ? ` $${Math.round(b.spent)}/$${b.usd}` : ''}`));
+      continue;
+    }
     chips.push(h('span', { class: `uchip spend ${b.spent >= b.usd ? 'full' : b.spent >= b.stop_at ? 'warn' : ''}`, title: `${v.vendor} API budget this month (resets ${new Date(b.until).toLocaleDateString()}); at $${b.stop_at} new workers move to your plan` },
       h('span', { class: 'vname', text: 'API' }), `$${Math.round(b.spent)}/$${b.usd}`));
   }

@@ -18,21 +18,23 @@ export function estimateCost(price, tokensIn, tokensOut) {
   return Math.round(((tokensIn * price.usd_in + tokensOut * price.usd_out) / 1e6) * 10000) / 10000;
 }
 
-function withCost(u, reported, price, estimatedFlag = false) {
-  if (num(reported) != null) return { ...u, cost_usd: reported, cost_estimated: Boolean(estimatedFlag) };
+function withCost(u, reported, price, { api = false, estimatedFlag = false } = {}) {
+  // API work is never free: a 0 beside used tokens means the vendor didn't count it.
+  const uncounted = api && reported === 0 && (u.tokens_in > 0 || u.tokens_out > 0);
+  if (num(reported) != null && !uncounted) return { ...u, cost_usd: reported, cost_estimated: Boolean(estimatedFlag) };
   return { ...u, cost_usd: estimateCost(price, u.tokens_in, u.tokens_out), cost_estimated: true };
 }
 
-function claude(j, price) {
+function claude(j, price, api) {
   const cw = j.context_window || {};
   const limits = [['5h', j.rate_limits?.five_hour], ['week', j.rate_limits?.seven_day]]
     .filter(([, l]) => l && num(l.used_percentage) != null)
     .map(([window, l]) => ({ window, used_pct: pct(l.used_percentage), resets_at: iso(l.resets_at) }));
   const u = { model: j.model?.id || null, tokens_in: num(cw.total_input_tokens), tokens_out: num(cw.total_output_tokens), context_pct: pct(cw.used_percentage), limits };
-  return withCost(u, j.cost?.total_cost_usd, price);
+  return withCost(u, reportedCost('claude', j), price, { api });
 }
 
-function agy(j, price) {
+function agy(j, price, api) {
   const cw = j.context_window || {};
   // Quota arrives as *remaining* per bucket (3p-5h, gemini-5h, 3p-weekly, gemini-weekly); keep the fullest bucket per window.
   const byWindow = {};
@@ -44,10 +46,10 @@ function agy(j, price) {
     if (!byWindow[window] || used > byWindow[window].used_pct) byWindow[window] = { window, used_pct: used, resets_at: resets };
   }
   const u = { model: j.model?.id || null, tokens_in: num(cw.total_input_tokens), tokens_out: num(cw.total_output_tokens), context_pct: pct(cw.used_percentage), limits: Object.values(byWindow) };
-  return withCost(u, j.cost?.total_usd, price, j.cost?.estimated);
+  return withCost(u, reportedCost('agy', j), price, { api, estimatedFlag: j.cost?.estimated });
 }
 
-function codex(p, price) {
+function codex(p, price, api) {
   const info = p.info || {};
   const total = info.total_token_usage || {};
   const last = info.last_token_usage || {};
@@ -55,17 +57,63 @@ function codex(p, price) {
   const limits = ['primary', 'secondary'].map(k => p.rate_limits?.[k]).filter(l => l && num(l.used_percent) != null)
     .map(l => ({ window: windowName(l.window_minutes), used_pct: pct(l.used_percent), resets_at: iso(l.resets_at) }));
   const u = { model: null, tokens_in: num(total.input_tokens), tokens_out: num(total.output_tokens), context_pct: pct(ctx), limits };
-  return withCost(u, null, price);
+  return withCost(u, null, price, { api });
 }
 
-/** Vendor payload → normalized usage. `price` is the agent's models.json entry ({ usd_in, usd_out }). */
-export function normalizeUsage(vendor, payload, price = null) {
+/** The cost the vendor itself put in its payload, or null. */
+export function reportedCost(vendor, payload) {
+  return num(vendor === 'claude' ? payload?.cost?.total_cost_usd : vendor === 'agy' ? payload?.cost?.total_usd : null);
+}
+
+/**
+ * Vendor payload → normalized usage. `price` is the agent's models.json entry ({ usd_in, usd_out });
+ * `api`: the agent is billed on an API key.
+ */
+export function normalizeUsage(vendor, payload, price = null, { api = false } = {}) {
   if (!payload || typeof payload !== 'object') throw new Error('usage payload must be an object');
-  if (vendor === 'claude') return claude(payload, price);
-  if (vendor === 'agy') return agy(payload, price);
-  if (vendor === 'codex') return codex(payload, price);
+  if (vendor === 'claude') return claude(payload, price, api);
+  if (vendor === 'agy') return agy(payload, price, api);
+  if (vendor === 'codex') return codex(payload, price, api);
   throw new Error(`Unknown vendor ${vendor}`);
 }
+
+const add = (a, b) => (a == null && b == null ? null : Math.round(((a || 0) + (b || 0)) * 10000) / 10000);
+const less = (a, b) => a != null && b != null && a < b;
+const totals = (base, s) => ({ tokens_in: add(base?.tokens_in, s.tokens_in), tokens_out: add(base?.tokens_out, s.tokens_out),
+  cost_usd: add(base?.cost_usd, s.cost_usd), cost_estimated: Boolean(base?.cost_estimated || s.cost_estimated) });
+
+/**
+ * An agent's stored usage `prev` plus the latest reading `u` of one CLI session → totals across sessions.
+ * `session` keeps the current session's own numbers, `base` the sum of the finished ones. A new session: a
+ * changed session id or a lower reported cost; for Codex, whose log counts cumulatively, also lower token
+ * totals (Claude's are the current context, which shrinks within a session). Rows without `session` predate this.
+ */
+export function accumulate(prev, u, { vendor, sessionId = null, reported = null }) {
+  const old = prev && (prev.session || { tokens_in: prev.tokens_in, tokens_out: prev.tokens_out, cost_usd: prev.cost_usd,
+    cost_estimated: prev.cost_estimated, reported: prev.cost_estimated ? null : prev.cost_usd });
+  const fresh = Boolean(old) && ((sessionId && old.id && sessionId !== old.id) || less(reported, old.reported)
+    || (vendor === 'codex' && (less(u.tokens_in, old.tokens_in) || less(u.tokens_out, old.tokens_out))));
+  const base = fresh ? totals(prev.base, old) : prev?.base || null;
+  const same = (!fresh && old) || {};
+  const keepCost = u.cost_usd == null || (u.cost_estimated && same.cost_usd > u.cost_usd);
+  const session = { id: sessionId || same.id || null, tokens_in: u.tokens_in ?? same.tokens_in ?? null, tokens_out: u.tokens_out ?? same.tokens_out ?? null,
+    cost_usd: keepCost ? same.cost_usd ?? null : u.cost_usd, cost_estimated: keepCost ? same.cost_estimated ?? u.cost_estimated : u.cost_estimated,
+    reported: reported ?? same.reported ?? null };
+  return { ...u, ...totals(base, session), session, ...(base ? { base } : {}) };
+}
+
+/**
+ * What a vendor's TUI prints when an API key has no credit left, matched at the start of a screen line
+ * (after the TUI's own glyphs). Extend with real wording only; agy's is unknown.
+ */
+export const OUT_OF_CREDIT = {
+  claude: [/^[\s⎿│┃●⏺■*!>-]*Credit balance (?:is )?too low/im],
+  // openai/codex codex-rs/protocol/src/error.rs
+  codex: [/^[\s⎿│┃●⏺■•⚠*>!-]*Quota exceeded\. Check your plan and billing details/im,
+    /^[\s⎿│┃●⏺■•⚠*>!-]*Your (?:API key|project|organization) has reached its spend limit/im],
+  agy: [],
+};
+export const outOfCredit = (vendor, screen) => (OUT_OF_CREDIT[vendor] || []).some(re => re.test(String(screen)));
 
 /** What a worker forwards: the status line JSON minus personal fields. */
 export function scrub(payload) {
