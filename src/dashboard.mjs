@@ -366,6 +366,7 @@ export function createDashboard({ db, dbPath, core, host, hub = null, log = () =
         vendor,
         key: keyOf.get(vendor) || null,
         budget: core.budgetState?.(vendor) || null, // API first, then the plan: { usd, spent, stop_at, until, … }
+        out_of_credit: core.keyOut?.(vendor) || null, // the API refused the key: { at, until }
         limits: [...latest.values()],
         slots: slotNames.map(slot => ({
           slot,

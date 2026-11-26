@@ -5,7 +5,7 @@ import * as codegraph from './codegraph.mjs';
 import { checkTier, effortFor, findModel, launchArgv, loadModels, nextVendor, pick, preferOf, setPrefer } from './models.mjs';
 import { canInject } from './vendors.mjs';
 import { readFileSync } from 'node:fs';
-import { normalizeUsage, scrub, spendLine, statusText, windowSnapshot } from './usage.mjs';
+import { normalizeUsage, scrub, spendLine, statusText, windowSnapshot, accumulate, outOfCredit, reportedCost } from './usage.mjs';
 import { dashToken } from './dashboard.mjs';
 import { checkKeys } from './terminal.mjs';
 import { MAIL_MAX, STATUS_MAX, bounded, githubSlug, hex, isFamily, now, sanitizeModel, token, wslPath } from './util.mjs';
@@ -196,11 +196,15 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
       // Round robin, skipping vendors whose every slot is at 100% of a usage window (if all are, the spawn waits in the queue).
       const tried = [];
       for (let i = 0; i < 3 && !vendor; i++) { const v = nextVendor(db, cfg); tried.push(v); if (startable(v)) vendor = v; }
-      vendor ||= tried[0];
+      vendor ||= tried.find(v => !refused(v)) || tried[0];
     }
     const entry = checkTier(cfg, vendor, model ? findModel(cfg, vendor, model) : pick(cfg, vendor, mode, difficulty), allowTier);
     const eff = effortFor(cfg, vendor, entry, effort);
     if (!brief?.trim()) throw new Error('Brief is empty');
+    // A satellite has its own keys, so only a spawn that can't run anywhere else is refused here.
+    const elsewhere = Boolean(hub) && (wantHost ?? drow.host) !== 'hub' && Boolean(githubSlug(repo)) && Boolean(db.prepare('SELECT 1 FROM hosts WHERE key_hash IS NOT NULL').get());
+    const checkCredit = (v) => { if (!elsewhere && refused(v)) throw new Error(refusal(v)); };
+    checkCredit(vendor);
     const id = `${vendor}_${sanitizeModel(entry.id)}_${hex(3).slice(0, 5)}`;
     title ||= (brief.match(/^#+\s*(.+)$/m)?.[1] || brief.trim().split('\n')[0]).slice(0, 72);
     const insert = (row) => {
@@ -212,6 +216,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     if (testWriter) {
       // Tests first: the test writer (cheapest model unless chosen) commits spec tests on the task branch; the implementer waits.
       const twVendor = testWriter.vendor || nextVendor(db, cfg);
+      checkCredit(twVendor);
       const twEntry = testWriter.model ? findModel(cfg, twVendor, testWriter.model) : pick(cfg, twVendor, 'cheapest');
       tw = { id: `${twVendor}_${sanitizeModel(twEntry.id)}_${hex(3).slice(0, 5)}`, vendor: twVendor, model: twEntry.id, effort: effortFor(cfg, twVendor, twEntry) };
     }
@@ -351,13 +356,21 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     if (!b) return null;
     return { ...b, spent: apiSpend(vendor, b), stop_at: Math.round(b.usd * STOP_AT * 100) / 100, from: periodStart(b.resets_on), until: periodEnd(b.resets_on) };
   }
-  /** 'api' or 'plan' for a worker starting now: a key without budget covers every spawn; with a budget, until STOP_AT of it is spent. */
+  /** { at, until } while the vendor's key counts as out of credit, else null. */
+  const keyOut = (vendor) => (getKey(vendor) ? keys.getExhausted(vendor) : null);
+  /** Out of credit and no budget, so no plan to fall back to: nothing of this vendor starts here. */
+  const refused = (vendor) => Boolean(keyOut(vendor)) && !getBudget(vendor);
+  const refusal = (vendor) => `${vendor}: the API credit ran out and the key has no budget, so there is no plan fallback. Add funds, then \`hauptling key set ${vendor}\` (or give it a budget: \`hauptling key budget ${vendor} USD\`)`;
+  /**
+   * 'api' or 'plan' for a worker starting now: a key without budget covers every spawn; with a budget, until
+   * STOP_AT of it is spent or the credit ran out.
+   */
   function billingFor(vendor) {
     if (!getKey(vendor)) return 'plan';
     const b = budgetState(vendor);
-    return !b || b.spent < b.stop_at ? 'api' : 'plan';
+    return !b || (b.spent < b.stop_at && !keyOut(vendor)) ? 'api' : 'plan';
   }
-  const startable = (vendor) => billingFor(vendor) === 'api' || !exhausted(vendor);
+  const startable = (vendor) => !refused(vendor) && (billingFor(vendor) === 'api' || !exhausted(vendor));
   function priceOf(a) { try { return findModel(models(), a.vendor, a.model); } catch { return null; } }
 
   /**
@@ -387,7 +400,10 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   }
 
   /** Stores an agent's usage and its slot's limit windows; warns once per window at 90%. */
-  function recordUsage(a, u) {
+  function recordUsage(a, payload, sessionId = null) {
+    const reading = normalizeUsage(a.vendor, payload, priceOf(a), { api: a.billing === 'api' });
+    const prev = agentRow(a.id).usage;
+    const u = accumulate(prev ? JSON.parse(prev) : null, reading, { vendor: a.vendor, sessionId, reported: reportedCost(a.vendor, payload) });
     update(a.id, { usage: JSON.stringify({ ...u, at: now() }) });
     if (a.billing === 'api') budgetWarn(a);
     if (!a.slot) return u;
@@ -423,12 +439,37 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     log(`api-budget ${text}`);
   }
 
+  /**
+   * An `api` worker's screen shows the vendor's out-of-credit error: block it, tell the delegator once, and
+   * mark the key (one notification) unless the worker predates it. False: nothing to act on.
+   */
+  function apiOut(a) {
+    const key = `api-out:${a.id}`;
+    const first = !kvGet(db, key);
+    if (!first && !keyOut(a.vendor)) return false; // the key was reset: this is old text on the screen
+    if (a.state !== 'blocked' || first) {
+      update(a.id, { state: 'blocked' });
+      setStatus(a.id, 'blocked: API credit ran out');
+    }
+    if (!first) return true;
+    kvSet(db, key, now());
+    if (getKey(a.vendor) && !keyOut(a.vendor) && !(a.created_at < keys.keySetAt(a.vendor))) {
+      const b = getBudget(a.vendor);
+      keys.markExhausted(a.vendor, b ? periodEnd(b.resets_on) : null);
+      const next = b ? `new ${a.vendor} workers use your plan until ${new Date(periodEnd(b.resets_on)).toLocaleDateString()}`
+        : `new ${a.vendor} spawns are refused until the key is reset`;
+      toast(a.id, { title: `${a.vendor} API credit ran out`, body: `${next}. Add funds, then: hauptling key set ${a.vendor}`, choices: [], links: null, dashboard: `${publicUrl}/#usage` });
+    }
+    emit(a.delegator, a.id, 'api-exhausted', `${a.id}: ${a.vendor} API credit ran out. This worker can't switch billing: kill it (\`hauptling kill ${a.id}\`) and respawn the task. Its work is in the container's working tree (${a.dir}), which kill deletes: save what you need first.`);
+    return true;
+  }
+
   /** `hauptling usage <vendor>` from a worker's status line: raw vendor JSON → stored; returns the text to show. */
   function usageReport(who, { vendor, payload }) {
     if (who.role !== 'agent') throw new Error('usage.report comes from a worker\'s status line');
     const a = agentRow(who.agent);
     if (vendor !== a.vendor) throw new Error(`usage for ${vendor} from a ${a.vendor} worker`);
-    return { text: statusText(recordUsage(a, normalizeUsage(vendor, scrub(payload), priceOf(a)))) };
+    return { text: statusText(recordUsage(a, scrub(payload), typeof payload?.session_id === 'string' ? payload.session_id : null)) };
   }
 
   /**
@@ -448,7 +489,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     for (const a of db.prepare("SELECT * FROM agents WHERE vendor = 'codex' AND slot IS NOT NULL AND host = 'hub' AND state IN ('working','blocked','done')").all()) {
       try {
         const p = await host.codexUsage(a.slot, a.created_at);
-        if (p) recordUsage(a, normalizeUsage('codex', p, priceOf(a)));
+        if (p) recordUsage(a, p);
       } catch (e) { log(`codex usage ${a.id}: ${e.message} (format changed? usage shows unknown)`); }
     }
   }
@@ -1273,6 +1314,11 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
           await startQueued(a.delegator);
           continue;
         }
+        if (a.billing === 'api') {
+          const screen = await host.tmuxCapture?.(a.slot, a.id, 25).catch(() => '') || '';
+          if (!unchanged()) continue;
+          if (outOfCredit(a.vendor, screen) && apiOut(a)) continue;
+        }
         if (a.state === 'working' && a.idle) {
           // Ended its turn without `hauptling report` (e.g. asked a question in plain text).
           if (at - Date.parse(a.seen_at) < idleMinutes * 60e3) continue;
@@ -1533,6 +1579,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     if (!githubSlug(x.repo)) throw new Error(`${x.repo} is a local path: local repos run on the hub only`);
     if (!isFamily(x.vendor)) throw new Error(`bad vendor ${x.vendor}`);
     if (!agentRow(x.id)) {
+      if (refused(x.vendor)) throw new Error(refusal(x.vendor));
       copyDelegator(d);
       db.prepare(`INSERT INTO agents (id, delegator, vendor, model, repo, base, branch, brief, title, test_writer, state, token, created_at, updated_at, role, depends_on, start_from, effort, gpu)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?)`).run(x.id, d.id, x.vendor, x.model, x.repo, x.base || '', x.branch, x.brief, x.title, x.test_writer ? 1 : 0,
@@ -1626,5 +1673,5 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   hub?.bind({ receive, onState: placeSoon, onResult: commandDone });
   if (satellite) syncTests();
 
-  return { call, authenticate, emit, command, startAll, syncTests, freeSlots, spend, poll, watch, watchTests, startQueued, bus, askForPage, answer, pump, recover, gpuReady, refreshUsage, recordUsage, budgetState, billingFor };
+  return { call, authenticate, emit, keyOut, command, startAll, syncTests, freeSlots, spend, poll, watch, watchTests, startQueued, bus, askForPage, answer, pump, recover, gpuReady, refreshUsage, recordUsage, budgetState, billingFor };
 }

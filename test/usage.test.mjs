@@ -1,12 +1,18 @@
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { openDb } from '../src/db.mjs';
 import { createCore } from '../src/core.mjs';
 import * as keyStore from '../src/keys.mjs';
 import { loadModels } from '../src/models.mjs';
-import { estimateCost, lastTokenCount, normalizeUsage, scrub, statusText } from '../src/usage.mjs';
+import { accumulate, estimateCost, lastTokenCount, normalizeUsage, outOfCredit, scrub, statusText } from '../src/usage.mjs';
+
+// The key store reads and writes under here, never the real ~/.hauptling.
+const HOME = mkdtempSync(join(tmpdir(), 'hl-usage-'));
+process.env.HAUPTLING_HOME = HOME;
+after(() => rmSync(HOME, { recursive: true, force: true }));
 
 // Shapes copied from real payloads (Claude Code and agy status line docs; a Codex 0.172 rollout file).
 const CLAUDE = {
@@ -66,7 +72,8 @@ test('usage: estimate Codex cost using a shipped models.json price', () => {
 });
 
 /** `keys`: { key, budget } stands in for ~/.hauptling/keys (none by default). */
-function setup({ key = null, budget = null } = {}) {
+function setup({ key = null, budget = null, realKeys = false } = {}) {
+  for (const v of ['claude', 'codex', 'agy']) keyStore.removeKey(v);
   const db = openDb(':memory:');
   const toasts = [];
   const host = {
@@ -75,7 +82,7 @@ function setup({ key = null, budget = null } = {}) {
     codex: null, async codexUsage() { return this.codex; },
   };
   const gh = { gitAuthEnv: async () => ({}), prFind: async () => null, prCreate: async () => ({}), requiredChecks: async () => [], prAutoMerge: async () => {}, prMerge: async () => {}, prView: async () => ({ state: 'OPEN', statusCheckRollup: [] }) };
-  const keys = { ...keyStore, getKey: () => key, getBudget: () => budget };
+  const keys = realKeys ? keyStore : { ...keyStore, getKey: () => key, getBudget: () => budget };
   const core = createCore({ db, host, github: gh, keys, notify: t => toasts.push(t), models: () => loadModels(join(tmpdir(), 'none.json')), workerUrl: 'http://w', publicUrl: 'http://127.0.0.1:47800', runnerToken: 'RUN' });
   return { db, host, core, toasts };
 }
@@ -221,5 +228,143 @@ test('host status lines: installed idempotently; the previous command is chained
   assert.equal(s.model, 'x');
   assert.equal(chained('claude', 'hello'), 'hello', 'the user\'s own line still shows');
   assert.equal(chained('agy', '{}'), null, 'agy not installed on this host: nothing chained');
-  delete process.env.HAUPTLING_HOME;
+  process.env.HAUPTLING_HOME = HOME;
+});
+
+const row = (db, id) => ({ ...db.prepare('SELECT * FROM agents WHERE id = ?').get(id) });
+const usageOf = (db, id) => JSON.parse(row(db, id).usage);
+async function send(core, db, id, { cost, tokens = [1000, 100], session = 's1' }) {
+  const who = core.authenticate(row(db, id).token, 'ADMIN');
+  return core.call('usage.report', { vendor: 'claude', payload: { session_id: session, model: CLAUDE.model, cost: { total_cost_usd: cost },
+    context_window: { total_input_tokens: tokens[0], total_output_tokens: tokens[1] } } }, who);
+}
+async function spawnOne(core, vendor = 'claude') {
+  const r = await core.call('spawn', { brief: 'task', vendor, mode: 'cheapest' });
+  await settle();
+  return r;
+}
+const KEY = 'sk-ant-api03-test-0000000000';
+const SCREEN = '> continue\n  ⎿  Credit balance too low · Add funds: https://platform.claude.com/settings/billing\n\n> ';
+
+test('usage accumulates across CLI sessions: a lower cost or a new session id folds the finished one in', async () => {
+  const { db, core } = setup({ key: KEY });
+  await core.call('delegator.start', { repo: 'gitgiant/demo' });
+  const { id } = await spawnOne(core);
+  await send(core, db, id, { cost: 5, tokens: [150000, 900] });
+  await send(core, db, id, { cost: 6, tokens: [40000, 200] }); // compaction: the context shrinks, same session
+  assert.deepEqual([usageOf(db, id).cost_usd, usageOf(db, id).tokens_in], [6, 40000]);
+  const r = await send(core, db, id, { cost: 0.5, tokens: [2000, 50] }); // lower cost: a new session
+  assert.match(r.text, /\$6\.50/);
+  await send(core, db, id, { cost: 1, tokens: [3000, 60] });
+  assert.deepEqual([usageOf(db, id).cost_usd, usageOf(db, id).tokens_in, usageOf(db, id).tokens_out], [7, 43000, 260]);
+  await send(core, db, id, { cost: 2, tokens: [10, 1], session: 's2' }); // new id, though the cost is higher
+  assert.equal(usageOf(db, id).cost_usd, 9);
+  assert.equal(core.budgetState('claude'), null);
+  assert.equal(core.spend(row(db, id)).includes('$9.00'), true);
+});
+
+test('usage accumulate: rows from before sessions were tracked, and Codex token totals going down', () => {
+  const legacy = { tokens_in: 100, tokens_out: 10, cost_usd: 3, cost_estimated: false };
+  const u = accumulate(legacy, { tokens_in: 5, tokens_out: 1, cost_usd: 0.2, cost_estimated: false }, { vendor: 'claude', sessionId: 'x', reported: 0.2 });
+  assert.deepEqual([u.cost_usd, u.tokens_in], [3.2, 105]);
+  const a = accumulate(null, { tokens_in: 1000, tokens_out: 100, cost_usd: 1, cost_estimated: true }, { vendor: 'codex' });
+  const b = accumulate(a, { tokens_in: 200, tokens_out: 20, cost_usd: 0.2, cost_estimated: true }, { vendor: 'codex' });
+  assert.deepEqual([b.cost_usd, b.tokens_in, b.tokens_out, b.cost_estimated], [1.2, 1200, 120, true]);
+  const c = accumulate(b, { tokens_in: null, tokens_out: null, cost_usd: null, cost_estimated: true }, { vendor: 'codex' });
+  assert.deepEqual([c.cost_usd, c.tokens_in], [1.2, 1200], 'a reading without totals keeps them');
+});
+
+test('an api agent reporting cost 0 with tokens gets an estimate; a plan agent keeps the reported 0', async () => {
+  for (const [key, estimated] of [[KEY, true], [null, false]]) {
+    const { db, core } = setup({ key });
+    await core.call('delegator.start', { repo: 'gitgiant/demo' });
+    const { id } = await spawnOne(core);
+    await send(core, db, id, { cost: 0, tokens: [156000, 280] });
+    const u = usageOf(db, id);
+    assert.equal(u.cost_estimated, estimated);
+    assert.equal(u.cost_usd > 0, estimated);
+    if (!estimated) continue;
+    await send(core, db, id, { cost: 0, tokens: [1000, 10] });
+    assert.equal(usageOf(db, id).cost_usd, u.cost_usd, 'the estimate does not go down within a session');
+    await send(core, db, id, { cost: 0, tokens: [156000, 280], session: 's2' });
+    assert.equal(usageOf(db, id).cost_usd, Math.round(u.cost_usd * 2 * 1e4) / 1e4);
+  }
+});
+
+test('out-of-credit patterns: the vendor error line, not text that quotes it', () => {
+  assert.ok(outOfCredit('claude', SCREEN));
+  assert.ok(outOfCredit('codex', '■ Quota exceeded. Check your plan and billing details.'));
+  assert.ok(!outOfCredit('claude', '  12 - A screen with "Credit balance too low" blocks the agent'));
+  assert.ok(!outOfCredit('agy', SCREEN));
+});
+
+test('out of credit with a budget: blocked, one event and notification, then the plan until set again', async () => {
+  const { db, core, host, toasts } = setup({ realKeys: true });
+  keyStore.setKey('claude', KEY);
+  keyStore.setBudget('claude', 100);
+  await core.call('delegator.start', { repo: 'gitgiant/demo', max: 9 });
+  await settle();
+  const a = await spawnOne(core);
+  assert.equal(a.billing, 'api');
+  host.tmuxCapture = async () => SCREEN;
+  await core.watch();
+  assert.equal(row(db, a.id).state, 'blocked');
+  assert.equal(db.prepare('SELECT text FROM status WHERE identity = ?').get(a.id).text, 'blocked: API credit ran out');
+  db.prepare("UPDATE agents SET state = 'working' WHERE id = ?").run(a.id); // activity, then the same error again
+  await core.watch();
+  assert.equal(row(db, a.id).state, 'blocked');
+  const events = (await core.call('wait', { timeout: 0 })).events.filter(e => e.kind === 'api-exhausted');
+  assert.equal(events.length, 1);
+  assert.match(events[0].text, /kill it.*respawn.*working tree/s);
+  assert.equal(toasts.length, 1);
+  assert.equal(core.keyOut('claude').until, keyStore.periodEnd(1));
+  assert.equal((await spawnOne(core)).billing, 'plan');
+  assert.equal(keyStore.getExhausted('claude', new Date(Date.parse(keyStore.periodEnd(1)) + 1)), null, 'the period reset clears it');
+  keyStore.setKey('claude', KEY);
+  assert.equal(core.keyOut('claude'), null);
+  db.prepare("UPDATE agents SET state = 'working' WHERE id = ?").run(a.id);
+  await core.watch();
+  assert.equal(row(db, a.id).state, 'working', 'old text on the screen after the reset');
+  assert.equal((await spawnOne(core)).billing, 'api');
+});
+
+test('out of credit without a budget: spawns refused and queued ones wait until key set or key budget', async () => {
+  const { db, core, host, toasts } = setup({ realKeys: true });
+  keyStore.setKey('claude', KEY);
+  await core.call('delegator.start', { repo: 'gitgiant/demo', max: 1 });
+  const a = await spawnOne(core);
+  const queued = await spawnOne(core);
+  host.tmuxCapture = async () => SCREEN;
+  await core.watch();
+  assert.equal(toasts.length, 1);
+  await assert.rejects(spawnOne(core), /API credit ran out.*hauptling key set claude/);
+  const other = await core.call('spawn', { brief: 'rr', mode: 'cheapest' });
+  assert.notEqual(other.vendor, 'claude', 'round robin skips the refused vendor');
+  await core.call('kill', { agent: other.id }); // it waits on the limit of 1; out of the way
+  host.tmuxCapture = async () => '';
+  await core.call('kill', { agent: a.id });
+  await settle();
+  assert.equal(row(db, queued.id).state, 'queued');
+  keyStore.setKey('claude', KEY);
+  await core.poll();
+  await settle();
+  assert.equal(row(db, queued.id).state, 'working');
+  for (const clear of [() => keyStore.setBudget('claude', 50), () => keyStore.setBudget('claude', 'off'), () => keyStore.removeKey('claude')]) {
+    keyStore.markExhausted('claude');
+    clear();
+    assert.equal(keyStore.getExhausted('claude'), null);
+  }
+});
+
+test('a worker started before the current key was set does not mark that key', async () => {
+  const { db, core, host, toasts } = setup({ realKeys: true });
+  keyStore.setKey('claude', KEY);
+  await core.call('delegator.start', { repo: 'gitgiant/demo' });
+  const a = await spawnOne(core);
+  keyStore.setKey('claude', KEY);
+  host.tmuxCapture = async () => SCREEN;
+  await core.watch();
+  assert.equal(row(db, a.id).state, 'blocked');
+  assert.equal(core.keyOut('claude'), null);
+  assert.equal(toasts.length, 0);
 });
