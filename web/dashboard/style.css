@@ -222,7 +222,12 @@ table.grid td.num, table.grid th.num { text-align: right; font-variant-numeric: 
 .switch { display: inline-flex; align-items: center; gap: .35rem; color: var(--text); cursor: pointer; }
 .term { margin: 0; padding: .6rem .7rem; background: #0e0e0e; color: #d6d6d6; border-radius: 6px; overflow: auto; max-height: 65vh; max-height: 65dvh; white-space: pre; font: 12.5px/1.3 var(--mono); outline: none; border: 2px solid transparent; }
 .term.live { border-color: var(--warn); }
-.term.live:focus { border-color: var(--ok); }
+.term.live:focus, .term.live:has(+ .term-kb:focus) { border-color: var(--ok); }
+/* Invisible field that takes phone keyboard input (16px: iOS zooms into smaller text fields). */
+.term-kb { display: block; width: 1px; height: 1px; margin: -1px 0 0; padding: 0; border: 0; opacity: 0; resize: none; font-size: 16px; caret-color: transparent; pointer-events: none; }
+.termkeys { display: none; gap: .35rem; flex-wrap: wrap; margin-top: .45rem; }
+.termkeys button { min-width: 2.75rem; min-height: 2.5rem; font: 14px var(--mono); }
+@media (pointer: coarse) { .term.live ~ .termkeys { display: flex; } }
 .term .b { font-weight: 700; } .term .d { opacity: .6; } .term .i { font-style: italic; } .term .u { text-decoration: underline; }
 
 /* Portrait or narrow: split views stack, the splitter resizes heights (keep in sync with STACKED_QUERY in layout.js). */
