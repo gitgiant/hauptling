@@ -2,6 +2,7 @@
 import { ansiFragment } from './ansi.js';
 import { vendorBadge } from './vendors.js';
 import { openReport, shouldOpenReport, terminalInputFocused } from './report.js';
+import { keyFor, TOUCH_KEYS } from './termkeys.js';
 import { STACKED_QUERY, HANDLE_PX, DRAG_IGNORE, clampRatio, parseRatio, defaultRatio, splitKey, keyRatio, collapseAfterDrag, HEADER_STEPS, stepClasses, pickStep, handleKey } from './layout.js';
 // Text from the store is always set with textContent (h() below), never parsed as HTML.
 
@@ -639,8 +640,6 @@ async function loadEvents(id, body) {
 }
 
 // ---------- web terminal ----------
-const NAMED = { Enter: 'Enter', Backspace: 'BSpace', Escape: 'Escape', ArrowUp: 'Up', ArrowDown: 'Down', ArrowLeft: 'Left', ArrowRight: 'Right',
-  Home: 'Home', End: 'End', PageUp: 'PPage', PageDown: 'NPage', Delete: 'DC', Insert: 'IC' };
 
 /**
  * Watches the terminal's size and sends it (debounced 150 ms) as character cells: the width of `pre`, and the rows
@@ -659,7 +658,7 @@ function fitTerminal(pre, post) {
     probe.remove();
     const cellH = parseFloat(css.lineHeight);
     const px = (...keys) => keys.reduce((n, k) => n + (parseFloat(css[k]) || 0), 0);
-    const bar = pre.previousElementSibling?.offsetHeight || 0;
+    const bar = (pre.previousElementSibling?.offsetHeight || 0) + (pre.parentElement?.querySelector('.termkeys')?.offsetHeight || 0);
     const tall = Math.min(parseFloat(css.maxHeight) || innerHeight * .65, pane() ? pane().clientHeight - bar - 24 : Infinity);
     const cols = Math.floor((pre.clientWidth - px('paddingLeft', 'paddingRight')) / cellW);
     const rows = Math.floor((tall - px('paddingTop', 'paddingBottom', 'borderTopWidth', 'borderBottomWidth')) / cellH);
@@ -693,17 +692,20 @@ function openTerminal(container, sid, { autoInput = false, onEnd } = {}) {
   const note = h('span');
   const wrapBox = h('input', { type: 'checkbox' });
   const pre = h('pre', { class: 'term', tabindex: '0', 'aria-label': `Terminal ${sid}` }, 'connecting…');
+  // iOS opens its keyboard only for a text field, so taps on the screen focus this (invisible) one.
+  const kb = h('textarea', { class: 'term-kb', rows: '1', autocapitalize: 'off', autocomplete: 'off', autocorrect: 'off', spellcheck: 'false', 'aria-label': `Type into terminal ${sid}` });
+  const keyRow = h('div', { class: 'termkeys' });
   const setInput = (st) => {
     inputOn = st.input; box.checked = st.input; box.disabled = Boolean(st.state);
     pre.classList.toggle('live', st.input);
-    note.textContent = st.state === 'paused' ? 'Paused by you' : st.state === 'restarting' ? 'Restarting session…' : st.input ? `Input on until ${new Date(st.until).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} (extends while you type). Click the screen, then type or paste.` : '';
+    note.textContent = st.state === 'paused' ? 'Paused by you' : st.state === 'restarting' ? 'Restarting session…' : st.input ? `Input on until ${new Date(st.until).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} (extends while you type). Click or tap the screen, then type or paste.` : '';
   };
   wrapBox.checked = localStorage.getItem('hl-term-wrap') !== '0';
   box.addEventListener('change', async () => {
-    try { setInput(await api.post(`/dash/term/${encodeURIComponent(sid)}/input`, { on: box.checked })); if (box.checked) pre.focus(); }
+    try { setInput(await api.post(`/dash/term/${encodeURIComponent(sid)}/input`, { on: box.checked })); if (box.checked) kb.focus({ preventScroll: true }); }
     catch (e) { toast(e.message, true); box.checked = inputOn; }
   });
-  put(container, h('div', { class: 'termbar' }, h('label', { class: 'switch' }, box, 'Enable input'), h('label', { class: 'switch' }, wrapBox, 'Word wrap'), note), pre);
+  put(container, h('div', { class: 'termbar' }, h('label', { class: 'switch' }, box, 'Enable input'), h('label', { class: 'switch' }, wrapBox, 'Word wrap'), note), pre, kb, keyRow);
   const flush = () => {
     flushing = null;
     if (!queue.length) return;
@@ -715,18 +717,26 @@ function openTerminal(container, sid, { autoInput = false, onEnd } = {}) {
     if (k.t === 'lit' && prev?.t === 'lit') prev.v += k.v; else queue.push(k);
     flushing ||= setTimeout(flush, 40);
   };
-  pre.addEventListener('keydown', (e) => {
-    if (!inputOn || e.metaKey) return;
-    let k = null;
-    if (e.ctrlKey && /^[a-z]$/i.test(e.key)) k = { t: 'key', v: `C-${e.key.toLowerCase()}` };
-    else if (e.key === 'Tab') k = { t: 'key', v: e.shiftKey ? 'BTab' : 'Tab' };
-    else if (NAMED[e.key]) k = { t: 'key', v: NAMED[e.key] };
-    else if (e.key.length === 1 && !e.ctrlKey && !e.altKey) k = { t: 'lit', v: e.key };
+  const onKey = (e) => {
+    if (!inputOn) return;
+    const k = keyFor(e);
     if (!k) return;
     e.preventDefault();
     send(k);
-  });
-  pre.addEventListener('paste', (e) => { if (!inputOn) return; e.preventDefault(); const t = e.clipboardData.getData('text'); if (t) send({ t: 'lit', v: t.slice(0, 4000) }); });
+  };
+  const onPaste = (e) => { if (!inputOn) return; e.preventDefault(); const t = e.clipboardData.getData('text'); if (t) send({ t: 'lit', v: t.slice(0, 4000) }); };
+  // Text a phone keyboard inserts without a usable keydown (predictive text, dictation, IME): send it, clear the field.
+  const onText = () => { const v = kb.value; kb.value = ''; if (v && inputOn) send({ t: 'lit', v }); };
+  for (const el of [pre, kb]) { el.addEventListener('keydown', onKey); el.addEventListener('paste', onPaste); }
+  kb.addEventListener('input', (e) => { if (!e.isComposing) onText(); });
+  kb.addEventListener('compositionend', onText);
+  pre.addEventListener('click', () => { if (inputOn && !getSelection()?.toString()) kb.focus({ preventScroll: true }); });
+  for (const [label, v] of TOUCH_KEYS) {
+    const b = h('button', { type: 'button', text: label, 'aria-label': `Send ${v}` });
+    b.addEventListener('pointerdown', (e) => e.preventDefault()); // keep the phone keyboard up
+    b.addEventListener('click', () => { if (inputOn) send({ t: 'key', v }); });
+    keyRow.append(b);
+  }
   const es = new EventSource(`/dash/term/${encodeURIComponent(sid)}/stream`);
   // "Word wrap" on: the worker's tmux window takes this pane's size in cells. Off (or hidden): this viewer has none.
   const fit = fitTerminal(pre, (size, viewer) => api.post(`/dash/term/${encodeURIComponent(sid)}/size`, { viewer, size }));

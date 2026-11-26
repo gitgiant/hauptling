@@ -20,8 +20,11 @@ export function trapTarget(focusables, active, shift) {
   return null;
 }
 
-/** True when a live-input terminal is focused (a `pre.term.live` containing the active element). */
-export const terminalInputFocused = (doc = document) => Boolean(doc.activeElement?.closest?.('pre.term.live'));
+/** True when a live-input terminal is focused: a `pre.term.live` containing the active element, or its keyboard field. */
+export const terminalInputFocused = (doc = document) => {
+  const a = doc.activeElement;
+  return Boolean(a?.closest?.('pre.term.live') || (a?.matches?.('.term-kb') && a.previousElementSibling?.matches?.('pre.term.live')));
+};
 
 export const SHOT_MAX_W = 1920;
 export const SHOT_MAX_BYTES = 5 * 1024 * 1024;
