@@ -6,12 +6,14 @@ import { brokerFile, readBrokerFile } from './brokerfile.mjs';
 import { openDb } from './db.mjs';
 import { createCore } from './core.mjs';
 import { createDashboard } from './dashboard.mjs';
+import { createHub } from './hub.mjs';
+import { createSatellite, readSatellite } from './satellite.mjs';
 import { platform } from './platform/index.mjs';
-import { config as dockerConfig, dockerHost, slotDir, WORKER_BROKER_URL } from './docker.mjs';
+import { config as dockerConfig, dockerHost, gpuAvailable, slotDir, WORKER_BROKER_URL } from './docker.mjs';
 import { logins } from './setup.mjs';
 import { networkInterfaces } from 'node:os';
 import * as github from './github.mjs';
-import { BROKER_PORT, home, token } from './util.mjs';
+import { BROKER_PORT, VENDORS, home, token } from './util.mjs';
 
 const hostGit = (repo, args) => new Promise((resolve, reject) => {
   execFile('git', ['-C', repo, ...args], { timeout: 120e3 }, (err, stdout, stderr) => {
@@ -51,6 +53,37 @@ async function answerPage(core, req, res, url) {
 <form method="post"><input type="hidden" name="k" value="${k}"><p><textarea name="text" maxlength="250" placeholder="Or answer in your own words"></textarea></p><button>Send</button></form>`));
 }
 
+/**
+ * The broker's HTTP handler: /health, the hub's /hub/* (satellites), answer pages, the dashboard, then /api/<call>.
+ * Exported so tests can serve a hub on a spare port.
+ */
+export function brokerHandler({ core, hub, dash, adminToken, log = () => {}, recovery = Promise.resolve() }) {
+  return async (req, res) => {
+    const send = (code, body) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); };
+    try {
+      const url = new URL(req.url, 'http://x');
+      if (url.pathname === '/health') return send(200, { ok: true, pid: process.pid });
+      if (hub && await hub.handle(req, res, url)) return;
+      await recovery;
+      if (/^\/ask\/\d+$/.test(url.pathname)) return await answerPage(core, req, res, url);
+      if (await dash.handle(req, res, url)) return;
+      const who = core.authenticate((req.headers.authorization || '').replace(/^Bearer /, ''), adminToken, req.headers['x-hauptling-host']);
+      if (!who) return send(401, { error: 'Bad or expired token' });
+      const m = /^\/api\/([\w.-]+)$/.exec(url.pathname);
+      if (who.role === 'satellite') log(`hub ${who.host} ${req.method} ${url.pathname}`);
+      if (req.method !== 'POST' || !m) return send(404, { error: 'Not found' });
+      let raw = '';
+      for await (const chunk of req) { raw += chunk; if (raw.length > 1 << 20) throw new Error('Body too large'); }
+      if (m[1] === 'shutdown' && who.role === 'admin') { send(200, { ok: true }); setTimeout(() => process.exit(0), 50); return; }
+      const result = await core.call(m[1], raw ? JSON.parse(raw) : {}, who);
+      send(200, { ok: true, result: result ?? null });
+    } catch (e) {
+      log(`error ${req.url}: ${e.message}`);
+      send(400, { error: e.message });
+    }
+  };
+}
+
 /** Runs the broker in this process (normally started detached by `ensureBroker`). */
 export async function runBroker({ port = BROKER_PORT } = {}) {
   mkdirSync(home(), { recursive: true, mode: 0o700 });
@@ -64,32 +97,12 @@ export async function runBroker({ port = BROKER_PORT } = {}) {
   const plat = await platform();
   const host = { ...dockerHost({ log }), hostGit };
   const base = `http://127.0.0.1:${port}`;
-  const core = createCore({ db, host, github, notify: plat.notify, workerUrl: WORKER_BROKER_URL, publicUrl: base, runnerToken, log });
+  const hub = createHub({ db, log, emit: (...a) => core.emit(...a) });
+  const core = createCore({ db, host, github, notify: plat.notify, workerUrl: WORKER_BROKER_URL, publicUrl: base, runnerToken, hub, log });
   const dash = createDashboard({ db, dbPath, core, host, log, slotDir, logins, report: { gh: github.gh, logPath, config: dockerConfig, secrets: () => [adminToken, runnerToken] } });
 
   const recovery = core.recover();
-  const handler = async (req, res) => {
-    const send = (code, body) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); };
-    try {
-      const url = new URL(req.url, 'http://x');
-      if (url.pathname === '/health') return send(200, { ok: true, pid: process.pid });
-      await recovery;
-      if (/^\/ask\/\d+$/.test(url.pathname)) return await answerPage(core, req, res, url);
-      if (await dash.handle(req, res, url)) return;
-      const who = core.authenticate((req.headers.authorization || '').replace(/^Bearer /, ''), adminToken);
-      if (!who) return send(401, { error: 'Bad or expired token' });
-      const m = /^\/api\/([\w.-]+)$/.exec(url.pathname);
-      if (req.method !== 'POST' || !m) return send(404, { error: 'Not found' });
-      let raw = '';
-      for await (const chunk of req) { raw += chunk; if (raw.length > 1 << 20) throw new Error('Body too large'); }
-      if (m[1] === 'shutdown' && who.role === 'admin') { send(200, { ok: true }); setTimeout(() => process.exit(0), 50); return; }
-      const result = await core.call(m[1], raw ? JSON.parse(raw) : {}, who);
-      send(200, { ok: true, result: result ?? null });
-    } catch (e) {
-      log(`error ${req.url}: ${e.message}`);
-      send(400, { error: e.message });
-    }
-  };
+  const handler = brokerHandler({ core, hub, dash, adminToken, log, recovery });
   // 127.0.0.1 for you; the docker0 bridge address for the egress proxy's relay (containers never reach it directly).
   const docker0 = networkInterfaces().docker0?.find(a => a.family === 'IPv4')?.address;
   const servers = [];
@@ -105,6 +118,21 @@ export async function runBroker({ port = BROKER_PORT } = {}) {
   log(`broker ${process.pid} listening on 127.0.0.1${docker0 ? ` and ${docker0}` : ''}:${port}`);
   await recovery;
   setInterval(() => core.poll().catch(e => log(`poll: ${e.message}`)), 60e3).unref();
+  setInterval(() => { try { hub.tick(); } catch (e) { log(`hub tick: ${e.message}`); } }, 30e3).unref();
   core.pump().catch(e => log(`test pump: ${e.message}`));
-  return { core, servers, db };
+  // Satellite mode (PRD "Several hosts"): `hauptling satellite join` left a key, so dial the hub. Running its workers is part 2.
+  const joined = readSatellite();
+  let satellite = null;
+  if (joined) {
+    const gpu = await gpuAvailable().catch(() => false);
+    const capabilities = async () => {
+      const vendors = {};
+      for (const l of logins(await core.call('slots.get'), VENDORS)) if (l.ok) (vendors[l.vendor] ||= []).push(l.slot);
+      const free = Object.fromEntries(Object.entries(vendors).map(([v, signed]) => [v, core.freeSlots(v).filter(s => signed.includes(s)).length]));
+      return { vendors, free, gpu, maxWorkers: dockerConfig().maxWorkers };
+    };
+    satellite = createSatellite({ db, config: joined, capabilities, log }).start();
+    log(`satellite mode: dialling ${joined.hub} as ${joined.host}`);
+  }
+  return { core, servers, db, hub, satellite };
 }

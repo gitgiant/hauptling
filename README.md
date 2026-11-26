@@ -39,6 +39,7 @@ Then start Claude, Codex or agy in that Linux shell and run `/delegator`.
 
 - `bin/hauptling.mjs` — CLI (`hauptling help`).
 - `src/server.mjs`, `src/core.mjs` — broker: sole owner of `~/.hauptling/hauptling.db`, HTTP on 127.0.0.1, per-agent tokens, answer page for questions.
+- `src/hub.mjs`, `src/satellite.mjs` — several hosts (PRD "Several hosts"): the hub's `/hub/*` endpoints for satellites, and a satellite broker's outbound link (`hauptling hub token`, `hauptling satellite join|list|revoke`).
 - `src/docker.mjs` — worker containers: image build, per-slot credentials, internal network, tmux inside, test-job containers.
 - `src/egress.mjs` — egress proxy (allowlist) and broker relay, run in the `hauptling-egress` container.
 - `src/platform/` — host seam (notifications).

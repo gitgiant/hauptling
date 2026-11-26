@@ -1,4 +1,4 @@
-# Handoff — 2026-11-25
+# Handoff — 2026-11-26
 
 ## Needs a real run to confirm
 
@@ -23,8 +23,11 @@
 - Test watchdog (PRD "Watchdog"): core logic unit-tested with docker and clock stubbed; the real `testLiveness` probe (`docker inspect`, heartbeat mtime) is unrun. Needs `hauptling image` (runner heartbeat) and `hauptling broker stop`.
 
 - Slots per vendor (PRD "Security"): a slot runs one worker per vendor, containers mount only their vendor's dir, `maxWorkers` (default 6) caps the host. Unit-tested only. Needs `hauptling image` and `hauptling broker restart`; check a codex worker's container has no `.vendor/claude`.
+- Several hosts part 1 (PRD "Several hosts"): the hub/satellite link is tested in one process only. Needs `hauptling broker restart` (broker-side; no `hauptling image`), then a real join from a second host through the `tailscale serve` URL, to check that SSE survives the proxy.
 
 ## Open
+
+- Several hosts part 2 (spawning, tests and GitHub on satellites, placement, "host offline" in `status`) and part 3 (dashboard). The satellite's `onCommand` and `queue` exist but are not called yet, and `freeSlots` still counts every host's agents.
 
 - nullpunkt: commit `b9a0f6e8` (drops the coagent mailbox for `hauptling mail`) sits in `nullpunkt/.worktrees/claude_opus-5-5_d72c0`, unpushed. Before `node scripts/worktree.mjs sync claude_opus-5-5_d72c0`, discard the main checkout's local edits to `.mcp.json` and `.codex/hooks.json` (the commit replaces both). Sync restarts the user's game.
 - Codex/agy: can either exclude a repo's own MCP servers? (CodeGraph reaches them via the CLI only.) agy's bare config (MCP off) is unknown.
