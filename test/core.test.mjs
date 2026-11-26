@@ -1046,3 +1046,88 @@ test('local merge failures reach the delegator: conflict sends the worker back, 
   assert.ok(git.includes('merge --abort'));
   assert.match(db.prepare("SELECT text FROM mail WHERE recipient = ? AND sender = 'hauptling'").get(id).text, /Rebase onto origin\/main/);
 });
+
+/** Per-repo test limit: hauptling.json on the base branch, per `repo@base` in `files`. */
+function baseConfigs(gh, files) {
+  const reads = [];
+  gh.fileAt = async (slug, path, ref) => {
+    reads.push([slug, path, ref]);
+    const f = files[`${slug}@${ref}`];
+    if (f === undefined) throw new Error('gh api: HTTP 404: Not Found');
+    return JSON.stringify(f);
+  };
+  return reads;
+}
+const states = (db, ids) => ids.map(id => db.prepare('SELECT state FROM tests WHERE id = ?').get(id).state);
+
+test('per-repo testConcurrency: two jobs of a repo that allows two run at once, a third waits; the default stays one', async () => {
+  const gh = fakeGithub();
+  baseConfigs(gh, { 'gitgiant/a@': { testConcurrency: 2 }, 'gitgiant/bad@': { testConcurrency: '5' } });
+  const { db, core, host } = setup(gh);
+  host.testConcurrency = () => 10;
+  const r = blockingRunner(host);
+  const req = async (repo, n) => (await core.call('test.request', { repo, sha: `${repo}-${n}` })).id;
+  const a = [], plain = [], bad = [];
+  for (const n of [1, 2, 3]) a.push(await req('gitgiant/a', n));
+  for (const n of [1, 2]) plain.push(await req('gitgiant/plain', n));
+  for (const n of [1, 2]) bad.push(await req('gitgiant/bad', n));
+  await settle();
+  assert.deepEqual(states(db, a), ['running', 'running', 'queued']);
+  assert.deepEqual(states(db, plain), ['running', 'queued']);
+  assert.deepEqual(states(db, bad), ['running', 'queued'], 'not an integer: one');
+  r.runs.find(x => x.job.id === a[0]).done(); await settle();
+  assert.deepEqual(states(db, a), ['done', 'running', 'running']);
+});
+
+test('per-repo testConcurrency: the host cap still binds; external runners follow the repo limit', async () => {
+  const gh = fakeGithub();
+  baseConfigs(gh, { 'gitgiant/a@': { testConcurrency: 3 } });
+  const ctx = setup(gh);
+  ctx.host.testConcurrency = () => 2;
+  blockingRunner(ctx.host);
+  const ids = [];
+  for (const n of [1, 2, 3]) ids.push((await ctx.core.call('test.request', { repo: 'gitgiant/a', sha: `s${n}` })).id);
+  await settle();
+  assert.deepEqual(states(ctx.db, ids), ['running', 'running', 'queued']);
+
+  // No local runner: jobs are claimed from outside, which the host cap doesn't count.
+  const gh2 = fakeGithub();
+  baseConfigs(gh2, { 'gitgiant/a@': { testConcurrency: 2 } });
+  const { core } = setup(gh2);
+  for (const n of [1, 2, 3]) await core.call('test.request', { repo: 'gitgiant/a', sha: `s${n}` });
+  const claimed = [];
+  for (let i = 0; i < 3; i++) claimed.push((await core.call('test.claim', { wait: 0 })).job?.sha ?? null);
+  assert.deepEqual(claimed, ['s1', 's2', null]);
+});
+
+test('per-repo testConcurrency: read from the base branch host-side, never the agent\'s clone or branch', async () => {
+  for (const [onBase, second] of [[1, 'queued'], [2, 'running']]) {
+    const gh = fakeGithub();
+    const reads = baseConfigs(gh, { 'gitgiant/demo@main': { testConcurrency: onBase }, 'gitgiant/demo@hl/x': { testConcurrency: 5 } });
+    const { db, core, host } = setup(gh);
+    host.testConcurrency = () => 5;
+    host.state.config = { testConcurrency: 5 }; // the worker's clone
+    blockingRunner(host);
+    await core.call('delegator.start', { repo: 'gitgiant/demo' });
+    const a = (await core.call('spawn', { brief: 'task', vendor: 'claude', mode: 'cheapest' })).id;
+    await settle();
+    const ids = [];
+    for (const sha of ['s1', 's2']) ids.push((await core.call('test.request', { agent: a, sha })).id);
+    await settle();
+    assert.deepEqual(states(db, ids), ['running', second]);
+    assert.deepEqual(reads, [['gitgiant/demo', 'hauptling.json', 'main']], 'read once, then cached');
+  }
+});
+
+test('per-repo testConcurrency: a local-path repo is read from the host checkout', async () => {
+  const { db, core, host } = setup();
+  host.testConcurrency = () => 5;
+  const shown = [];
+  host.hostGit = async (repo, args) => { shown.push([repo, ...args]); return JSON.stringify({ testConcurrency: 2 }); };
+  blockingRunner(host);
+  const ids = [];
+  for (const sha of ['s1', 's2', 's3']) ids.push((await core.call('test.request', { repo: '/tmp/demo', sha })).id);
+  await settle();
+  assert.deepEqual(states(db, ids), ['running', 'running', 'queued']);
+  assert.deepEqual(shown, [['/tmp/demo', 'show', 'HEAD:hauptling.json']]);
+});

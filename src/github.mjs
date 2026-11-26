@@ -38,6 +38,9 @@ export async function prFind(slug, head) {
 }
 
 /** Required status checks on the base branch; [] when unprotected or none required. */
+/** A file's text on `ref` (default branch when empty); throws when it isn't there. */
+export const fileAt = (slug, path, ref) => gh(['api', '-H', 'Accept: application/vnd.github.raw', `repos/${slug}/contents/${path}${ref ? `?ref=${encodeURIComponent(ref)}` : ''}`], { timeout: 15e3 });
+
 export async function requiredChecks(slug, base) {
   try {
     const r = JSON.parse(await gh(['api', `repos/${slug}/branches/${encodeURIComponent(base)}/protection/required_status_checks`]));

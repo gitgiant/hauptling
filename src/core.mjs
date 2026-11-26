@@ -871,14 +871,17 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
 
   /**
    * Two queues, each job in a fresh container. CPU jobs: up to `testConcurrency` at once (host
-   * setting, default 2), at most one per repo, FIFO otherwise. GPU jobs (`--gpus all`): one at a time.
-   * External runners use test.claim (CPU queue only, same one-per-repo rule).
+   * setting, default 3), per repo up to its hauptling.json "testConcurrency" on the base branch (default 1),
+   * FIFO otherwise. GPU jobs (`--gpus all`): one at a time. External runners use test.claim (CPU queue only,
+   * same per-repo limit).
    */
-  const concurrency = () => Math.max(1, Number(host.testConcurrency?.() ?? 2) || 2);
+  const concurrency = () => Math.max(1, Number(host.testConcurrency?.() ?? 3) || 3);
   const pumping = { gpu: false };
-  async function pump() { pumpCpu(); await pumpGpu(); }
-  function pumpCpu() {
+  async function pump() { await Promise.all([pumpCpu(), pumpGpu()]); }
+  async function pumpCpu() {
     if (!host.runTestJob) return;
+    const loading = loadLimits();
+    if (loading) await loading;
     while (db.prepare("SELECT COUNT(*) n FROM tests WHERE state = 'running' AND gpu = 0 AND host = 'hub'").get().n < concurrency()) {
       const t = grab(false);
       if (!t) break;
@@ -918,7 +921,55 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
       if (report.lost) await runnerLost(job.id, job.claimed_at, report.lost).catch(e => log(`test watchdog ${job.id}: ${e.message}`));
       else await testReport({ id: job.id, report }).catch(e => log(`test report ${job.id}: ${e.message}`));
     }
-    if (!job.gpu) pumpCpu();
+    if (!job.gpu) pumpCpu().catch(e => log(`test pump: ${e.message}`));
+  }
+
+  // ---------- per-repo test limit ----------
+  /** `repo\0base` → { limit, at, loading }. */
+  const limits = new Map();
+  const LIMIT_TTL_MS = 60e3;
+  const limitKey = (repo, base) => `${repo}\0${base}`;
+  const repoLimit = (t) => limits.get(limitKey(t.repo, t.base || ''))?.limit ?? 1;
+
+  /**
+   * "testConcurrency" in hauptling.json on the base branch, read host-side: a worker controls its clone (refs
+   * included), so that is never asked. Missing or invalid: 1.
+   */
+  async function readLimit(repo, base) {
+    const slug = githubSlug(repo);
+    let text;
+    try {
+      text = slug ? await github.fileAt(slug, 'hauptling.json', base) : await host.hostGit(repo, ['show', `${base || 'HEAD'}:hauptling.json`]);
+    } catch (e) {
+      if (/404|does not exist|exists on disk, but not in/i.test(e.message)) return 1;
+      throw e;
+    }
+    let n;
+    try { n = JSON.parse(text).testConcurrency; } catch { return 1; }
+    return Number.isInteger(n) && n >= 1 ? n : 1;
+  }
+
+  /**
+   * Refreshes the limits the CPU queue needs: those of queued jobs whose repo has another job queued or
+   * running (a lone job may always start). Null when all are fresh, so the queue then moves synchronously.
+   */
+  function loadLimits() {
+    const rows = db.prepare(`SELECT q.repo, COALESCE(a.base, '') base FROM tests q LEFT JOIN agents a ON a.id = q.agent
+      WHERE q.state = 'queued' AND q.gpu = 0 AND q.host = 'hub'
+      AND (SELECT COUNT(*) FROM tests r WHERE r.repo = q.repo AND r.gpu = 0 AND r.host = 'hub' AND r.state IN ('queued', 'running')) > 1`).all();
+    const waits = [];
+    for (const { repo, base } of rows) {
+      const key = limitKey(repo, base);
+      const c = limits.get(key) || {};
+      limits.set(key, c);
+      if (!c.loading && !(Date.now() - c.at < LIMIT_TTL_MS)) {
+        c.loading = readLimit(repo, base)
+          .then(n => { c.limit = n; }, e => log(`testConcurrency ${repo}: ${e.message}`))
+          .finally(() => { c.at = Date.now(); c.loading = null; });
+      }
+      if (c.loading) waits.push(c.loading);
+    }
+    return waits.length ? Promise.all(waits) : null;
   }
 
   // ---------- test watchdog ----------
@@ -983,7 +1034,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     pump().catch(e => log(`test pump: ${e.message}`));
   }
 
-  /** Dashboard "Run now": starts a queued CPU job at once, past the concurrency limit and the one-per-repo rule. */
+  /** Dashboard "Run now": starts a queued CPU job at once, past the host and per-repo limits. */
   function testRunNow({ id }) {
     const t = db.prepare('SELECT * FROM tests WHERE id = ?').get(id);
     if (!t) throw new Error(`No test ${id}`);
@@ -1101,11 +1152,16 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     return args.gpu ? gpuRequest(req, cfg) : requestTest(req);
   }
 
-  /** Claims the oldest queued job of a queue (CPU: skipping repos that already have a CPU job running). */
+  /** The oldest queued CPU job whose repo runs fewer CPU jobs than its limit. */
+  function nextCpuJob() {
+    const running = db.prepare("SELECT COUNT(*) n FROM tests WHERE state = 'running' AND gpu = 0 AND host = 'hub' AND repo = ?");
+    return db.prepare(`SELECT q.*, a.base FROM tests q LEFT JOIN agents a ON a.id = q.agent WHERE q.state = 'queued' AND q.gpu = 0 AND q.host = 'hub' AND ${TEST_ELIGIBLE} ORDER BY q.created_at, q.rowid`).all()
+      .find(t => running.get(t.repo).n < repoLimit(t));
+  }
+
+  /** Claims the oldest queued job of a queue (CPU: skipping repos at their limit). */
   const grab = (gpu) => tx(db, () => {
-    const t = gpu
-      ? nextGpuJob()
-      : db.prepare(`SELECT q.* FROM tests q WHERE q.state = 'queued' AND q.gpu = 0 AND q.host = 'hub' AND ${TEST_ELIGIBLE} AND NOT EXISTS (SELECT 1 FROM tests r WHERE r.state = 'running' AND r.gpu = 0 AND r.host = 'hub' AND r.repo = q.repo) ORDER BY q.created_at, q.rowid LIMIT 1`).get();
+    const t = gpu ? nextGpuJob() : nextCpuJob();
     if (!t) return null;
     t.claimed_at = now();
     db.prepare("UPDATE tests SET state = 'running', claimed_at = ? WHERE id = ?").run(t.claimed_at, t.id);
@@ -1119,10 +1175,15 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
 
   async function claim({ wait = 25, gpu = false } = {}) {
     if (!gpu) kvSet(db, 'runner_seen', Date.now());
-    let t = grab(gpu);
+    const next = async () => {
+      const loading = !gpu && loadLimits();
+      if (loading) await loading;
+      return grab(gpu);
+    };
+    let t = await next();
     if (!t && wait > 0) {
       await new Promise(r => { const timer = setTimeout(r, wait * 1000); bus.once('tests', () => { clearTimeout(timer); r(); }); });
-      t = grab(gpu);
+      t = await next();
     }
     return { job: t ? jobFor(t) : null };
   }

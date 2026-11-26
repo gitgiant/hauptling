@@ -54,7 +54,7 @@ export function docker(args, { input, timeout = 120e3 } = {}) {
 export function config() {
   const p = join(home(), 'config.json');
   const c = existsSync(p) ? JSON.parse(readFileSync(p, 'utf8')) : {};
-  return { memory: '2560m', cpus: 3, gpu: true, gpuMemory: '6g', gpuCpus: 4, gpuMemMB: 6144, gpuWaitMinutes: 30, testConcurrency: 2, maxWorkers: 6, testStallSec: 300, testRetries: 2, ...c };
+  return { memory: '2560m', cpus: 3, gpu: true, gpuMemory: '6g', gpuCpus: 4, gpuMemMB: 6144, gpuWaitMinutes: 30, testConcurrency: 3, maxWorkers: 6, testStallSec: 300, testRetries: 2, ...c };
 }
 
 // ---------- GPU (phase 3) ----------
@@ -156,9 +156,26 @@ export function baseImageTag() {
 
 const imageExists = async (tag) => docker(['image', 'inspect', tag], { timeout: 30e3 }).then(() => true, () => false);
 
+/** Image builds in flight: tag → promise. */
+const building = new Map();
+/**
+ * Runs `build` unless `tag` exists. Concurrent callers for one tag (parallel test jobs, spawns) take turns:
+ * whoever follows a successful build finds the image; after a failed one it builds from its own checkout.
+ */
+async function buildOnce(tag, exists, build) {
+  while (building.has(tag)) await building.get(tag).catch(() => {});
+  const p = (async () => { if (!await exists(tag)) await build(); })().finally(() => building.delete(tag));
+  building.set(tag, p);
+  await p;
+  return tag;
+}
+
 export async function ensureBaseImage({ log = () => {}, stdio } = {}) {
   const tag = baseImageTag();
-  if (await imageExists(tag)) return tag;
+  return buildOnce(tag, imageExists, () => buildBaseImage(tag, { log, stdio }));
+}
+
+async function buildBaseImage(tag, { log, stdio }) {
   const ctx = join(home(), 'build', 'worker');
   rmSync(ctx, { recursive: true, force: true });
   mkdirSync(join(ctx, 'hauptling'), { recursive: true });
@@ -175,18 +192,16 @@ export async function ensureBaseImage({ log = () => {}, stdio } = {}) {
     child.stderr?.on('data', d => { err = (err + d).slice(-4000); });
     child.on('exit', code => (code === 0 ? resolve() : reject(new Error(`image build failed: ${err.trim().split('\n').slice(-5).join(' | ')}`))));
   });
-  return tag;
 }
 
 /** Image for a checkout: its hauptling.Dockerfile (FROM ${BASE}) built on the golden image, else the golden image. */
-export async function imageFor(dir, opts) {
-  const base = await ensureBaseImage(opts);
+export async function imageFor(dir, { dk = docker, baseImage, ...opts } = {}) {
+  const base = await (baseImage ? baseImage() : ensureBaseImage(opts));
   const file = join(dir, 'hauptling.Dockerfile');
   if (!existsSync(file)) return base;
   const tag = `hauptling-repo:${createHash('sha256').update(base).update(readFileSync(file)).digest('hex').slice(0, 12)}`;
-  if (await imageExists(tag)) return tag;
-  await docker(['build', '-f', file, '--build-arg', `BASE=${base}`, '-t', tag, dir], { timeout: 1800e3 });
-  return tag;
+  return buildOnce(tag, () => dk(['image', 'inspect', tag], { timeout: 30e3 }).then(() => true, () => false),
+    () => dk(['build', '-f', file, '--build-arg', `BASE=${base}`, '-t', tag, dir], { timeout: 1800e3 }));
 }
 
 // ---------- network + egress proxy ----------
