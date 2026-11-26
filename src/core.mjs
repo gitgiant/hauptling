@@ -17,6 +17,8 @@ import * as keyStore from './keys.mjs';
  *   notify – platform notification (choices + links to the broker's answer page)
  *   publicUrl – where your browser reaches the broker (answer links)
  *   hub    – satellites joined to this broker (src/hub.mjs); optional
+ *   satellite – on a satellite broker, its link to the hub (src/satellite.mjs): events, agent and test state go up
+ *               through its outbox, and the hub's commands come in through `command` (PRD "Part 2")
  * `call(name, args, who)` is the whole API; who = {role: admin|agent|runner|satellite, agent?, host?}.
  */
 
@@ -32,13 +34,20 @@ const ENDED = ['merged', 'killed', 'closed', 'handed-off'];
 export const CLONE_EXCLUDES = ['.hauptling/', '.pnpm-store/', 'node_modules/'];
 const AGENT_CALLS = new Set(['hook', 'report', 'ask', 'mail.send', 'mail.check', 'mail.status', 'mail.peers', 'test.request', 'test.wait', 'test.get', 'whoami', 'usage.report']);
 const RUNNER_CALLS = new Set(['test.claim', 'test.report', 'test.heartbeat']);
-/** What a satellite key may call on /api (part 2 adds its own agents' and tests' calls). Everything else is refused. */
+/** What a satellite key may call on /api: nothing. It reports through /hub/state and /hub/events (ordered, exactly once). */
 const SATELLITE_CALLS = new Set();
+/** Agent columns a satellite mirrors to the hub (`state` events), plus its status line. */
+const MIRROR_FIELDS = ['state', 'slot', 'dir', 'idle', 'sha', 'report', 'pr_url', 'pr_number', 'gate', 'base', 'usage', 'billing', 'usage_start', 'paused_state', 'start_from', 'ci_note'];
+/** Test job columns mirrored to the hub (`test` events). */
+const TEST_FIELDS = ['id', 'agent', 'requester', 'repo', 'sha', 'branch', 'selector', 'gpu', 'artifacts', 'timeout_s', 'round', 'purpose', 'state', 'report', 'created_at', 'claimed_at', 'done_at', 'attempt', 'retry_note'];
+/** What a satellite's spawn command carries of the hub's agent row. */
+const SPAWN_FIELDS = ['id', 'delegator', 'vendor', 'model', 'repo', 'base', 'branch', 'brief', 'title', 'test_writer', 'role', 'depends_on', 'start_from', 'effort', 'gpu'];
+const HOST_CMDS = { pause: 'pause', unpause: 'resume', restart: 'restart', kill: 'kill', merge: 'merge' };
 
 const HANDOFF_PCT = 85;
 const WORKER_RULES = readFileSync(new URL('../prompts/worker-rules.md', import.meta.url), 'utf8').trim();
 
-export function createCore({ db, host, github, notify = () => false, models = loadModels, savePrefer = setPrefer, keys = keyStore, workerUrl, publicUrl = workerUrl, runnerToken, hub = null, log = () => {}, stallMinutes = Number(process.env.HAUPTLING_STALL_MINUTES || 10), idleMinutes = Number(process.env.HAUPTLING_IDLE_MINUTES || 15) }) {
+export function createCore({ db, host, github, notify = () => false, models = loadModels, savePrefer = setPrefer, keys = keyStore, workerUrl, publicUrl = workerUrl, runnerToken, hub = null, satellite = null, remoteWaitMs = 30e3, log = () => {}, stallMinutes = Number(process.env.HAUPTLING_STALL_MINUTES || 10), idleMinutes = Number(process.env.HAUPTLING_IDLE_MINUTES || 15) }) {
   const changing = new Set();
   const merging = new Set();
   const bus = new EventEmitter();
@@ -49,10 +58,60 @@ export function createCore({ db, host, github, notify = () => false, models = lo
   const update = (id, fields) => {
     const keys = Object.keys(fields);
     db.prepare(`UPDATE agents SET ${keys.map(k => `${k} = ?`).join(', ')}, updated_at = ? WHERE id = ?`).run(...keys.map(k => fields[k]), now(), id);
+    synced(id);
   };
+  const setStatus = (id, text) => { mail.setStatus(db, id, text); synced(id); };
+  /** A notification about an agent; a satellite sends it to the hub, which shows it to you. */
+  const toast = (agent, n) => {
+    if (!satellite) return notify(n);
+    satellite.queue(agent, 'notify', JSON.stringify({ title: n.title, body: n.body }));
+    return true;
+  };
+
+  // ---------- satellite: mirror to the hub (PRD "Part 2") ----------
+  const mirrored = new Map(); // agent or test id → last values sent
+  /** On a satellite: sends the agent's changed columns and status line to the hub as one `state` event. */
+  function synced(id) {
+    if (!satellite) return;
+    const a = agentRow(id);
+    if (!a) return;
+    const cur = Object.fromEntries(MIRROR_FIELDS.map(k => [k, a[k] ?? null]));
+    cur.status = db.prepare('SELECT text FROM status WHERE identity = ?').get(id)?.text ?? null;
+    const last = mirrored.get(id) || {};
+    const diff = Object.fromEntries(Object.entries(cur).filter(([k, v]) => last[k] !== v));
+    if (!Object.keys(diff).length) return;
+    mirrored.set(id, cur);
+    satellite.queue(id, 'state', JSON.stringify(diff));
+  }
+  /** On a satellite: sends a test job row (an agent's) to the hub when it changed. Big reports lose their excerpts. */
+  function testSynced(id) {
+    if (!satellite) return;
+    const t = db.prepare('SELECT * FROM tests WHERE id = ?').get(id);
+    if (!t?.agent) return;
+    const row = Object.fromEntries(TEST_FIELDS.map(k => [k, t[k] ?? null]));
+    let json = JSON.stringify(row);
+    if (json.length > 60e3 && row.report) {
+      const r = JSON.parse(row.report);
+      json = JSON.stringify({ ...row, report: JSON.stringify({ ...r, failures: (r.failures || []).slice(0, 5).map(({ excerpt: _e, ...f }) => f) }) });
+    }
+    if (mirrored.get(`test:${id}`) === json) return;
+    mirrored.set(`test:${id}`, json);
+    satellite.queue(t.agent, 'test', json);
+  }
+  /** Every poll on a satellite, and at start: catches test rows changed by paths that don't call testSynced. */
+  function syncTests() {
+    if (!satellite) return;
+    const since = new Date(Date.now() - 3600e3).toISOString();
+    for (const { id } of db.prepare("SELECT id FROM tests WHERE agent IS NOT NULL AND (state != 'done' OR done_at > ?)").all(since)) testSynced(id);
+  }
   const slots = () => JSON.parse(kvGet(db, 'slots') || '["hl-w1","hl-w2","hl-w3"]');
 
   function emit(delegator, agent, kind, text, at = now()) {
+    if (satellite && agent) { // the hub's delegator waits for it
+      satellite.queue(agent, kind, String(text).slice(0, 600), at);
+      log(`event ${kind} ${agent} (to hub): ${text}`);
+      return;
+    }
     db.prepare('INSERT INTO events (delegator, agent, kind, text, at) VALUES (?, ?, ?, ?, ?)').run(delegator, agent, kind, String(text).slice(0, 600), at);
     bus.emit(`ev:${delegator}`);
     log(`event ${kind} ${agent || ''}: ${text}`);
@@ -123,11 +182,13 @@ Hauptling worker notes (you are ${a.id}, branch ${a.branch}, base ${a.base}):
 ${common} Keep the session open afterwards: CI failures and review notes arrive as messages.`;
   }
 
-  async function spawn({ delegator, vendor, model, mode = 'suggest', difficulty = 'normal', repo, base, brief, title, testWriter = false, allowTier = false, effort }) {
+  async function spawn({ delegator, vendor, model, mode = 'suggest', difficulty = 'normal', repo, base, brief, title, testWriter = false, allowTier = false, effort, host: pin, gpu = false }) {
     const d = delegatorId(delegator);
     const drow = db.prepare('SELECT * FROM delegators WHERE id = ?').get(d);
     repo ||= drow.repo;
     if (!repo) throw new Error('--repo is required (GitHub owner/name or URL, or a local path)');
+    const wantHost = checkHost(pin, repo);
+    checkHost(wantHost ?? drow.host, repo);
     const cfg = models();
     if (vendor && !isFamily(vendor)) throw new Error(`Vendor must be claude, codex or agy, got "${vendor}"`);
     if (!vendor) {
@@ -142,8 +203,8 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     const id = `${vendor}_${sanitizeModel(entry.id)}_${hex(3).slice(0, 5)}`;
     title ||= (brief.match(/^#+\s*(.+)$/m)?.[1] || brief.trim().split('\n')[0]).slice(0, 72);
     const insert = (row) => {
-      db.prepare(`INSERT INTO agents (id, delegator, vendor, model, repo, base, branch, brief, title, test_writer, state, token, created_at, updated_at, role, depends_on, effort)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(row.id, d, row.vendor, row.model, repo, base || '', `hl/${id}`, brief, row.title, testWriter ? 1 : 0, row.state, token(), now(), now(), row.role, row.depends_on ?? null, row.effort ?? null);
+      db.prepare(`INSERT INTO agents (id, delegator, vendor, model, repo, base, branch, brief, title, test_writer, state, token, created_at, updated_at, role, depends_on, effort, want_host, gpu)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(row.id, d, row.vendor, row.model, repo, base || '', `hl/${id}`, brief, row.title, testWriter ? 1 : 0, row.state, token(), now(), now(), row.role, row.depends_on ?? null, row.effort ?? null, wantHost, row.gpu ? 1 : 0);
       mail.addIdentity(db, row.id, row.vendor, sanitizeModel(row.model), repo);
     };
     let tw = null;
@@ -153,11 +214,54 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
       const twEntry = testWriter.model ? findModel(cfg, twVendor, testWriter.model) : pick(cfg, twVendor, 'cheapest');
       tw = { id: `${twVendor}_${sanitizeModel(twEntry.id)}_${hex(3).slice(0, 5)}`, vendor: twVendor, model: twEntry.id, effort: effortFor(cfg, twVendor, twEntry) };
     }
-    insert({ id, vendor, model: entry.id, effort: eff, title, state: tw ? 'waiting' : 'queued', role: 'impl', depends_on: tw?.id });
+    insert({ id, vendor, model: entry.id, effort: eff, title, state: tw ? 'waiting' : 'queued', role: 'impl', depends_on: tw?.id, gpu });
     if (tw) insert({ ...tw, title: `Spec tests: ${title}`.slice(0, 72), state: 'queued', role: 'tests' });
     const started = await startQueued(d);
     const state = (x) => (started.includes(x) ? 'spawning' : agentRow(x).state);
-    return { id, vendor, model: entry.id, effort: eff, state: state(id), billing: agentRow(id).billing, ...(tw ? { testWriter: { id: tw.id, vendor: tw.vendor, model: tw.model, state: state(tw.id) } } : {}) };
+    return { id, vendor, model: entry.id, effort: eff, state: state(id), billing: agentRow(id).billing, host: agentRow(id).host, ...(tw ? { testWriter: { id: tw.id, vendor: tw.vendor, model: tw.model, state: state(tw.id), host: agentRow(tw.id).host } } : {}) };
+  }
+
+  // ---------- placement (PRD "Part 2") ----------
+  /** `--host`: null/'auto' → null (auto-place); 'hub' or a joined satellite; local path repos only on the hub. */
+  function checkHost(name, repo) {
+    if (name == null || name === '' || name === 'auto') return null;
+    const h = String(name).toLowerCase();
+    if (h === 'hub') return h;
+    if (!db.prepare('SELECT 1 FROM hosts WHERE name = ? AND key_hash IS NOT NULL').get(h)) {
+      const known = db.prepare('SELECT name FROM hosts WHERE key_hash IS NOT NULL ORDER BY name').all().map(r => r.name);
+      throw new Error(`No host ${name}: use hub${known.length ? `, ${known.join(', ')}` : ''} or auto`);
+    }
+    if (repo && !githubSlug(repo)) throw new Error(`${repo} is a local path: local repos run on the hub only (satellites clone from GitHub)`);
+    return h;
+  }
+  /** Agents the hub has placed on a satellite that still hold (or wait there for) a worker. */
+  const liveOn = (name, vendor = null) => db.prepare(`SELECT COUNT(*) n FROM agents WHERE host = ? AND (? IS NULL OR vendor = ?) AND (${inActive} OR state = 'queued')`).get(name, vendor, vendor, ...ACTIVE).n;
+  /**
+   * Hosts that can start `a` now, least busy first (the hub first on a tie): its pin (`spawn --host`), else its
+   * delegator's host, else every online host. Satellites: only GitHub repos; their signed-in slots, `maxWorkers`
+   * and `gpu` come from their last heartbeat, minus the agents placed there that are still live.
+   */
+  function placements(a, drow, hubGpu) {
+    const pin = a.want_host || drow.host;
+    const fits = [];
+    if ((!pin || pin === 'hub') && (!a.gpu || hubGpu) && freeSlots(a.vendor).length && workerCount() < maxWorkers() && startable(a.vendor)) fits.push({ name: 'hub', live: workerCount() });
+    if (hub && pin !== 'hub' && githubSlug(a.repo)) {
+      for (const h of db.prepare('SELECT name, capabilities FROM hosts WHERE online = 1 AND key_hash IS NOT NULL ORDER BY name').all()) {
+        if (pin && pin !== h.name) continue;
+        let c = {};
+        try { c = JSON.parse(h.capabilities || '{}') || {}; } catch {}
+        if (a.gpu && !c.gpu) continue;
+        const signed = Array.isArray(c.vendors?.[a.vendor]) ? c.vendors[a.vendor].length : 0;
+        const live = liveOn(h.name);
+        if (signed - liveOn(h.name, a.vendor) <= 0 || live >= Math.max(1, Number(c.maxWorkers) || 6)) continue;
+        fits.push({ name: h.name, live });
+      }
+    }
+    return fits.sort((x, y) => x.live - y.live);
+  }
+  /** Re-runs placement for every delegator with unplaced agents (a satellite came online or freed a slot). */
+  async function startAll() {
+    for (const { id } of db.prepare("SELECT DISTINCT delegator id FROM agents WHERE state = 'queued' AND host = 'hub'").all()) await startQueued(id).catch(e => log(`start ${id}: ${e.message}`));
   }
 
   const inActive = `state IN (${ACTIVE.map(() => '?').join(',')})`;
@@ -167,34 +271,49 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
    * claude and a codex worker on one slot never share a refresh token. `except`: an agent to ignore (restart).
    */
   function freeSlots(vendor, except = null) {
-    const used = new Set(db.prepare(`SELECT slot FROM agents WHERE slot IS NOT NULL AND vendor = ? AND id IS NOT ? AND ${inActive}`).all(vendor, except, ...ACTIVE).map(r => r.slot));
+    const used = new Set(db.prepare(`SELECT slot FROM agents WHERE slot IS NOT NULL AND host = 'hub' AND vendor = ? AND id IS NOT ? AND ${inActive}`).all(vendor, except, ...ACTIVE).map(r => r.slot));
     return slots().filter(s => !used.has(s));
   }
   /** Live worker containers on this host, across every delegator. */
-  const workerCount = (except = null) => db.prepare(`SELECT COUNT(*) n FROM agents WHERE slot IS NOT NULL AND id IS NOT ? AND ${inActive}`).get(except, ...ACTIVE).n;
+  const workerCount = (except = null) => db.prepare(`SELECT COUNT(*) n FROM agents WHERE slot IS NOT NULL AND host = 'hub' AND id IS NOT ? AND ${inActive}`).get(except, ...ACTIVE).n;
   /** Host-wide cap on live workers (`maxWorkers` in ~/.hauptling/config.json, default 6), so CPU and RAM aren't overrun. */
   const maxWorkers = () => Math.max(1, Number(host.maxWorkers?.() ?? 6) || 6);
 
-  /** Starts queued agents while the delegator is under its limit, the host under `maxWorkers`, and a slot is free for the agent's vendor. */
+  /**
+   * Starts queued agents while the delegator is under its limit (agents on every host count): each goes to the
+   * first host from `placements`. On the hub: a slot free for its vendor, the hub under `maxWorkers`, and on the
+   * API key or on a plan that isn't at 100% (else it waits for the reset). On a satellite: a `spawn` command.
+   */
   async function startQueued(d) {
     const started = [];
+    const wantsGpu = db.prepare("SELECT 1 FROM agents WHERE delegator = ? AND state = 'queued' AND host = 'hub' AND gpu = 1").get(d);
+    const hubGpu = wantsGpu ? Boolean(await Promise.resolve(host.gpuAvailable?.()).catch(() => false)) : false;
     for (;;) {
       const next = tx(db, () => {
-        const max = db.prepare('SELECT max_agents FROM delegators WHERE id = ?').get(d).max_agents;
-        const active = db.prepare(`SELECT COUNT(*) n FROM agents WHERE delegator = ? AND state IN (${ACTIVE.map(() => '?').join(',')})`).get(d, ...ACTIVE).n;
-        if (active >= max || workerCount() >= maxWorkers()) return null;
-        // First queued agent that can start: a slot free for its vendor, and on the API key or on a plan that
-        // isn't at 100% (else it waits for the reset).
-        const a = db.prepare("SELECT * FROM agents WHERE delegator = ? AND state = 'queued' ORDER BY created_at").all(d).find(q => freeSlots(q.vendor).length && startable(q.vendor));
+        const drow = delegatorRow(d);
+        const active = db.prepare(`SELECT COUNT(*) n FROM agents WHERE delegator = ? AND (${inActive} OR (state = 'queued' AND host != 'hub'))`).get(d, ...ACTIVE).n;
+        if (active >= drow.max_agents) return null;
+        let a, place;
+        for (const q of db.prepare("SELECT * FROM agents WHERE delegator = ? AND state = 'queued' AND host = 'hub' ORDER BY created_at").all(d)) {
+          [place] = placements(q, drow, hubGpu);
+          if (place) { a = q; break; }
+        }
         if (!a) return null;
+        if (place.name !== 'hub') {
+          db.prepare("UPDATE agents SET state = 'spawning', host = ?, updated_at = ? WHERE id = ?").run(place.name, now(), a.id);
+          hub.command(place.name, 'spawn', { agent: Object.fromEntries(SPAWN_FIELDS.map(k => [k, a[k] ?? null])), delegator: { id: d, gate: Boolean(drow.gate), automerge: Boolean(drow.automerge) } });
+          return { ...a, remote: place.name };
+        }
         const slot = freeSlots(a.vendor)[0];
         const dir = `${host.workRoot}/${a.id}`;
         const billing = billingFor(a.vendor);
         db.prepare("UPDATE agents SET state = 'spawning', slot = ?, dir = ?, billing = ?, updated_at = ? WHERE id = ?").run(slot, dir, billing, now(), a.id);
+        synced(a.id);
         return { ...a, slot, dir, billing, state: 'spawning' };
       });
       if (!next) return started;
       started.push(next.id);
+      if (next.remote) { log(`placed ${next.id} on ${next.remote}`); continue; }
       launch(next).catch(e => {
         update(next.id, { state: 'failed', report: `spawn failed: ${e.message}`.slice(0, 600) });
         cancelAgentTests(next.id, 'failed');
@@ -284,7 +403,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
       const full = l.used_pct >= 100;
       const text = `${a.vendor} ${l.window} window at ${Math.round(l.used_pct)}% (${when})${full ? `; new ${a.vendor} spawns wait until then` : ''}`;
       emit(a.delegator, a.id, 'usage-high', text);
-      notify({ title: `${a.vendor} usage ${Math.round(l.used_pct)}%`, body: text, choices: [], links: null, dashboard: `${publicUrl}/#usage` });
+      toast(a.id, { title: `${a.vendor} usage ${Math.round(l.used_pct)}%`, body: text, choices: [], links: null, dashboard: `${publicUrl}/#usage` });
       log(`usage-high ${text}`);
     }
     return u;
@@ -299,7 +418,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     kvSet(db, key, now());
     const text = `${a.vendor} API spend $${b.spent.toFixed(2)} of $${b.usd} this period; new ${a.vendor} workers use your plan until ${new Date(b.until).toLocaleDateString()} (running API workers finish on the API)`;
     emit(a.delegator, a.id, 'api-budget', text);
-    notify({ title: `${a.vendor} API budget ${Math.round((b.spent / b.usd) * 100)}%`, body: text, choices: [], links: null, dashboard: `${publicUrl}/#usage` });
+    toast(a.id, { title: `${a.vendor} API budget ${Math.round((b.spent / b.usd) * 100)}%`, body: text, choices: [], links: null, dashboard: `${publicUrl}/#usage` });
     log(`api-budget ${text}`);
   }
 
@@ -325,7 +444,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
       try { const p = await host.hostCodexUsage(cd.since); if (p) recordHostUsage('codex', normalizeUsage('codex', p)); }
       catch (e) { log(`host codex usage: ${e.message}`); }
     }
-    for (const a of db.prepare("SELECT * FROM agents WHERE vendor = 'codex' AND slot IS NOT NULL AND state IN ('working','blocked','done')").all()) {
+    for (const a of db.prepare("SELECT * FROM agents WHERE vendor = 'codex' AND slot IS NOT NULL AND host = 'hub' AND state IN ('working','blocked','done')").all()) {
       try {
         const p = await host.codexUsage(a.slot, a.created_at);
         if (p) recordUsage(a, normalizeUsage('codex', p, priceOf(a)));
@@ -384,7 +503,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     a = await cloneWorker(a);
     await host.startWorker(await workerOptions(a));
     update(a.id, { state: 'working', base: a.base, idle: 0, usage_start: JSON.stringify(windowSnapshot(db, a.vendor)) });
-    mail.setStatus(db, a.id, `working: ${a.title}`.slice(0, STATUS_MAX));
+    setStatus(a.id, `working: ${a.title}`.slice(0, STATUS_MAX));
   }
 
   async function cleanup(a, state, options) {
@@ -396,7 +515,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     kvDel(db, `held-gate:${a.id}`);
     kvDel(db, `held-land:${a.id}`);
     update(a.id, { state, idle: 0, paused_state: null });
-    mail.setStatus(db, a.id, `${state}: ${a.title}`.slice(0, STATUS_MAX));
+    setStatus(a.id, `${state}: ${a.title}`.slice(0, STATUS_MAX));
     await startQueued(a.delegator);
   }
 
@@ -411,9 +530,27 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     return true;
   }
 
+  /**
+   * Mail between hosts: on the hub, a recipient on a satellite gets it through a `mail` command (the hub's copy
+   * is marked read); on a satellite, mail from a worker to an identity it doesn't know goes up to the hub.
+   */
   async function sendMail(from, to, text) {
+    if (satellite && agentRow(from) && !isFamily(to)) {
+      let local = null;
+      try { local = mail.resolve(db, to); } catch {}
+      if (!local || !db.prepare('SELECT 1 FROM identities WHERE identity = ?').get(local)) {
+        satellite.queue(from, 'mail', JSON.stringify({ to, text: bounded(text, MAIL_MAX, 'Mail') }));
+        return [to];
+      }
+    }
     const sent = mail.send(db, from, to, text);
-    for (const r of sent) await wake(r).catch(e => log(`wake ${r} failed: ${e.message}`));
+    for (const r of sent) {
+      const a = agentRow(r);
+      if (a && a.host !== 'hub' && hub) {
+        db.prepare('UPDATE mail SET seen_at = ? WHERE recipient = ? AND seen_at IS NULL').run(now(), r);
+        hub.command(a.host, 'mail', { agent: r, from, text });
+      } else await wake(r).catch(e => log(`wake ${r} failed: ${e.message}`));
+    }
     return sent;
   }
 
@@ -430,7 +567,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
       // Activity after a stall (e.g. you answered a permission prompt in the TUI): back to working.
       if (a.state === 'blocked' && !db.prepare('SELECT 1 FROM asks WHERE agent = ? AND answered_at IS NULL').get(identity)) {
         update(identity, { state: 'working' });
-        mail.setStatus(db, identity, `working: ${a.title}`.slice(0, STATUS_MAX));
+        setStatus(identity, `working: ${a.title}`.slice(0, STATUS_MAX));
       }
       if (event === 'Stop') {
         if (!mail.unread(db, identity)) { update(identity, { idle: 1 }); return {}; }
@@ -467,7 +604,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
       return { sha, pushed: true, branch: a.branch, committed, note: 'Spec tests handed to the implementer. You are done; this session will close.' };
     }
     update(a.id, { state: 'done', report: body, sha, idle: 0 });
-    mail.setStatus(db, a.id, `done: ${a.title}`.slice(0, STATUS_MAX));
+    setStatus(a.id, `done: ${a.title}`.slice(0, STATUS_MAX));
     emit(a.delegator, a.id, 'report', `${a.id}: ${body}\n  spent: ${spend(a)}`);
     if (ahead) gate(a.id).catch(e => { emit(a.delegator, a.id, 'gate-error', `${a.id}: ${e.message}`); });
     else update(a.id, { gate: 'none' });
@@ -566,10 +703,14 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   }
 
   /** Stores a question and notifies you; the answer page is keyed by a random nonce, not a token. */
-  function postAsk(a, question, choices) {
+  function postAsk(a, question, choices, remoteId = null) {
     const nonce = token();
-    const r = db.prepare('INSERT INTO asks (agent, question, choices, at, nonce) VALUES (?, ?, ?, ?, ?)').run(a.id, question, JSON.stringify(choices), now(), nonce);
+    const r = db.prepare('INSERT INTO asks (agent, question, choices, at, nonce, remote_id) VALUES (?, ?, ?, ?, ?, ?)').run(a.id, question, JSON.stringify(choices), now(), nonce, remoteId);
     const id = Number(r.lastInsertRowid);
+    if (satellite) { // the hub notifies you and keeps the answer page
+      satellite.queue(a.id, 'ask', JSON.stringify({ ask: id, question, choices }));
+      return id;
+    }
     const page = `${publicUrl}/ask/${id}?k=${nonce}`;
     notify({ title: `${a.id} asks`, body: question, choices, links: { page, choice: (i) => `${page}&choice=${i}` }, dashboard: `${publicUrl}/` });
     log(`ask ${id} from ${a.id}: ${page}`);
@@ -581,7 +722,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     const q = bounded(question, MAIL_MAX, 'Question');
     const opts = choices.map(c => bounded(c, 80, 'Choice'));
     update(a.id, { state: 'blocked' });
-    mail.setStatus(db, a.id, `blocked: ${q}`.slice(0, STATUS_MAX));
+    setStatus(a.id, `blocked: ${q}`.slice(0, STATUS_MAX));
     const id = postAsk(a, q, opts);
     return { ask: id, note: 'Question sent to the user. End your turn now; the answer arrives as your next message.' };
   }
@@ -594,9 +735,10 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     if (value == null) throw new Error('No such choice');
     db.prepare('UPDATE asks SET answer = ?, answered_at = ? WHERE id = ?').run(String(value), now(), q.id);
     const a = agentRow(q.agent);
+    if (a.host !== 'hub' && hub) return { answered: value, ...(await remote(a, 'answer', { agent: a.id, ask: q.remote_id, text: String(value) })) };
     if (a.state === 'blocked') update(a.id, { state: 'working' });
     if (a.state === 'paused' && a.paused_state === 'blocked') update(a.id, { paused_state: 'working' });
-    mail.setStatus(db, a.id, `working: ${a.title}`.slice(0, STATUS_MAX));
+    setStatus(a.id, `working: ${a.title}`.slice(0, STATUS_MAX));
     await sendMail('user', a.id, `Answer to "${q.question.slice(0, 120)}": ${value}`.slice(0, MAIL_MAX));
     return { answered: value };
   }
@@ -606,6 +748,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     const a = mustAgent(agent);
     const open = db.prepare('SELECT id FROM asks WHERE agent = ? AND answered_at IS NULL ORDER BY id DESC LIMIT 1').get(a.id);
     if (open) return answer({ ask: open.id, text: bounded(text, 250, 'Reply') });
+    if (a.host !== 'hub' && hub) return remote(a, 'reply', { agent: a.id, text });
     return { sent: await sendMail('user', a.id, text) };
   }
 
@@ -617,10 +760,11 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     const id = `t_${hex(4)}`;
     db.prepare(`INSERT INTO tests (id, agent, requester, repo, sha, branch, selector, gpu, artifacts, timeout_s, round, purpose, state, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)`).run(id, a?.id ?? null, requester, repo || a.repo, sha, branch || a?.branch || null, selector, gpu ? 1 : 0, JSON.stringify(artifacts), Number(timeout_s), round, purpose, now());
+    testSynced(id);
     if (a && round >= 3 && PAUSABLE.includes(a.state)) {
       const q = `${a.id} is on test round ${round}. Keep iterating?`;
       update(a.id, { state: 'blocked' });
-      mail.setStatus(db, a.id, `blocked: test round ${round}`);
+      setStatus(a.id, `blocked: test round ${round}`);
       postAsk(a, q, ['Keep going', 'Stop and report what you have']);
     }
     bus.emit('tests');
@@ -636,6 +780,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     for (const { id, state } of rows) {
       const report = JSON.stringify({ id, status: 'cancelled', passed: 0, failed: 0, skipped: 0, failures: [], notes });
       db.prepare("UPDATE tests SET state = 'done', report = ?, done_at = ? WHERE id = ?").run(report, now(), id);
+      testSynced(id);
       kvDel(db, `gpu:need:${id}`);
       kvDel(db, `gpu:wait:${id}`);
       bus.emit(`test:${id}`);
@@ -664,7 +809,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   async function pump() { pumpCpu(); await pumpGpu(); }
   function pumpCpu() {
     if (!host.runTestJob) return;
-    while (db.prepare("SELECT COUNT(*) n FROM tests WHERE state = 'running' AND gpu = 0").get().n < concurrency()) {
+    while (db.prepare("SELECT COUNT(*) n FROM tests WHERE state = 'running' AND gpu = 0 AND host = 'hub'").get().n < concurrency()) {
       const t = grab(false);
       if (!t) break;
       runJob(jobFor(t)).catch(e => log(`test run ${t.id}: ${e.message}`));
@@ -760,6 +905,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
       const note = `retrying (${t.attempt + 1}/${max}): ${reason}`;
       const r = db.prepare("UPDATE tests SET state = 'queued', claimed_at = NULL, attempt = ?, retry_note = ? WHERE id = ? AND state = 'running' AND claimed_at = ?").run(t.attempt + 1, note.slice(0, 300), id, claimedAt);
       if (!r.changes) return;
+      testSynced(id);
       kvDel(db, `gpu:wait:${id}`);
       log(`test ${id} killed: ${note}`);
       bus.emit('tests');
@@ -771,19 +917,21 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   function testRunNow({ id }) {
     const t = db.prepare('SELECT * FROM tests WHERE id = ?').get(id);
     if (!t) throw new Error(`No test ${id}`);
+    if (t.host !== 'hub' && hub) return remote(agentRow(t.agent) || { host: t.host }, 'test-run', { agent: t.agent, test: id });
     if (t.state !== 'queued') throw new Error(`Test ${id} is ${t.state}, not queued`);
     if (t.agent && ['paused', 'restarting'].includes(agentRow(t.agent)?.state)) throw new Error(`Agent ${t.agent} is paused or restarting`);
     if (t.gpu) throw new Error('GPU jobs run one at a time; use the GPU queue controls');
     if (!host.runTestJob) throw new Error('No local test runner');
     t.claimed_at = now();
     db.prepare("UPDATE tests SET state = 'running', claimed_at = ? WHERE id = ? AND state = 'queued'").run(t.claimed_at, id);
+    testSynced(id);
     runJob(jobFor(t)).catch(e => log(`test run ${id}: ${e.message}`));
     return { started: id };
   }
 
   // ---------- GPU queue ----------
   const gpuCfg = () => ({ memMB: 6144, waitMinutes: 30, ...host.gpuConfig?.() });
-  const nextGpuJob = () => db.prepare(`SELECT q.* FROM tests q WHERE q.state = 'queued' AND q.gpu = 1 AND ${TEST_ELIGIBLE} ORDER BY q.created_at, q.rowid LIMIT 1`).get();
+  const nextGpuJob = () => db.prepare(`SELECT q.* FROM tests q WHERE q.state = 'queued' AND q.gpu = 1 AND q.host = 'hub' AND ${TEST_ELIGIBLE} ORDER BY q.created_at, q.rowid LIMIT 1`).get();
 
   /**
    * May the next GPU job start? Not while paused. Otherwise it needs enough free VRAM (your desktop
@@ -812,10 +960,11 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   /** `gpu pause [--now]`: hold the GPU queue. --now kills the running job and requeues it (same row: no extra round). */
   async function gpuPause({ now: hard = false } = {}) {
     kvSet(db, 'gpu:paused', 1);
-    const running = db.prepare("SELECT id FROM tests WHERE state = 'running' AND gpu = 1").all();
+    const running = db.prepare("SELECT id FROM tests WHERE state = 'running' AND gpu = 1 AND host = 'hub'").all();
     if (!hard) return { paused: true, running: running.map(r => r.id) };
     for (const { id } of running) {
       db.prepare("UPDATE tests SET state = 'queued', claimed_at = NULL WHERE id = ?").run(id);
+      testSynced(id);
       await host.killTestJob?.(id).catch(e => log(`kill test ${id}: ${e.message}`));
     }
     return { paused: true, requeued: running.map(r => r.id) };
@@ -823,8 +972,8 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   function gpuResume() { kvDel(db, 'gpu:paused'); pump().catch(e => log(`test pump: ${e.message}`)); return { paused: false }; }
   async function gpuStatus() {
     const c = gpuCfg();
-    const running = db.prepare("SELECT id, agent, purpose, claimed_at, timeout_s FROM tests WHERE state = 'running' AND gpu = 1").all();
-    const queued = db.prepare("SELECT id, agent, purpose, created_at FROM tests WHERE state = 'queued' AND gpu = 1 ORDER BY created_at").all()
+    const running = db.prepare("SELECT id, agent, purpose, claimed_at, timeout_s FROM tests WHERE state = 'running' AND gpu = 1 AND host = 'hub'").all();
+    const queued = db.prepare("SELECT id, agent, purpose, created_at FROM tests WHERE state = 'queued' AND gpu = 1 AND host = 'hub' ORDER BY created_at").all()
       .map(t => ({ ...t, waiting_since: kvGet(db, `gpu:wait:${t.id}`) ? new Date(Number(kvGet(db, `gpu:wait:${t.id}`))).toISOString() : null }));
     return { available: Boolean(await host.gpuAvailable?.()), paused: Boolean(kvGet(db, 'gpu:paused')), freeMB: await host.gpuFreeMB?.().catch(() => null) ?? null, needMB: c.memMB, running, queued };
   }
@@ -845,9 +994,9 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     await host.removeTestContainers?.().catch(e => log(`remove test containers: ${e.message}`));
     const ended = [...ENDED, 'failed', 'exited'];
     const agents = db.prepare(`SELECT DISTINCT a.id, a.state FROM agents a JOIN tests t ON t.agent = a.id
-      WHERE a.state IN (${ended.map(() => '?').join(',')}) AND t.state IN ('queued', 'running')`).all(...ended);
+      WHERE a.host = 'hub' AND a.state IN (${ended.map(() => '?').join(',')}) AND t.state IN ('queued', 'running')`).all(...ended);
     for (const a of agents) cancelAgentTests(a.id, a.state, { resumeQueue: false });
-    const r = db.prepare("UPDATE tests SET state = 'queued', claimed_at = NULL WHERE state = 'running'").run();
+    const r = db.prepare("UPDATE tests SET state = 'queued', claimed_at = NULL WHERE state = 'running' AND host = 'hub'").run();
     if (r.changes) log(`requeued ${r.changes} test job(s) after restart`);
     return { requeued: r.changes };
   }
@@ -867,10 +1016,11 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   const grab = (gpu) => tx(db, () => {
     const t = gpu
       ? nextGpuJob()
-      : db.prepare(`SELECT q.* FROM tests q WHERE q.state = 'queued' AND q.gpu = 0 AND ${TEST_ELIGIBLE} AND NOT EXISTS (SELECT 1 FROM tests r WHERE r.state = 'running' AND r.gpu = 0 AND r.repo = q.repo) ORDER BY q.created_at, q.rowid LIMIT 1`).get();
+      : db.prepare(`SELECT q.* FROM tests q WHERE q.state = 'queued' AND q.gpu = 0 AND q.host = 'hub' AND ${TEST_ELIGIBLE} AND NOT EXISTS (SELECT 1 FROM tests r WHERE r.state = 'running' AND r.gpu = 0 AND r.host = 'hub' AND r.repo = q.repo) ORDER BY q.created_at, q.rowid LIMIT 1`).get();
     if (!t) return null;
     t.claimed_at = now();
     db.prepare("UPDATE tests SET state = 'running', claimed_at = ? WHERE id = ?").run(t.claimed_at, t.id);
+    testSynced(t.id);
     return t;
   });
   function jobFor(t) {
@@ -896,6 +1046,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     if (!['pass', 'fail', 'error', 'timeout'].includes(report.status)) throw new Error('Bad status');
     report = { ...report, id, notes: report.notes?.slice(0, 300), failures: (report.failures || []).slice(0, 20).map(f => ({ ...f, message: String(f.message || '').slice(0, 300), excerpt: String(f.excerpt || '').split('\n').slice(0, 20).join('\n') })) };
     db.prepare("UPDATE tests SET state = 'done', report = ?, done_at = ? WHERE id = ?").run(JSON.stringify(report), now(), id);
+    testSynced(id);
     kvDel(db, `gpu:need:${id}`);
     kvDel(db, `gpu:wait:${id}`);
     bus.emit(`test:${id}`);
@@ -924,7 +1075,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
       if (current.state !== a.state || current.sha !== t.sha) return gateResult(current, t, r);
       if (gpu) {
         gpuRequest({ agent: a.id, requester: 'hauptling', sha: t.sha, purpose: 'gate' }, cfg);
-        mail.setStatus(db, a.id, 'gate: waiting for GPU');
+        setStatus(a.id, 'gate: waiting for GPU');
         emit(a.delegator, a.id, 'gate-cpu-passed', `${a.id} gate tests ${summary}; GPU gate queued`);
         return;
       }
@@ -971,7 +1122,8 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     const rows = delegator || !all
       ? db.prepare(`SELECT * FROM agents WHERE delegator = ? ${all ? '' : `AND state NOT IN (${ENDED.map(x => `'${x}'`).join(',')})`} ORDER BY created_at`).all(delegatorId(delegator))
       : db.prepare('SELECT * FROM agents ORDER BY created_at').all();
-    return rows.map(({ token: _t, brief: _b, ...r }) => ({ ...r, status: db.prepare('SELECT text FROM status WHERE identity = ?').get(r.id)?.text || null }));
+    const offline = new Set(db.prepare('SELECT name FROM hosts WHERE online = 0').all().map(h => h.name));
+    return rows.map(({ token: _t, brief: _b, ...r }) => ({ ...r, status: db.prepare('SELECT text FROM status WHERE identity = ?').get(r.id)?.text || null, ...(offline.has(r.host) ? { host_offline: true } : {}) }));
   }
 
   async function lifecycle(agent, change) {
@@ -985,7 +1137,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   function refreshAgent(a, state, idle = a.idle) {
     update(a.id, { state, idle, paused_state: null });
     mail.touch(db, a.id);
-    mail.setStatus(db, a.id, `${state}: ${a.title}`.slice(0, STATUS_MAX));
+    setStatus(a.id, `${state}: ${a.title}`.slice(0, STATUS_MAX));
   }
 
   async function releaseHeldWork(id) {
@@ -1101,7 +1253,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
    */
   const PROMPT = /(Run this command\?|Allow this|Do you want to|Requesting permission|\(y\/n\)|Approve|Press enter to continue)/i;
   async function watch(at = Date.now()) {
-    for (const a of db.prepare("SELECT a.*, i.seen_at FROM agents a JOIN identities i ON i.identity = a.id WHERE a.state IN ('working','blocked') AND a.slot IS NOT NULL").all()) {
+    for (const a of db.prepare("SELECT a.*, i.seen_at FROM agents a JOIN identities i ON i.identity = a.id WHERE a.state IN ('working','blocked') AND a.slot IS NOT NULL AND a.host = 'hub'").all()) {
       const unchanged = () => {
         const current = agentRow(a.id);
         const seen = db.prepare('SELECT seen_at FROM identities WHERE identity = ?').get(a.id)?.seen_at;
@@ -1115,7 +1267,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
           const tail = (await host.tmuxCapture?.(a.slot, a.id, 8).catch(() => '') || '').trim().split('\n').slice(-3).join(' | ');
           if (!unchanged()) continue;
           update(a.id, { state: 'exited', idle: 0 });
-          mail.setStatus(db, a.id, `exited: ${a.title}`.slice(0, STATUS_MAX));
+          setStatus(a.id, `exited: ${a.title}`.slice(0, STATUS_MAX));
           emit(a.delegator, a.id, 'exited', `${a.id} TUI exited${tail ? `: ${tail}` : ''}. \`hauptling attach ${a.id}\` to look, \`hauptling kill ${a.id}\` to free its slot.`);
           await startQueued(a.delegator);
           continue;
@@ -1129,8 +1281,8 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
           kvSet(db, `stall:${a.id}`, a.seen_at);
           const tail = screen.split('\n').map(l => l.trim()).filter(Boolean).slice(-3).join(' | ');
           update(a.id, { state: 'blocked' });
-          mail.setStatus(db, a.id, 'blocked: idle without report');
-          notify({ title: `${a.id} is idle without reporting`, body: `${tail ? `${tail}\n` : ''}Run: hauptling attach ${a.id}`, choices: [], links: null, dashboard: `${publicUrl}/` });
+          setStatus(a.id, 'blocked: idle without report');
+          toast(a.id, { title: `${a.id} is idle without reporting`, body: `${tail ? `${tail}\n` : ''}Run: hauptling attach ${a.id}`, choices: [], links: null, dashboard: `${publicUrl}/` });
           log(`idle ${a.id}`);
           continue;
         }
@@ -1142,8 +1294,8 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
         const prompt = PROMPT.test(screen);
         const why = prompt ? `waiting on a ${a.vendor} permission prompt` : `no activity for ${stallMinutes} min`;
         update(a.id, { state: 'blocked' });
-        mail.setStatus(db, a.id, `blocked: ${why}`.slice(0, STATUS_MAX));
-        notify({ title: `${a.id} may be stuck`, body: `${why}. Run: hauptling attach ${a.id}`, choices: [], links: null, dashboard: `${publicUrl}/` });
+        setStatus(a.id, `blocked: ${why}`.slice(0, STATUS_MAX));
+        toast(a.id, { title: `${a.id} may be stuck`, body: `${why}. Run: hauptling attach ${a.id}`, choices: [], links: null, dashboard: `${publicUrl}/` });
         log(`stall ${a.id}: ${why}`);
       } catch (e) { log(`watch ${a.id}: ${e.message}`); }
     }
@@ -1153,10 +1305,11 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   async function poll() {
     await refreshUsage({ force: true }).catch(e => log(`usage: ${e.message}`));
     // A usage window may have reset: queued spawns that were waiting for it can start.
-    for (const { id } of db.prepare("SELECT DISTINCT delegator id FROM agents WHERE state = 'queued'").all()) await startQueued(id).catch(e => log(`start ${id}: ${e.message}`));
+    for (const { id } of db.prepare("SELECT DISTINCT delegator id FROM agents WHERE state = 'queued' AND host = 'hub'").all()) await startQueued(id).catch(e => log(`start ${id}: ${e.message}`));
     await watch();
     await watchTests().catch(e => log(`test watchdog: ${e.message}`));
-    for (const a of db.prepare("SELECT * FROM agents WHERE state IN ('done','working') AND pr_number IS NOT NULL").all()) {
+    syncTests();
+    for (const a of db.prepare("SELECT * FROM agents WHERE state IN ('done','working') AND pr_number IS NOT NULL AND host = 'hub'").all()) {
       try {
         const slug = githubSlug(a.repo);
         const pr = await github.prView(slug, a.pr_number);
@@ -1181,22 +1334,25 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   }
 
   // ---------- delegator lifecycle ----------
-  function delegatorStart({ cli, repo, max = 3, gate = true, automerge = true }) {
+  /** `host`: bind its agents to a host (`hub` or a satellite); unset or `auto` places each agent automatically. */
+  function delegatorStart({ cli, repo, max = 3, gate = true, automerge = true, host: bind }) {
+    const h = checkHost(bind, repo);
     const id = `d_${hex(3)}`;
-    db.prepare('INSERT INTO delegators (id, cli, repo, max_agents, gate, automerge, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(id, cli || null, repo || null, Number(max), gate ? 1 : 0, automerge ? 1 : 0, now());
-    return { id };
+    db.prepare('INSERT INTO delegators (id, cli, repo, max_agents, gate, automerge, created_at, host) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(id, cli || null, repo || null, Number(max), gate ? 1 : 0, automerge ? 1 : 0, now(), h);
+    return { id, ...(h ? { host: h } : {}) };
   }
 
   /**
    * Changes a delegator's merge settings. Turning the gate off lands its reported agents whose gate job is
    * still queued or running (the job is cancelled); turning it on affects later reports only.
    */
-  async function delegatorSet({ delegator, gate, automerge }) {
+  async function delegatorSet({ delegator, gate, automerge, host: bind }) {
     const d = delegatorId(delegator);
+    if (bind != null) db.prepare('UPDATE delegators SET host = ? WHERE id = ?').run(checkHost(bind, delegatorRow(d).repo), d);
     if (gate != null) db.prepare('UPDATE delegators SET gate = ? WHERE id = ?').run(gate ? 1 : 0, d);
     if (automerge != null) db.prepare('UPDATE delegators SET automerge = ? WHERE id = ?').run(automerge ? 1 : 0, d);
     if (gate === false) {
-      const waiting = db.prepare("SELECT DISTINCT a.id FROM agents a JOIN tests t ON t.agent = a.id WHERE a.delegator = ? AND a.state = 'done' AND t.purpose = 'gate' AND t.state IN ('queued', 'running') AND t.sha = a.sha").all(d);
+      const waiting = db.prepare("SELECT DISTINCT a.id FROM agents a JOIN tests t ON t.agent = a.id WHERE a.delegator = ? AND a.host = 'hub' AND a.state = 'done' AND t.purpose = 'gate' AND t.state IN ('queued', 'running') AND t.sha = a.sha").all(d);
       for (const { id } of waiting) {
         cancelTests(db.prepare("SELECT id, state FROM tests WHERE agent = ? AND purpose = 'gate' AND state IN ('queued', 'running')").all(id), 'merge gate turned off');
         update(id, { gate: 'off' });
@@ -1204,7 +1360,14 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
       }
     }
     const row = delegatorRow(d);
-    return { delegator: d, gate: Boolean(row.gate), automerge: Boolean(row.automerge) };
+    if (hub && (gate != null || automerge != null)) {
+      // Satellites running its agents keep their own copy of the merge settings.
+      for (const { host: h } of db.prepare(`SELECT DISTINCT host FROM agents WHERE delegator = ? AND host != 'hub' AND (${inActive} OR state = 'queued')`).all(d, ...ACTIVE)) {
+        hub.command(h, 'delegator', { delegator: { id: d, gate: Boolean(row.gate), automerge: Boolean(row.automerge) } });
+      }
+    }
+    if (bind != null) placeSoon();
+    return { delegator: d, gate: Boolean(row.gate), automerge: Boolean(row.automerge), ...(row.host ? { host: row.host } : {}) };
   }
 
   /** Marks a delegator ended, so commands without --delegator stop considering it. Refused while it has live agents. */
@@ -1244,19 +1407,160 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     return { id: q.id, agent: q.agent, question: q.question, choices: JSON.parse(q.choices), answer: q.answer };
   }
 
+
+  // ---------- hub ↔ satellite (PRD "Part 2") ----------
+  /** Runs `fn` after the current transaction (hub events are applied inside one; mail and placement open their own). */
+  const later = (what, fn) => Promise.resolve().then(fn).catch(e => log(`${what}: ${e.message}`));
+  const placeSoon = () => later('placement', startAll);
+
+  /**
+   * On the hub: an action on an agent that runs on a satellite becomes a command. Open link: waits up to
+   * `remoteWaitMs` for the satellite's answer. Offline: stored and delivered when it reconnects.
+   */
+  async function remote(a, type, body = { agent: a.id }) {
+    const { id, sent } = hub.command(a.host, type, body);
+    if (!sent) return { queued: true, host: a.host, command: id, note: `host offline: ${a.host} gets it when it reconnects` };
+    const r = await hub.result(id, remoteWaitMs);
+    if (!r) return { sent: true, host: a.host, command: id, note: `sent to ${a.host}; no answer yet` };
+    if (!r.ok) throw new Error(`${a.host}: ${r.error}`);
+    return r.result;
+  }
+
+  /** pause, unpause, restart, kill, merge: run here, or on the agent's satellite. */
+  const onItsHost = (name, local) => async (args, who) => {
+    const a = args?.agent ? mustAgent(args.agent) : null;
+    if (!a || a.host === 'hub' || !hub) return local(args, who);
+    const r = await remote(a, HOST_CMDS[name], { agent: a.id });
+    if (name === 'kill' && r?.queued && !ENDED.includes(agentRow(a.id).state)) {
+      // Frees the delegator's place now; the satellite stops the worker when it is back.
+      update(a.id, { state: 'killed', idle: 0, paused_state: null });
+      mail.setStatus(db, a.id, `killed: ${a.title}`.slice(0, STATUS_MAX));
+      emit(a.delegator, a.id, 'killed', `${a.id} killed (${a.host} is offline; its worker stops when it reconnects)`);
+      placeSoon();
+    }
+    return r;
+  };
+
+  /**
+   * On the hub: one event from satellite `name` for its agent `a` (already checked to run there), inside the
+   * events transaction. Mirror kinds update the hub's rows; the rest are delegator events, as if local.
+   * Its `state` never revives an agent the hub already ended (killed while its host was offline).
+   */
+  function receive(name, a, kind, text, at) {
+    const json = () => { try { return JSON.parse(text); } catch { throw new Error(`bad ${kind} payload`); } };
+    if (kind === 'state') {
+      const { status, ...fields } = json();
+      if (ENDED.includes(a.state)) delete fields.state;
+      const cols = Object.keys(fields).filter(k => MIRROR_FIELDS.includes(k));
+      if (cols.length) db.prepare(`UPDATE agents SET ${cols.map(k => `${k} = ?`).join(', ')}, updated_at = ? WHERE id = ?`).run(...cols.map(k => fields[k] ?? null), now(), a.id);
+      if (typeof status === 'string' && status) mail.setStatus(db, a.id, status.slice(0, STATUS_MAX));
+      if ('state' in fields && !ACTIVE.includes(fields.state)) placeSoon(); // a place freed up
+      bus.emit('agents');
+      return;
+    }
+    if (kind === 'test') {
+      const t = json();
+      if (typeof t.id !== 'string' || !/^t_[0-9a-f]{4,16}$/.test(t.id)) throw new Error('bad test id');
+      const mine = db.prepare('SELECT host FROM tests WHERE id = ?').get(t.id);
+      if (mine && mine.host !== name) throw new Error(`test ${t.id} belongs to ${mine.host}`);
+      const cols = TEST_FIELDS.filter(k => k !== 'id' && k in t);
+      const row = { ...t, agent: a.id };
+      db.prepare(`INSERT INTO tests (id, host, ${cols.join(', ')}) VALUES (?, ?, ${cols.map(() => '?').join(', ')})
+        ON CONFLICT (id) DO UPDATE SET ${cols.map(k => `${k} = excluded.${k}`).join(', ')}`).run(t.id, name, ...cols.map(k => row[k] ?? null));
+      if (t.state === 'done') bus.emit(`test:${t.id}`);
+      return;
+    }
+    if (kind === 'ask') {
+      const q = json();
+      postAsk(a, bounded(q.question, MAIL_MAX, 'Question'), (Array.isArray(q.choices) ? q.choices : []).map(c => bounded(String(c), 80, 'Choice')), Number(q.ask) || null);
+      return;
+    }
+    if (kind === 'notify') {
+      const n = json();
+      notify({ title: `${String(n.title).slice(0, 120)} (${name})`, body: String(n.body ?? '').slice(0, 600), choices: [], links: null, dashboard: `${publicUrl}/` });
+      return;
+    }
+    if (kind === 'mail') {
+      const m = json();
+      later(`mail from ${a.id}`, () => sendMail(a.id, String(m.to), String(m.text)));
+      return;
+    }
+    emit(a.delegator, a.id, kind, text, at);
+    if (kind === 'tests-ready') {
+      // The spec tests are on GitHub: the implementer can start on any host.
+      const impl = db.prepare("SELECT id FROM agents WHERE depends_on = ? AND state = 'waiting'").get(a.id);
+      if (impl) { const tw = agentRow(a.id); update(impl.id, { state: 'queued', start_from: tw.branch, base: tw.base }); placeSoon(); }
+    }
+  }
+
+  /** On the hub: a command's answer. A spawn the satellite refused fails the agent here. */
+  function commandDone(name, c, r) {
+    if (c.type !== 'spawn' || r?.ok) return;
+    const a = agentRow(c.agent?.id);
+    if (!a || a.host !== name || a.state !== 'spawning') return;
+    update(a.id, { state: 'failed', report: `spawn on ${name} failed: ${r?.error}`.slice(0, 600) });
+    emit(a.delegator, a.id, 'failed', `${a.id} failed to start on ${name}: ${r?.error}`);
+    placeSoon();
+  }
+
+  /** On a satellite: a command from the hub, through the usual local code paths. */
+  async function command(c) {
+    const agent = typeof c.agent === 'string' ? c.agent : null;
+    switch (c.type) {
+      case 'spawn': return accept(c);
+      case 'kill': return kill({ agent });
+      case 'pause': return pause({ agent });
+      case 'resume': return unpause({ agent });
+      case 'restart': return restart({ agent });
+      case 'merge': return merge({ agent });
+      case 'reply': return reply({ agent, text: c.text });
+      case 'answer': return answer({ ask: c.ask, text: c.text });
+      case 'mail': return { sent: await sendMail(c.from, agent, c.text) };
+      case 'test-run': return testRunNow({ id: c.test });
+      case 'delegator': copyDelegator(c.delegator); return delegatorSet({ delegator: c.delegator.id, gate: c.delegator.gate, automerge: c.delegator.automerge });
+      default: throw new Error(`Unknown command ${c.type}`);
+    }
+  }
+  /** The satellite's copy of a hub delegator: inactive (no local CLI uses it), no limit of its own (the hub counts). */
+  function copyDelegator(d) {
+    db.prepare(`INSERT INTO delegators (id, max_agents, active, created_at, gate, automerge) VALUES (?, 1000, 0, ?, ?, ?)
+      ON CONFLICT (id) DO UPDATE SET gate = excluded.gate, automerge = excluded.automerge`).run(d.id, now(), d.gate ? 1 : 0, d.automerge ? 1 : 0);
+  }
+  /** `spawn` on a satellite: the hub's agent row, with this host's own worker token; started like a local spawn. */
+  async function accept({ agent: x, delegator: d }) {
+    if (!x?.id || !d?.id) throw new Error('spawn: agent and delegator required');
+    if (!githubSlug(x.repo)) throw new Error(`${x.repo} is a local path: local repos run on the hub only`);
+    if (!isFamily(x.vendor)) throw new Error(`bad vendor ${x.vendor}`);
+    if (!agentRow(x.id)) {
+      copyDelegator(d);
+      db.prepare(`INSERT INTO agents (id, delegator, vendor, model, repo, base, branch, brief, title, test_writer, state, token, created_at, updated_at, role, depends_on, start_from, effort, gpu)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?)`).run(x.id, d.id, x.vendor, x.model, x.repo, x.base || '', x.branch, x.brief, x.title, x.test_writer ? 1 : 0,
+        token(), now(), now(), x.role || 'impl', x.depends_on ?? null, x.start_from ?? null, x.effort ?? null, x.gpu ? 1 : 0);
+      mail.addIdentity(db, x.id, x.vendor, sanitizeModel(x.model), x.repo);
+      synced(x.id);
+    }
+    await startQueued(d.id);
+    return { state: agentRow(x.id).state };
+  }
+
   const handlers = {
     whoami: (a, who) => who,
     hook: (a, who) => hook(who, a),
     report: (a, who) => report(who, a),
     ask: (a, who) => ask(who, a),
-    answer, reply, spawn, wait, agents, pause, unpause, restart, kill, merge, poll,
+    answer, reply, spawn, wait, agents, poll,
+    pause: onItsHost('pause', pause), unpause: onItsHost('unpause', unpause), restart: onItsHost('restart', restart), kill: onItsHost('kill', kill), merge: onItsHost('merge', merge),
     'agent.get': ({ agent }) => { const { token: _t, ...r } = mustAgent(agent); return r; },
-    'attach': ({ agent }) => { const a = mustAgent(agent); return { argv: host.attachArgv(a.slot, a.id) }; },
+    'attach': ({ agent }) => {
+      const a = mustAgent(agent);
+      if (a.host !== 'hub') throw new Error(`${a.id} runs on ${a.host}: run \`hauptling attach ${a.id}\` on that host`);
+      return { argv: host.attachArgv(a.slot, a.id) };
+    },
     'delegator.start': delegatorStart, 'delegator.end': delegatorEnd, 'delegator.set': delegatorSet, 'delegator.list': () => db.prepare('SELECT * FROM delegators ORDER BY created_at DESC').all(),
     handoff, resume,
     'mail.send': ({ from, to, text }, who) => sendMail(who.role === 'agent' ? who.agent : from, to, text),
     'mail.check': ({ identity }, who) => mail.take(db, who.role === 'agent' ? who.agent : identity),
-    'mail.status': ({ identity, text }, who) => mail.setStatus(db, who.role === 'agent' ? who.agent : identity, text),
+    'mail.status': ({ identity, text }, who) => setStatus(who.role === 'agent' ? who.agent : identity, text),
     'mail.peers': ({ all }) => mail.peers(db, all),
     'mail.prune': ({ hours = 12, force = false }) => mail.prune(db, Number(hours), Date.now(), force),
     'test.request': async (a, who) => {
@@ -1307,5 +1611,8 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     return hub?.authenticate(tok, hostHeader) || null;
   }
 
-  return { call, authenticate, emit, freeSlots, spend, poll, watch, watchTests, startQueued, bus, askForPage, answer, pump, recover, gpuReady, refreshUsage, recordUsage, budgetState, billingFor };
+  hub?.bind({ receive, onState: placeSoon, onResult: commandDone });
+  if (satellite) syncTests();
+
+  return { call, authenticate, emit, command, startAll, syncTests, freeSlots, spend, poll, watch, watchTests, startQueued, bus, askForPage, answer, pump, recover, gpuReady, refreshUsage, recordUsage, budgetState, billingFor };
 }

@@ -98,7 +98,21 @@ export async function runBroker({ port = BROKER_PORT } = {}) {
   const host = { ...dockerHost({ log }), hostGit };
   const base = `http://127.0.0.1:${port}`;
   const hub = createHub({ db, log, emit: (...a) => core.emit(...a) });
-  const core = createCore({ db, host, github, notify: plat.notify, workerUrl: WORKER_BROKER_URL, publicUrl: base, runnerToken, hub, log });
+  // Satellite mode (PRD "Several hosts"): `hauptling satellite join` left a key, so dial the hub, run the agents it
+  // places here and send their events up. The link starts once recovery is done.
+  const joined = readSatellite();
+  let satellite = null;
+  if (joined) {
+    const gpu = await gpuAvailable().catch(() => false);
+    const capabilities = async () => {
+      const vendors = {};
+      for (const l of logins(await core.call('slots.get'), VENDORS)) if (l.ok) (vendors[l.vendor] ||= []).push(l.slot);
+      const free = Object.fromEntries(Object.entries(vendors).map(([v, signed]) => [v, core.freeSlots(v).filter(s => signed.includes(s)).length]));
+      return { vendors, free, gpu, maxWorkers: dockerConfig().maxWorkers };
+    };
+    satellite = createSatellite({ db, config: joined, capabilities, onCommand: (c) => core.command(c), log });
+  }
+  const core = createCore({ db, host, github, notify: plat.notify, workerUrl: WORKER_BROKER_URL, publicUrl: base, runnerToken, hub, satellite, log });
   const dash = createDashboard({ db, dbPath, core, host, log, slotDir, logins, report: { gh: github.gh, logPath, config: dockerConfig, secrets: () => [adminToken, runnerToken] } });
 
   const recovery = core.recover();
@@ -120,18 +134,8 @@ export async function runBroker({ port = BROKER_PORT } = {}) {
   setInterval(() => core.poll().catch(e => log(`poll: ${e.message}`)), 60e3).unref();
   setInterval(() => { try { hub.tick(); } catch (e) { log(`hub tick: ${e.message}`); } }, 30e3).unref();
   core.pump().catch(e => log(`test pump: ${e.message}`));
-  // Satellite mode (PRD "Several hosts"): `hauptling satellite join` left a key, so dial the hub. Running its workers is part 2.
-  const joined = readSatellite();
-  let satellite = null;
-  if (joined) {
-    const gpu = await gpuAvailable().catch(() => false);
-    const capabilities = async () => {
-      const vendors = {};
-      for (const l of logins(await core.call('slots.get'), VENDORS)) if (l.ok) (vendors[l.vendor] ||= []).push(l.slot);
-      const free = Object.fromEntries(Object.entries(vendors).map(([v, signed]) => [v, core.freeSlots(v).filter(s => signed.includes(s)).length]));
-      return { vendors, free, gpu, maxWorkers: dockerConfig().maxWorkers };
-    };
-    satellite = createSatellite({ db, config: joined, capabilities, log }).start();
+  if (satellite) {
+    satellite.start();
     log(`satellite mode: dialling ${joined.hub} as ${joined.host}`);
   }
   return { core, servers, db, hub, satellite };

@@ -66,6 +66,12 @@ CREATE TABLE IF NOT EXISTS join_tokens (hash TEXT PRIMARY KEY, expires_at INTEGE
 CREATE TABLE IF NOT EXISTS outbox (
   seq INTEGER PRIMARY KEY AUTOINCREMENT, agent TEXT, kind TEXT NOT NULL, text TEXT NOT NULL, at TEXT NOT NULL
 );
+-- On the hub: commands for satellites (spawn, kill, …), kept until the satellite's cmd event acknowledges them.
+CREATE TABLE IF NOT EXISTS commands (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, host TEXT NOT NULL, type TEXT NOT NULL, body TEXT NOT NULL,
+  created_at TEXT NOT NULL, acked_at TEXT, result TEXT
+);
+CREATE INDEX IF NOT EXISTS commands_pending ON commands (host, acked_at);
 `;
 
 /** Opens (and migrates) the store. Only the broker process calls this. */
@@ -93,6 +99,11 @@ export function openDb(path) {
   // Several hosts: where an agent or test job runs ('hub' = this machine).
   for (const t of ['agents', 'tests']) {
     try { db.exec(`ALTER TABLE ${t} ADD COLUMN host TEXT NOT NULL DEFAULT 'hub'`); } catch {}
+  }
+  // Part 2: placement (delegators.host NULL = auto; agents.want_host = a `spawn --host` pin; agents.gpu = `spawn --gpu`),
+  // and asks.remote_id = the satellite's own id for a question mirrored to the hub.
+  for (const [t, col] of [['delegators', 'host TEXT'], ['agents', 'want_host TEXT'], ['agents', 'gpu INTEGER NOT NULL DEFAULT 0'], ['asks', 'remote_id INTEGER']]) {
+    try { db.exec(`ALTER TABLE ${t} ADD COLUMN ${col}`); } catch {}
   }
   return db;
 }

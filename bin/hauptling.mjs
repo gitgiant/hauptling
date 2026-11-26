@@ -8,15 +8,17 @@ const USAGE = `hauptling — delegate coding tasks to Claude, Codex and agy work
 
 Delegator (host): pass --delegator ID on spawn, wait, status, handoff and resume
   (optional when only one delegator is active; required when several are)
-  delegator start [--repo R] [--cli claude|codex|agy] [--max 3] [--no-gate] [--no-automerge]   new delegator session
-  delegator set [--delegator ID] [--gate on|off] [--automerge on|off]   gate off: reports merge with no test job
+  delegator start [--repo R] [--cli claude|codex|agy] [--max 3] [--no-gate] [--no-automerge] [--host H]   new delegator session
+  delegator set [--delegator ID] [--gate on|off] [--automerge on|off] [--host H|auto]   gate off: reports merge with no test job
                                            (cancels a queued gate and merges); automerge off: stop at [ready]
+                                           --host: run its agents on H (hub = this machine, or a satellite); auto: place each
   delegator end [--delegator ID]           mark it ended (refused while it has agents)
   delegator list                           all delegators
   resume [--repo R | --delegator ID] [--cli C]  state + handoff for a new CLI (--repo: only that repo's delegator)
   handoff <text|--file F>                  store a handoff note
   spawn --brief FILE [--vendor V] [--model M | --mode cheapest|rule] [--difficulty easy|normal|hard]
         [--repo R] [--base B] [--title T] [--allow-tier] [--effort low|medium|high|…] [--test-writer [--test-writer-vendor V] [--test-writer-model M]]
+        [--host H] [--gpu]   --host: run it on H (overrides the delegator's); --gpu: only on a host with a GPU
   wait [--timeout 270] [--until-event]     block until the next event (max 280 s; run again on timeout); --until-event never times out
   status [--all]                           agents of the current delegator
   models                                   models.json table (suggest mode reasons over this)
@@ -117,12 +119,12 @@ async function main() {
       if (args._[0] === 'end') { const r = await call('delegator.end', { delegator: args.delegator }); return out(`Delegator ${r.delegator} ended.`); }
       if (args._[0] === 'set') {
         const onoff = (k) => { if (args[k] == null) return undefined; if (!['on', 'off'].includes(args[k])) throw new Error(`--${k} takes on or off`); return args[k] === 'on'; };
-        const r = await call('delegator.set', { delegator: args.delegator, gate: onoff('gate'), automerge: onoff('automerge') });
-        return out(`Delegator ${r.delegator}: gate ${r.gate ? 'on' : 'off'}, automerge ${r.automerge ? 'on' : 'off'}.`);
+        const r = await call('delegator.set', { delegator: args.delegator, gate: onoff('gate'), automerge: onoff('automerge'), host: args.host });
+        return out(`Delegator ${r.delegator}: gate ${r.gate ? 'on' : 'off'}, automerge ${r.automerge ? 'on' : 'off'}, host ${r.host || 'auto'}.`);
       }
-      if (args._[0] !== 'start') { const list = await call('delegator.list'); return out(list.map(d => `${d.id} ${d.active ? 'active' : 'ended'} ${d.cli || ''} ${d.repo || ''} max ${d.max_agents}`).join('\n') || 'none'); }
-      const r = await call('delegator.start', { repo: args.repo && normalizeRepo(args.repo), cli: args.cli, max: args.max ? Number(args.max) : 3, gate: !args['no-gate'], automerge: !args['no-automerge'] });
-      return out(`Delegator ${r.id} started. Pass --delegator ${r.id} on every spawn, wait, status, handoff and resume.`);
+      if (args._[0] !== 'start') { const list = await call('delegator.list'); return out(list.map(d => `${d.id} ${d.active ? 'active' : 'ended'} ${d.cli || ''} ${d.repo || ''} max ${d.max_agents}${d.host ? ` host ${d.host}` : ''}`).join('\n') || 'none'); }
+      const r = await call('delegator.start', { repo: args.repo && normalizeRepo(args.repo), cli: args.cli, max: args.max ? Number(args.max) : 3, gate: !args['no-gate'], automerge: !args['no-automerge'], host: args.host });
+      return out(`Delegator ${r.id} started${r.host ? ` on ${r.host}` : ''}. Pass --delegator ${r.id} on every spawn, wait, status, handoff and resume.`);
     }
     case 'resume': {
       const names = args.repo ? repoNames(args.repo) : null;
@@ -145,9 +147,9 @@ async function main() {
         delegator: args.delegator, vendor: args.vendor, model: args.model, mode: args.mode, difficulty: args.difficulty,
         repo: args.repo && normalizeRepo(args.repo), base: args.base, title: args.title, allowTier: args.allowTier, effort: args.effort,
         testWriter: args.testWriter || args.testWriterModel ? { vendor: args.testWriterVendor, model: args.testWriterModel } : false,
-        brief: readFileSync(args.brief, 'utf8'),
+        brief: readFileSync(args.brief, 'utf8'), host: args.host, gpu: Boolean(args.gpu),
       });
-      out(`${r.id} (${r.vendor} ${r.model}${r.effort ? `, effort ${r.effort}` : ''}${r.billing ? `, ${r.billing}` : ''}) ${r.state}`);
+      out(`${r.id} (${r.vendor} ${r.model}${r.effort ? `, effort ${r.effort}` : ''}${r.billing ? `, ${r.billing}` : ''}) ${r.state}${r.host && r.host !== 'hub' ? ` on ${r.host}` : ''}`);
       if (r.testWriter) out(`${r.testWriter.id} (${r.testWriter.vendor} ${r.testWriter.model}) ${r.testWriter.state} — writes spec tests first`);
       return;
     }
@@ -158,7 +160,11 @@ async function main() {
       while (args.untilEvent && !r.events.length);
       return out(r.events.length ? r.events.map(e => `[${e.kind}] ${e.text}`).join('\n') : 'No events yet (timed out). Run `hauptling wait` again.');
     }
-    case 'status': return out(board(await call('agents', { delegator: args.delegator, all: args.all })));
+    case 'status': {
+      const agents = await call('agents', { delegator: args.delegator, all: args.all });
+      const satellites = await call('satellite.list').catch(() => []);
+      return out(board(agents, { hosts: satellites.length > 0 }));
+    }
     case 'models': {
       if (args._[0] === 'prefer') return out(`prefer: ${await call('models.prefer', { value: args._[1] })}`);
       const { loadModels, table } = await import('../src/models.mjs'); return out(table(loadModels()));
@@ -330,11 +336,13 @@ function repoNames(r) {
   return names;
 }
 
-function board(agents) {
+/** `hosts`: show where each agent runs (any satellite joined), and "host offline" for those whose host is. */
+function board(agents, { hosts = false } = {}) {
   if (!agents.length) return 'No agents.';
   return agents.map(a => {
     const age = Math.round((Date.now() - Date.parse(a.created_at)) / 60e3);
-    return `${a.id.padEnd(34)} ${a.state.padEnd(8)} ${a.slot || '-'}  ${age}m  ${a.pr_url || a.branch}${a.gate ? ` gate:${a.gate}` : ''}\n    ${a.status || a.title}${a.report ? `\n    report: ${a.report}` : ''}`;
+    const where = hosts ? ` ${(a.host || 'hub').padEnd(10)}${a.host_offline ? ' (host offline)' : ''}` : '';
+    return `${a.id.padEnd(34)} ${a.state.padEnd(8)}${where} ${a.slot || '-'}  ${age}m  ${a.pr_url || a.branch}${a.gate ? ` gate:${a.gate}` : ''}\n    ${a.status || a.title}${a.report ? `\n    report: ${a.report}` : ''}`;
   }).join('\n');
 }
 
