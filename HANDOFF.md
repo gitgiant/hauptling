@@ -14,6 +14,7 @@
 - A worker on an API key: Claude's TUI should show API billing; for agy, whether `GEMINI_API_KEY` or its OAuth sign-in wins is unknown.
 - API budget (branch `api-budget`, on `codegraph`; PRD "API keys"): claude key has a $100/month budget set. Unit-tested only; needs a broker restart, then a real spawn should say `, api`, and the header an "API $x/$100" chip. Whether Claude's reported `total_cost_usd` matches the console bill is unchecked.
 - API spend across sessions and out-of-credit detection (PRD "API keys"): unit-tested only. Needs `hauptling broker restart`; unchecked on a real TUI: the screen match for "Credit balance too low", whether `--resume` restores Claude's session cost (if it does under a new `session_id`, spend double-counts).
+- Parallel test jobs per repo (PRD "CPU jobs run in parallel"): tested with fake `gh`/`git`/Docker only. Needs `hauptling broker restart` (hub and satellites); then set `"testConcurrency": 2` on a repo's base branch and check the real `gh api` read starts two jobs. A `testConcurrency` set in `~/.hauptling/config.json` overrides the new default 3.
 - Superseded gate kill (`killTestJob` on a running gate): unit-tested only; code is baked into nothing (broker-side) but needs `hauptling broker stop` to go live. Per-delegator `gate`/`automerge` (PRD "Merge gate"): unit-tested only; needs `hauptling broker stop` (broker-side) to go live. Dashboard buttons unseen in a browser. Local repos with auto-merge on still stop at `[gate-passed]` (manual `hauptling merge`), as before.
 - GPU `pause --now`, the VRAM wait and `gateGpu` on the real GPU (unit-tested only).
 - Test watchdog (PRD "Watchdog"): core logic unit-tested with docker and clock stubbed; the real `testLiveness` probe (`docker inspect`, heartbeat mtime) is unrun. Needs `hauptling image` (runner heartbeat) and `hauptling broker stop`.
@@ -22,7 +23,6 @@
 - Several hosts part 3 (PRD "Part 3"): host chips, offline/lost headlines, Hosts panel (Add host, Revoke), terminal/diff/events relayed over the link, `hauptling attach` relay, per-host usage chips. Tested with two in-process brokers only; the browser UI is unseen (no headless browser in the worker: `node scripts/dash-preview.mjs --hosts --shots DIR --only usage-1366x768`). Needs `hauptling broker restart` on the hub and every satellite; check that "Add host" through `tailscale serve` shows the https URL (`X-Forwarded-Host`/`Host`), and that the relayed terminal feels responsive (250 ms polls).
 
 ## Open
-
 - Placement's `startable` only knows the hub's own accounts; satellites' usage readings are shown on the Usage page but not used for placement.
 - nullpunkt: commit `b9a0f6e8` (drops the coagent mailbox for `hauptling mail`) sits in `nullpunkt/.worktrees/claude_opus-5-5_d72c0`, unpushed. Before `node scripts/worktree.mjs sync claude_opus-5-5_d72c0`, discard the main checkout's local edits to `.mcp.json` and `.codex/hooks.json` (the commit replaces both). Sync restarts the user's game.
 - Codex/agy: can either exclude a repo's own MCP servers? (CodeGraph reaches them via the CLI only.) agy's bare config (MCP off) is unknown.
@@ -33,7 +33,6 @@
 - Merged branches to delete: `phase-1`, `phase-3`, `phase-4`, `phase-4b`, `signin-guard`, `api-keys`, `handoff-rule`, `usage-per-vendor`, `egress-race`, `cli-fixes`.
 
 ## This machine now
-
 - Slots `hl-w1..3` signed in to claude, codex and agy; no API keys set.
 - Host has `codegraph` (npm, telemetry on unless `CODEGRAPH_TELEMETRY=0`), `uv` and `graphify` (`~/.local/bin`); this repo is indexed (`.codegraph-wsl/`, git hooks resync it).
 - Tailscale serve is on: `https://old.tailff0f31.ts.net/` → the dashboard. Off: `"/mnt/c/Program Files/Tailscale/tailscale.exe" serve --https=443 off`.

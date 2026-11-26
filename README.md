@@ -22,6 +22,8 @@ git clone https://github.com/gitgiant/hauptling && cd hauptling
 
 Options: `--slots N`, `--vendors claude,codex`, `--no-login`, `--no-host`. Also `gh auth login` once for GitHub repos.
 
+Test jobs run one per repo by default, up to 3 on the host (`testConcurrency` in `~/.hauptling/config.json`). A repo whose suite is safe to run in parallel can set `"testConcurrency": N` in its `hauptling.json` (read from the base branch).
+
 Workers run in a fresh container per task. Extra toolchains for a repo: add `hauptling.Dockerfile` at its root:
 
 ```dockerfile

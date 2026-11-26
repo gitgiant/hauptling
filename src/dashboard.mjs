@@ -202,7 +202,7 @@ export function createDashboard({ db, dbPath, core, host, hub = null, log = () =
       .map(({ attempt, retry_note, ...r }) => ({ ...r, retry: retryLabel({ state: 'running', attempt, retry_note }) }));
     const queuedRows = db.prepare("SELECT id, agent, repo, purpose, attempt, retry_note FROM tests WHERE state = 'queued' AND gpu = 0 ORDER BY created_at, rowid").all();
     const retrying = queuedRows.filter(r => r.attempt > 1).map(({ attempt, retry_note, ...r }) => ({ ...r, retry: retryLabel({ state: 'queued', attempt, retry_note }) }));
-    return { running, queued: queuedRows.length, retrying, limit: Math.max(1, Number(host.testConcurrency?.() ?? 2) || 2), line: queuedRows.map(r => r.id) };
+    return { running, queued: queuedRows.length, retrying, limit: Math.max(1, Number(host.testConcurrency?.() ?? 3) || 3), line: queuedRows.map(r => r.id) };
   }
 
   async function snapshot() {

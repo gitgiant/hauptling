@@ -3,9 +3,11 @@ import { join } from 'node:path';
 
 /*
  * Test commands for a checkout. hauptling.json (optional) overrides any field:
- *   { "install": [argv], "test": [argv], "junit": "path", "gpu": [argv], "gpuMemMB": 6144, "gateGpu": false, "pushToMain": false }
+ *   { "install": [argv], "test": [argv], "junit": "path", "gpu": [argv], "gpuMemMB": 6144, "gateGpu": false, "pushToMain": false,
+ *     "testConcurrency": 1 }
  * "gpu" is the command for `test request --gpu` (never auto-detected); "gpuMemMB" the free VRAM a GPU job
- * waits for; "gateGpu" makes the merge gate run "gpu" after "test".
+ * waits for; "gateGpu" makes the merge gate run "gpu" after "test". "testConcurrency" is how many of the repo's
+ * CPU test jobs may run at once (read from the base branch; the host's own testConcurrency still caps the total).
  * Placeholders in argv: {selector} (dropped when empty), {junit} (absolute report path).
  * Without junit the result comes from the exit code alone.
  */
