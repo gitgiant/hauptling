@@ -28,6 +28,8 @@ Delegator (host): pass --delegator ID on spawn, wait, status, handoff and resume
   test request --sha S [--selector X] [--gpu] [--timeout S] | test wait ID | test get ID | test report ID FILE
   dashboard [--print] [--host H] [--new-token]  open the dashboard (--print: show the sign-in link; --host: link via H, e.g. your Tailscale name)
   gpu status | gpu pause [--now] | gpu resume   hold the GPU test queue (--now kills and requeues the running job)
+  runner [--gpu] [--once] [--dir D] | runner token   run test jobs on this machine, no container (GPU: set "gpuRunner": "host"
+                                           in config.json; on another OS, e.g. Windows, set HAUPTLING_BROKER and HAUPTLING_TOKEN=<runner token>)
 Worker (inside a slot; HAUPTLING_AGENT is set):
   report <≤300 chars>                      finish: hauptling pushes, opens the PR, gates the merge
   ask <question> --choice A [--choice B…]  ask the user (notification + answer page); end your turn after
@@ -56,7 +58,7 @@ const [cmd, ...rest] = process.argv.slice(2);
 
 async function main() {
   const { call } = await import('../src/client.mjs');
-  const args = parseArgs(rest, { repeat: ['choice', 'artifacts'], bool: ['test-writer', 'allow-tier', 'until-event', 'host', 'all', 'gpu', 'force', 'no-host', 'no-login', 'now', 'print', 'new-token', 'no-gate', 'no-automerge'] });
+  const args = parseArgs(rest, { repeat: ['choice', 'artifacts'], bool: ['test-writer', 'allow-tier', 'until-event', 'host', 'all', 'gpu', 'force', 'no-host', 'no-login', 'now', 'print', 'new-token', 'no-gate', 'no-automerge', 'once'] });
   const text = () => args._.join(' ');
   switch (cmd) {
     case undefined: case 'help': case '--help': case '-h': return out(USAGE);
@@ -268,6 +270,20 @@ async function main() {
     case 'hook': return hook(args._[0], args._[1], call);
     case 'prepare': { const { prepare, installDeps } = await import('../src/vendors.mjs'); prepare(args._[0], args._[1]); installDeps(args._[1]); return; }
     case 'egress': { const { runEgress } = await import('../src/egress.mjs'); runEgress({ allow: args.allow, log: args.log, relay: args.relay }); return new Promise(() => {}); }
+    case 'runner': {
+      if (args._[0] === 'token') {
+        const { readBrokerFile } = await import('../src/brokerfile.mjs');
+        const info = readBrokerFile();
+        if (!info?.runnerToken) throw new Error('No broker file with a runner token here; run this on the broker host');
+        return out(info.runnerToken);
+      }
+      const { runnerLoop } = await import('../src/host-runner.mjs');
+      const { home } = await import('../src/util.mjs');
+      const { join } = await import('node:path');
+      const report = await runnerLoop({ call, gpu: Boolean(args.gpu), once: Boolean(args.once), root: resolve(args.dir || join(home(), 'runner')), log: (s) => console.log(`${new Date().toISOString()} ${s}`) });
+      if (args.once && report && report.status !== 'pass') process.exitCode = 1;
+      return;
+    }
     case 'test-exec': {
       // Inside a test container: /work is the checkout, /artifacts receives log, artifacts and report.json.
       const { execTests } = await import('../src/runner.mjs');

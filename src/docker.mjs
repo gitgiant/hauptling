@@ -592,6 +592,8 @@ export function dockerHost({ log = () => {}, docker: dockerCmd = docker } = {}) 
       return codexRollout([join(process.env.CODEX_HOME || join(homedir(), '.codex'), 'sessions')], since);
     },
     gpuConfig: () => { const c = config(); return { memMB: c.gpuMemMB, waitMinutes: c.gpuWaitMinutes }; },
+    /** "host": GPU jobs wait for `hauptling runner --gpu` (test.claim) instead of a `--gpus all` container. */
+    gpuRunner: () => (config().gpuRunner === 'host' ? 'host' : 'container'),
     testConcurrency: () => config().testConcurrency,
     maxWorkers: () => config().maxWorkers,
 

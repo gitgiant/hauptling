@@ -1069,8 +1069,9 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   /**
    * Two queues, each job in a fresh container. CPU jobs: up to `testConcurrency` at once (host
    * setting, default 3), per repo up to its hauptling.json "testConcurrency" on the base branch (default 1),
-   * FIFO otherwise. GPU jobs (`--gpus all`): one at a time. External runners use test.claim (CPU queue only,
-   * same per-repo limit).
+   * FIFO otherwise. GPU jobs (`--gpus all`): one at a time. External runners use test.claim (CPU: same
+   * per-repo limit; GPU: `hauptling runner --gpu`, behind pause and the VRAM wait). With `"gpuRunner": "host"`
+   * in config.json the broker starts no GPU containers and leaves GPU jobs to that runner.
    */
   const concurrency = () => Math.max(1, Number(host.testConcurrency?.() ?? 3) || 3);
   const pumping = { gpu: false };
@@ -1086,7 +1087,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     }
   }
   async function pumpGpu() {
-    if (pumping.gpu || !host.runTestJob) return;
+    if (pumping.gpu || !host.runTestJob || host.gpuRunner?.() === 'host') return;
     pumping.gpu = true;
     try {
       for (;;) {
@@ -1371,10 +1372,12 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   }
 
   async function claim({ wait = 25, gpu = false } = {}) {
-    if (!gpu) kvSet(db, 'runner_seen', Date.now());
+    kvSet(db, gpu ? 'gpu_runner_seen' : 'runner_seen', Date.now());
     const next = async () => {
       const loading = !gpu && loadLimits();
       if (loading) await loading;
+      // GPU: the same gate as the broker's own queue (gpu pause, free VRAM), and one job at a time.
+      if (gpu && (!(await gpuReady()) || db.prepare("SELECT 1 FROM tests WHERE state = 'running' AND gpu = 1 AND host = 'hub'").get())) return null;
       return grab(gpu);
     };
     let t = await next();

@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { cpSync, existsSync, globSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import { detect, fill } from './detect.mjs';
 import { parseJunit } from './junit.mjs';
 
@@ -14,13 +14,18 @@ import { parseJunit } from './junit.mjs';
 function run(argv, { cwd, timeout, log }) {
   return new Promise((resolve) => {
     const started = Date.now();
-    const child = spawn(argv[0], argv.slice(1), { cwd, env: { ...process.env, CI: '1' }, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+    // Windows (host runner): npm & co. are .cmd shims, so go through the shell; no process groups there.
+    const win = process.platform === 'win32';
+    const child = win
+      ? spawn(argv.map(a => (/[\s"&|<>^]/.test(a) ? `"${a.replaceAll('"', '\\"')}"` : a)).join(' '), [], { cwd, env: { ...process.env, CI: '1' }, stdio: ['ignore', 'pipe', 'pipe'], shell: true, windowsHide: true })
+      : spawn(argv[0], argv.slice(1), { cwd, env: { ...process.env, CI: '1' }, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+    const kill = () => { try { if (win) spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' }); else process.kill(-child.pid, 'SIGKILL'); } catch {} };
     let out = '';
     const take = (d) => { out += d; if (out.length > 4 << 20) out = out.slice(-2 << 20); };
     child.stdout.on('data', take);
     child.stderr.on('data', take);
     let timedOut = false;
-    const timer = setTimeout(() => { timedOut = true; try { process.kill(-child.pid, 'SIGKILL'); } catch {} }, timeout * 1000);
+    const timer = setTimeout(() => { timedOut = true; kill(); }, timeout * 1000);
     child.on('error', (e) => { out += `\n${e.message}`; });
     child.on('close', (code) => {
       clearTimeout(timer);
@@ -86,7 +91,7 @@ async function runTests(dir, { selector = '', timeout_s = 1800, artifacts = [], 
   const duration_s = (Date.now() - t0) / 1000;
   if (r.timedOut) return finish({ ...base, status: 'timeout', duration_s, notes: `timed out after ${timeout_s}s` });
   const junitPath = cfg.junit ? cfg.junit.replaceAll('{junit}', junit) : null;
-  const resolved = junitPath && !junitPath.startsWith('/') ? join(dir, junitPath) : junitPath;
+  const resolved = junitPath && !isAbsolute(junitPath) ? join(dir, junitPath) : junitPath;
   if (resolved && existsSync(resolved)) {
     const j = parseJunit(readFileSync(resolved, 'utf8'));
     const status = r.code === 0 && j.failed === 0 ? 'pass' : j.failed ? 'fail' : 'error';

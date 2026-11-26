@@ -51,7 +51,7 @@ Then start Claude, Codex or agy in that Linux shell and run `/delegator`.
 - `src/terminal.mjs` — web terminal sessions without a pty: `tmux capture-pane -e` frames, `send-keys` input (off by default, 10 min idle timeout); vendor sign-ins run in host tmux.
 - `src/keys.mjs` — optional API keys (`hauptling key set|rm|list`): one key per vendor for every slot instead of per-slot sign-ins; billed per token.
 - `src/usage.mjs` — usage normalizers: Claude/agy status line (`hauptling usage <vendor>`), Codex session logs.
-- `src/runner.mjs`, `src/detect.mjs`, `src/junit.mjs` — deterministic test jobs (inside a test container; GPU jobs get `--gpus all`, see `hauptling gpu status|pause|resume`).
+- `src/runner.mjs`, `src/detect.mjs`, `src/junit.mjs` — deterministic test jobs (inside a test container; GPU jobs get `--gpus all`, see `hauptling gpu status|pause|resume`); or `src/host-runner.mjs`: `hauptling runner --gpu` on the host, with `"gpuRunner": "host"` in config.json).
 - `src/github.mjs` — PRs and merges via the host `gh` login.
 - `models.json` — shipped defaults; override in `~/.hauptling/models.json`.
 
