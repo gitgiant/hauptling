@@ -8,6 +8,7 @@ import { token } from './util.mjs';
  *   GET  /hub/link    text/event-stream: hello, command, revoked, `: ping`
  *   POST /hub/state   {capabilities} → {acked}         the 30 s heartbeat
  *   POST /hub/events  {events:[{id, agent, kind, text, at}]} → {acked}
+ *   POST /hub/reply   {req, ok, result|error}           the answer to an `rpc` (part 3: terminal, diff, timeline)
  * Commands (part 2) are stored in `commands` and resent, in id order, every time the link opens, until the
  * satellite's `cmd` event acknowledges them (core's `receive` calls `ack`).
  * Auth: `Authorization: Bearer hls_…` and `X-Hauptling-Host: <name>`. Only SHA-256 hashes of keys and tokens are stored.
@@ -16,6 +17,8 @@ import { token } from './util.mjs';
 export const JOIN_TTL_MS = 15 * 60e3;
 export const OFFLINE_AFTER_MS = 90e3;
 export const LOST_AFTER_MS = 24 * 3600e3;
+export const RPC_WAIT_MS = 20e3;
+export const REPLY_MAX = 4 << 20;
 const HOST_NAME = /^[a-z0-9][a-z0-9.-]{0,62}$/;
 const KIND = /^[a-z][a-z0-9-]{0,39}$/;
 /** Kinds only the hub raises. */
@@ -44,6 +47,8 @@ export function checkHostName(name) {
 export function createHub({ db, emit, log = () => {}, clock = () => Date.now(), pingMs = 15e3 }) {
   const links = new Map(); // host → open SSE response
   const waiters = new Map(); // command id → resolve
+  const rpcs = new Map(); // rpc req id → {host, resolve, reject, timer}
+  let rpcSeq = 0;
   // Core binds these (it is created after the hub): `receive` takes each new satellite event inside the events
   // transaction (default: a plain delegator event); `onState` runs after a heartbeat (placement may now fit).
   let receive = (host, a, kind, text, at) => emit(a.delegator, a.id, kind, text, at);
@@ -139,7 +144,7 @@ export function createHub({ db, emit, log = () => {}, clock = () => Date.now(), 
     for (const c of pending(name)) sse(res, 'command', c);
     const ping = setInterval(() => res.write(': ping\n\n'), pingMs);
     ping.unref?.();
-    const done = () => { clearInterval(ping); if (links.get(name) === res) links.delete(name); };
+    const done = () => { clearInterval(ping); if (links.get(name) === res) { links.delete(name); failRpcs(name); } };
     req.on('close', done);
     res.on('close', done);
   }
@@ -148,7 +153,35 @@ export function createHub({ db, emit, log = () => {}, clock = () => Date.now(), 
     const res = links.get(name);
     if (!res) return;
     links.delete(name);
+    failRpcs(name);
     try { sse(res, 'revoked', { why }); res.end(); } catch {}
+  }
+
+  /**
+   * Part 3: a request the satellite answers now (terminal, diff, timeline). Sent on the link, never stored or
+   * replayed: offline → fails at once; the link closing or `ms` passing → fails. The answer comes on /hub/reply.
+   */
+  function rpc(name, op, args = {}, ms = RPC_WAIT_MS) {
+    const res = links.get(name);
+    if (!res) return Promise.reject(new HubError(503, `${name} is offline`));
+    const req = ++rpcSeq;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { rpcs.delete(req); reject(new HubError(504, `${name} did not answer ${op} within ${Math.round(ms / 1000)} s`)); }, ms);
+      timer.unref?.();
+      rpcs.set(req, { host: name, resolve, reject, timer });
+      sse(res, 'rpc', { ...args, req, op });
+    });
+  }
+  function failRpcs(name) {
+    for (const [req, r] of rpcs) if (r.host === name) { rpcs.delete(req); clearTimeout(r.timer); r.reject(new HubError(503, `${name} is offline`)); }
+  }
+  function reply(name, { req, ok, result, error } = {}) {
+    const r = rpcs.get(Number(req));
+    if (!r || r.host !== name) return { taken: false }; // late, or another host's request
+    rpcs.delete(Number(req));
+    clearTimeout(r.timer);
+    if (ok) r.resolve(result ?? null); else r.reject(new HubError(502, `${name}: ${error || 'failed'}`));
+    return { taken: true };
   }
 
   const pending = (name) => db.prepare('SELECT id, type, body FROM commands WHERE host = ? AND acked_at IS NULL ORDER BY id').all(name)
@@ -206,7 +239,7 @@ export function createHub({ db, emit, log = () => {}, clock = () => Date.now(), 
   function list() {
     return db.prepare('SELECT * FROM hosts ORDER BY name').all().map(h => ({
       name: h.name, online: Boolean(h.online), revoked: !h.key_hash, linked: links.has(h.name),
-      lastSeen: iso(h.last_seen), offlineSince: iso(h.offline_since), joinedAt: h.created_at,
+      lastSeen: iso(h.last_seen), offlineSince: iso(h.offline_since), lost: Boolean(h.lost_at), joinedAt: h.created_at,
       capabilities: h.capabilities ? JSON.parse(h.capabilities) : null,
       agents: db.prepare(`SELECT COUNT(*) n FROM agents WHERE host = ? AND state IN (${LIVE.map(() => '?').join(',')})`).get(h.name, ...LIVE).n,
       pendingCommands: db.prepare('SELECT COUNT(*) n FROM commands WHERE host = ? AND acked_at IS NULL').get(h.name).n,
@@ -232,9 +265,9 @@ export function createHub({ db, emit, log = () => {}, clock = () => Date.now(), 
   async function handle(req, res, url) {
     if (!url.pathname.startsWith('/hub/')) return false;
     const send = (code, body) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); };
-    const body = async () => {
+    const body = async (max = 1 << 20) => {
       let raw = '';
-      for await (const chunk of req) { raw += chunk; if (raw.length > 1 << 20) throw new HubError(413, 'Body too large'); }
+      for await (const chunk of req) { raw += chunk; if (raw.length > max) throw new HubError(413, 'Body too large'); }
       try { return raw ? JSON.parse(raw) : {}; } catch { throw new HubError(400, 'Bad JSON'); }
     };
     const path = url.pathname;
@@ -246,11 +279,12 @@ export function createHub({ db, emit, log = () => {}, clock = () => Date.now(), 
         log(`hub refused ${req.method} ${path} from ${hostHeader || '?'}: bad or revoked key`);
         return send(401, { error: 'Bad or revoked satellite key; join again with a new `hauptling hub token`' }), true;
       }
-      log(`hub ${who.host} ${req.method} ${path}`);
+      if (path !== '/hub/reply') log(`hub ${who.host} ${req.method} ${path}`); // replies come several a second while a terminal is open
       seen(who.host);
       if (path === '/hub/link' && req.method === 'GET') return openLink(who.host, req, res), true;
       if (path === '/hub/state' && req.method === 'POST') return send(200, state(who.host, await body())), true;
       if (path === '/hub/events' && req.method === 'POST') return send(200, events(who.host, await body())), true;
+      if (path === '/hub/reply' && req.method === 'POST') return send(200, reply(who.host, await body(REPLY_MAX))), true;
       return send(404, { error: 'Not found' }), true;
     } catch (e) {
       log(`hub error ${path}: ${e.message}`);
@@ -261,5 +295,5 @@ export function createHub({ db, emit, log = () => {}, clock = () => Date.now(), 
 
   const close = () => { for (const name of [...links.keys()]) { const r = links.get(name); links.delete(name); r.end(); } };
 
-  return { handle, authenticate, issueToken, join, revoke, list, tick, command, ack, result, linked, bind, close };
+  return { handle, authenticate, issueToken, join, revoke, list, tick, command, ack, result, linked, rpc, bind, close };
 }

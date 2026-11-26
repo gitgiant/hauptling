@@ -7,6 +7,7 @@ import { canInject } from './vendors.mjs';
 import { readFileSync } from 'node:fs';
 import { normalizeUsage, scrub, spendLine, statusText, windowSnapshot } from './usage.mjs';
 import { dashToken } from './dashboard.mjs';
+import { checkKeys } from './terminal.mjs';
 import { MAIL_MAX, STATUS_MAX, bounded, githubSlug, hex, isFamily, now, sanitizeModel, token, wslPath } from './util.mjs';
 import * as keyStore from './keys.mjs';
 
@@ -1553,9 +1554,15 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     'agent.get': ({ agent }) => { const { token: _t, ...r } = mustAgent(agent); return r; },
     'attach': ({ agent }) => {
       const a = mustAgent(agent);
-      if (a.host !== 'hub') throw new Error(`${a.id} runs on ${a.host}: run \`hauptling attach ${a.id}\` on that host`);
+      if (a.host !== 'hub') {
+        if (!hub) throw new Error(`${a.id} runs on ${a.host}: run \`hauptling attach ${a.id}\` on that host`);
+        return { remote: a.host, online: hub.linked(a.host) }; // the CLI relays it: term.screen / term.keys
+      }
       return { argv: host.attachArgv(a.slot, a.id) };
     },
+    // `hauptling attach` on the hub for an agent on a satellite (PRD "Part 3"): its screen and keys over the link.
+    'term.screen': ({ agent, since = null }) => { const a = onSatellite(agent); return hub.rpc(a.host, 'term.screen', { agent: a.id, since }); },
+    'term.keys': ({ agent, keys }) => { const a = onSatellite(agent); return hub.rpc(a.host, 'term.keys', { agent: a.id, keys: checkKeys(keys) }); },
     'delegator.start': delegatorStart, 'delegator.end': delegatorEnd, 'delegator.set': delegatorSet, 'delegator.list': () => db.prepare('SELECT * FROM delegators ORDER BY created_at DESC').all(),
     handoff, resume,
     'mail.send': ({ from, to, text }, who) => sendMail(who.role === 'agent' ? who.agent : from, to, text),
@@ -1586,6 +1593,11 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     'satellite.revoke': (a) => mustHub().revoke(a),
   };
   const mustHub = () => { if (!hub) throw new Error('This broker has no hub'); return hub; };
+  const onSatellite = (id) => {
+    const a = mustAgent(id);
+    if (a.host === 'hub' || !hub) throw new Error(`${a.id} runs on this host: \`hauptling attach ${a.id}\` uses tmux directly`);
+    return a;
+  };
 
   async function call(name, args = {}, who = { role: 'admin' }) {
     if (who.role === 'satellite' && !SATELLITE_CALLS.has(name)) throw new Error(`${name} is not allowed for satellite ${who.host}`);

@@ -265,3 +265,18 @@ table.grid td.num, table.grid th.num { text-align: right; font-variant-numeric: 
 .rp-shot { display: flex; gap: .5rem; align-items: flex-start; }
 .rp-thumb { max-width: 100%; max-height: 14rem; border: 1px solid var(--line); border-radius: 6px; }
 .rp-box [hidden] { display: none !important; }
+
+/* Several hosts (part 3): host chips, agents on an offline host, the Hosts panel. */
+.chip.host { color: var(--muted); font-size: 11px; border-color: color-mix(in srgb, var(--muted) 40%, transparent); }
+.dot.host-offline, .dot.host-lost { background: var(--muted); opacity: .45; border: none; animation: none; }
+.dhead .hosthint { margin: .4rem 0 0; }
+.hostusage { display: grid; gap: .3rem; border-top: 1px dashed var(--line); padding-top: .4rem; }
+.hostusage > .chip { justify-self: start; }
+#hosts-panel summary { cursor: pointer; list-style: revert; }
+#hosts-panel summary h2 { display: inline; }
+table.hosts td, table.hosts th { white-space: nowrap; }
+#hosts { overflow-x: auto; }
+.addhost { margin-top: .6rem; display: grid; gap: .4rem; }
+.addhost > button { justify-self: start; }
+.joincmd { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
+.joincmd code { padding: .25rem .4rem; border: 1px solid var(--line); border-radius: 4px; word-break: break-all; }

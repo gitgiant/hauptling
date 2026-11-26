@@ -43,8 +43,11 @@ function toast(msg, err = false, ms = err ? 6000 : 2500) {
   setTimeout(() => t.remove(), ms);
 }
 async function act(name, args, done) {
-  try { await api.post(`/dash/do/${name}`, args); toast(done); }
-  catch (e) { toast(`${name}: ${e.message}`, true); }
+  try {
+    const r = (await api.post(`/dash/do/${name}`, args))?.result;
+    // An agent on a satellite that is offline: the hub stored it as a command (PRD "Several hosts").
+    toast(r?.queued ? `Queued: will run when ${r.host} reconnects` : done);
+  } catch (e) { toast(`${name}: ${e.message}`, true); }
 }
 
 const ago = (iso) => {
@@ -393,9 +396,17 @@ function renderGpu(g, tq) {
   );
 }
 
+/** With satellites joined (the board has `hosts`): a small muted chip naming the agent's host; none otherwise. */
+function hostChip(a) {
+  return state.board?.hosts ? h('span', { class: 'chip host', title: a.host_state ? `host ${a.host_state}` : `runs on ${a.host}`, text: a.host }) : null;
+}
+/** The dot's class: grey for an agent whose host is offline or lost, never the working spinner. */
+const dotState = (a) => (a.host_state ? `host-${a.host_state}` : a.state);
+
 function card(a) {
   const meta = [
     h('span', { class: 'aid', title: `${a.vendor} · ${a.model} · ${a.branch}` }, vbadge(a.vendor), h('span', { class: 'mono', text: a.id })),
+    hostChip(a),
     a.pr_url ? h('a', { href: a.pr_url, target: '_blank', rel: 'noopener', onclick: (e) => e.stopPropagation(), text: `PR #${a.pr_number}` }) : null,
     a.gate ? h('span', { text: `gate: ${a.gate}` }) : null,
     a.ci_note ? h('span', { class: 'chip fail', text: `CI failed ${a.ci_note.slice(0, 7)}` }) : null,
@@ -403,8 +414,8 @@ function card(a) {
     a.ended || ['paused', 'restarting'].includes(a.state) ? null : runNow(a.test),
     usageChips(a.usage),
   ];
-  const el = h('div', { class: `card ${a.state}${state.selected === a.id ? ' selected' : ''}`, role: 'button', tabindex: '0', onclick: () => select(a.id), onkeydown: (e) => e.key === 'Enter' && select(a.id) },
-    h('span', { class: `dot ${a.state}`, title: a.state }),
+  const el = h('div', { class: `card ${dotState(a)}${state.selected === a.id ? ' selected' : ''}`, role: 'button', tabindex: '0', onclick: () => select(a.id), onkeydown: (e) => e.key === 'Enter' && select(a.id) },
+    h('span', { class: `dot ${dotState(a)}`, title: a.host_state ? `host ${a.host_state}` : a.state }),
     h('span', { class: 'title', title: a.headline || a.title, text: a.headline || a.title }),
     h('span', { class: 'elapsed', title: `started ${clock(a.created_at)}`, text: ago(a.created_at) }),
     a.headline ? h('div', { class: 'prompt', title: `Prompt: ${a.title}`, text: a.title }) : null,
@@ -494,7 +505,7 @@ function renderBoard(b) {
       idle
         ? (shut ? null : h('p', { class: 'empty', text: `No agents running · started ${ago(delegator.created_at)} ago${delegator.handoff_waiting ? ' · handoff waiting' : ''}` }))
         : shut
-          ? h('div', { class: 'dots' }, list.map(a => h('button', { type: 'button', class: `dotbtn${state.selected === a.id ? ' selected' : ''}`, title: `${a.id} · ${a.state}`, 'aria-label': `${a.id}, ${a.state}`, onclick: () => select(a.id) }, h('span', { class: `dot ${a.state}` }))))
+          ? h('div', { class: 'dots' }, list.map(a => h('button', { type: 'button', class: `dotbtn${state.selected === a.id ? ' selected' : ''}`, title: `${a.id} · ${a.host_state ? `host ${a.host_state}` : a.state}`, 'aria-label': `${a.id}, ${a.host_state ? `host ${a.host_state}` : a.state}`, onclick: () => select(a.id) }, h('span', { class: `dot ${dotState(a)}` }))))
           : h('div', { class: 'cards' }, list.map(card))));
   }
   if (recent.length) {
@@ -539,7 +550,7 @@ function renderDetailHead(a, el) {
     h('h2', { text: a.headline || a.title }),
     a.headline ? h('p', { class: 'prompt', title: 'Prompt (spawn title)', text: a.title }) : null,
     h('div', { class: 'meta' },
-      h('span', { class: 'aid' }, vbadge(a.vendor), h('span', { class: 'mono', text: a.id })), h('span', { text: a.state }), h('span', { text: `${a.vendor} · ${a.model}${a.billing ? ` · ${a.billing === 'api' ? 'API' : 'plan'}` : ''}` }),
+      h('span', { class: 'aid' }, vbadge(a.vendor), h('span', { class: 'mono', text: a.id })), hostChip(a), h('span', { text: a.host_state ? `host ${a.host_state}` : a.state }), h('span', { text: `${a.vendor} · ${a.model}${a.billing ? ` · ${a.billing === 'api' ? 'API' : 'plan'}` : ''}` }),
       h('span', { class: 'mono', text: `${a.branch} → ${a.base}` }), h('span', { class: 'mono', text: a.repo }),
       a.pr_url ? h('a', { href: a.pr_url, target: '_blank', rel: 'noopener', text: `PR #${a.pr_number}` }) : null,
       h('span', { text: `started ${clock(a.created_at)} (${ago(a.created_at)})` }),
@@ -560,6 +571,7 @@ function renderDetailHead(a, el) {
         ? h('button', { onclick: () => confirm(`Restart ${a.id}? Its branch and working tree will be kept.`) && act('restart', { agent: a.id }, `${a.id} restarted`) }, 'Restart') : null,
       h('button', { class: 'danger', onclick: () => confirm(`Kill ${a.id}? Its container and clone are removed.`) && act('kill', { agent: a.id }, `${a.id} killed`) }, 'Kill'),
       h('span', { class: 'mono empty', text: `hauptling attach ${a.id}` })),
+    a.host_state && !a.ended ? h('p', { class: 'resets hosthint', text: `${a.host} is ${a.host_state}: kill, pause, restart, run now and replies will run when ${a.host} reconnects.` }) : null,
   );
   if (hadFocus) reply.text.focus();
 }
@@ -669,6 +681,8 @@ function openTerminal(container, sid, { autoInput = false, onEnd } = {}) {
     pre.replaceChildren(ansiFragment(JSON.parse(e.data).text.replace(/\s+$/, '')));
     if (atBottom) pre.scrollTop = pre.scrollHeight;
   });
+  // A satellite agent's terminal relayed by the hub: "<host> is offline; waiting…", cleared ('') when it is back.
+  es.addEventListener('note', (e) => { note.textContent = JSON.parse(e.data).text; });
   es.addEventListener('input', async (e) => {
     const st = JSON.parse(e.data);
     setInput(st);
@@ -712,6 +726,8 @@ async function loadUsage() {
         v.key && !v.budget ? h('div', { class: 'ok', title: `Every slot uses this key; billed per token. hauptling key rm ${v.vendor} switches back to sign-ins.`, text: `✓ API key ${v.key}` })
           : h('div', { class: signed === v.slots.length ? 'ok' : 'no', text: `${signed === v.slots.length ? '✓' : '✗'} signed in on ${signed}/${v.slots.length} slots${v.budget ? ' (after the API budget)' : ''}` }),
         v.limits.length ? v.limits.sort((a) => (a.window === '5h' ? -1 : 1)).map(meter) : h('p', { class: 'resets', text: 'No usage reported yet; workers report it while they run.' }),
+        (v.hosts || []).map(x => h('div', { class: 'hostusage' }, h('span', { class: 'chip host', title: x.online ? 'online' : 'offline: last reading', text: x.host }),
+          [...x.limits].sort((a) => (a.window === '5h' ? -1 : 1)).map(meter))),
         v.key && !v.budget ? null : h('details', { class: 'slots', open: signed < v.slots.length },
           h('summary', { text: 'Slot sign-ins' }),
           v.slots.map(s => h('div', { class: 'slotrow' },
@@ -721,6 +737,7 @@ async function loadUsage() {
             s.busy ? h('span', { class: 'resets', text: `locked: ${s.busy} running` }) : null))));
     })));
     renderSpend(u.spend);
+    renderHosts(u.hosts);
   } catch (e) { if (state.view === 'usage') toast(e.message, true); }
   finally { usageTimer = setTimeout(loadUsage, state.view === 'usage' ? 15e3 : 30e3); }
 }
@@ -742,6 +759,13 @@ function renderUsageBar(u) {
       ls.length ? h('span', { class: 'minis' }, ls.map(l => h('span', { class: `mini ${level(l.used_pct)}` }, h('span', { style: `width:${Math.min(100, l.used_pct)}%` }))))
         : h('span', { class: 'vnone', text: '–' }));
   });
+  // Satellites' accounts (part 3): one chip per vendor and host, `vendor@host`.
+  for (const v of u.vendors) for (const x of v.hosts || []) {
+    const ls = [...x.limits].sort((a) => (a.window === '5h' ? -1 : 1));
+    chips.push(h('span', { class: `uchip ${level(Math.max(0, ...ls.map(l => l.used_pct)))}`, title: `${v.vendor} on ${x.host}${x.online ? '' : ' (offline)'}: ${ls.map(l => `${l.window} ${Math.round(l.used_pct)}%`).join(' · ')}` },
+      h('span', { class: 'vname', text: `${v.vendor}@${x.host}` }),
+      h('span', { class: 'minis' }, ls.map(l => h('span', { class: `mini ${level(l.used_pct)}` }, h('span', { style: `width:${Math.min(100, l.used_pct)}%` }))))));
+  }
   for (const v of u.vendors.filter(x => x.budget)) {
     const b = v.budget;
     chips.push(h('span', { class: `uchip spend ${b.spent >= b.usd ? 'full' : b.spent >= b.stop_at ? 'warn' : ''}`, title: `${v.vendor} API budget this month (resets ${new Date(b.until).toLocaleDateString()}); at $${b.stop_at} new workers move to your plan` },
@@ -750,6 +774,42 @@ function renderUsageBar(u) {
   const t = u.spend.total;
   chips.push(h('span', { class: 'uchip spend', title: t ? `Spend, last 30 days: ${t.agents} agents · ${kfmt(t.tokens_in)} in / ${kfmt(t.tokens_out)} out tokens` : 'No spend recorded yet', text: t ? money(t.cost_usd, t.estimated > 0) : '$0' }));
   put($('#usagebar'), ...chips);
+}
+/** Usage page, only with satellites: each host's link, sign-ins, free slots, GPU and workers; revoke and "Add host". */
+function renderHosts(hosts) {
+  const panel = $('#hosts-panel');
+  if (!hosts) { panel.hidden = true; return; }
+  panel.hidden = false;
+  const det = panel.querySelector('details');
+  if (!det.dataset.wired) {
+    det.dataset.wired = '1';
+    det.open = localStorage.getItem('hl-hosts') !== '0';
+    det.addEventListener('toggle', () => { try { localStorage.setItem('hl-hosts', det.open ? '1' : '0'); } catch {} });
+  }
+  const list = (o) => Object.entries(o || {}).map(([v, x]) => `${v} ${Array.isArray(x) ? x.join(', ') || '–' : x}`).join(' · ') || '–';
+  put($('#hosts'),
+    h('table', { class: 'grid hosts' },
+      h('thead', {}, h('tr', {}, ['host', 'state', 'last seen', 'signed in', 'free slots', 'GPU', 'workers', ''].map(t => h('th', { text: t })))),
+      h('tbody', {}, hosts.map(x => h('tr', {},
+        h('td', { class: 'mono', text: x.name }),
+        h('td', { class: x.revoked ? 'no' : x.online ? 'ok' : 'no', text: x.revoked ? 'revoked' : x.online ? 'online' : x.lost ? 'lost' : 'offline' }),
+        h('td', { title: x.lastSeen ? clock(x.lastSeen) : '', text: x.lastSeen ? `${ago(x.lastSeen)} ago` : 'never' }),
+        h('td', { class: 'mono', text: list(x.vendors) }),
+        h('td', { class: 'mono', text: list(x.free) }),
+        h('td', { text: x.gpu == null ? '?' : x.gpu ? 'yes' : 'no' }),
+        h('td', { class: 'num', title: x.pendingCommands ? `${x.pendingCommands} command(s) waiting for it` : '', text: `${x.workers}/${x.maxWorkers ?? '?'}${x.pendingCommands ? ` · ${x.pendingCommands} queued` : ''}` }),
+        h('td', {}, x.revoked ? null : h('button', { class: 'danger', title: x.revoke,
+          onclick: () => confirm(`Revoke ${x.name}? Its key stops working at once; to come back it must join again with a new token.`) && act('satellite.revoke', { host: x.name }, `${x.name} revoked`).then(loadUsage) }, 'Revoke')))))),
+    h('div', { class: 'addhost' }, h('button', { onclick: addHost }, 'Add host'), h('div', { id: 'joinline' })));
+}
+async function addHost() {
+  try {
+    const t = await api.post('/dash/hosts/token', {});
+    const code = h('code', { class: 'mono', text: t.line });
+    put($('#joinline'), h('p', {}, 'Run this on the new host (expires ', h('time', { datetime: t.expiresAt, text: new Date(t.expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }), ', 15 min):'),
+      h('div', { class: 'joincmd' }, code, h('button', { onclick: () => navigator.clipboard.writeText(t.line).then(() => toast('Copied'), () => toast('Copy failed: select the line', true)) }, 'Copy')),
+      t.hubUrl ? null : h('p', { class: 'resets', text: 'Replace <hub-url> with this hub\'s tailnet URL (the `tailscale serve` address): this page was opened on localhost.' }));
+  } catch (e) { toast(e.message, true); }
 }
 function spendTable(title, rows) {
   if (!rows.length) return null;

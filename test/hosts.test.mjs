@@ -9,6 +9,8 @@ import { createCore } from '../src/core.mjs';
 import { createHub, JOIN_TTL_MS, LOST_AFTER_MS, OFFLINE_AFTER_MS } from '../src/hub.mjs';
 import { checkHubUrl, createSatellite, joinHub, readSatellite, satelliteFile } from '../src/satellite.mjs';
 import { brokerHandler } from '../src/server.mjs';
+import { createDashboard, dashToken } from '../src/dashboard.mjs';
+import { attachRemote, keysFromBytes } from '../src/terminal.mjs';
 import * as keyStore from '../src/keys.mjs';
 import { loadModels } from '../src/models.mjs';
 
@@ -30,15 +32,17 @@ async function startBroker(t, name, opts = {}) {
   const db = openDb(join(homeDir, 'hauptling.db'));
   const logs = [];
   const log = (m) => logs.push(m);
-  let core, sat = null, config = null;
+  let core, dash, sat = null, config = null;
   const hub = createHub({ db, log, clock, emit: (...a) => core.emit(...a), pingMs: 50 });
   if (joinTo) {
     ({ config } = await joinAs(joinTo, { homeDir }, name));
-    sat = createSatellite({ db, config, log, heartbeatMs: 40, minDelayMs: 10, maxDelayMs: 40, capabilities: async () => capabilities, onCommand: (c) => core.command(c) });
+    sat = createSatellite({ db, config, log, heartbeatMs: 40, minDelayMs: 10, maxDelayMs: 40, capabilities: async () => capabilities, onCommand: (c) => core.command(c), onRpc: (op, args) => dash.remote(op, args) });
     t.after(() => sat.stop());
   }
   core = createCore({ db, host, github, notify, hub, satellite: sat, remoteWaitMs: 3000, log, keys: { ...keyStore, getKey: () => null, getBudget: () => null }, models: () => loadModels(join(tmpdir(), 'none.json')), workerUrl: 'http://127.0.0.1:1', runnerToken: 'RUN' });
-  const server = createServer(brokerHandler({ core, hub, dash: { handle: async () => false }, adminToken: `ADMIN-${name}`, log }));
+  // The real dashboard (part 3): the hub's has its hub, a satellite's none (as in runBroker).
+  dash = createDashboard({ db, dbPath: join(homeDir, 'hauptling.db'), core, host, hub: joinTo ? null : hub, log });
+  const server = createServer(brokerHandler({ core, hub, dash, adminToken: `ADMIN-${name}`, log }));
   server.requestTimeout = 0;
   const listen = (port = 0) => new Promise(r => server.listen(port, '127.0.0.1', r));
   await listen();
@@ -50,7 +54,12 @@ async function startBroker(t, name, opts = {}) {
     const res = await fetch(`${url}/api/${call}`, { method: 'POST', headers: { authorization: `Bearer ${tok}`, 'content-type': 'application/json', ...(host ? { 'x-hauptling-host': host } : {}) }, body: JSON.stringify(args) });
     return { status: res.status, ...(await res.json()) };
   };
-  return { homeDir, db, hub, core, url, port, api, logs, down, up: () => listen(port), sat, config, host, github };
+  /** A dashboard request with the dashboard cookie (`cookie: null` leaves it out); POSTs carry X-Hauptling. */
+  const dashReq = async (path, { method = 'GET', body, headers = {}, cookie = `hl_dash=${dashToken(db)}` } = {}) => {
+    const res = await fetch(`${url}${path}`, { method, headers: { ...(cookie ? { cookie } : {}), ...(method === 'POST' ? { 'x-hauptling': '1', 'content-type': 'application/json' } : {}), ...headers }, body: body ? JSON.stringify(body) : undefined });
+    return { status: res.status, json: await res.json().catch(() => null) };
+  };
+  return { homeDir, db, hub, core, dash, url, port, api, dashReq, logs, down, up: () => listen(port), sat, config, host, github };
 }
 
 const CAPS = { vendors: { claude: ['hl-w1', 'hl-w2'] }, free: { claude: 2 }, gpu: false, maxWorkers: 6 };
@@ -289,6 +298,9 @@ function fakeHost({ gpu = false, maxWorkers = 6 } = {}) {
       if (g?.[0] === 'rev-parse' && g[1] === '--abbrev-ref') return { stdout: 'main\n' };
       if (g?.[0] === 'rev-parse') return { stdout: 'abc1234def\n' };
       if (g?.[0] === 'rev-list') return { stdout: '1\n' };
+      if (g?.[0] === 'merge-base') return { stdout: 'abc1234def567\n' };
+      if (g?.[0] === 'diff' && g[1] === '--stat=120') return { stdout: ' a.txt | 1 +\n' };
+      if (g?.[0] === 'diff') return { stdout: 'diff --git a/a.txt b/a.txt\n+made on sat1\n' };
       if (argv[0] === 'cat') throw new Error('no file');
       return { stdout: '' };
     },
@@ -298,6 +310,9 @@ function fakeHost({ gpu = false, maxWorkers = 6 } = {}) {
     async unpauseWorker(slot, id) { calls.push(['unpause', id]); },
     async tmuxType(slot, id, text) { typed.push([id, text]); },
     async tmuxAlive() { return true; },
+    screen: 'hello from the satellite\n', screens: 0, keys: [],
+    async tmuxScreen() { this.screens++; return this.screen; },
+    async tmuxKeys(slot, id, args) { this.keys.push([id, ...args]); },
     async runTestJob(job) { calls.push(['test', job.id]); return { id: job.id, sha: job.sha, status: 'pass', passed: 3, failed: 0, skipped: 0, failures: [], duration_s: 1 }; },
     gpuAvailable: async () => gpu,
     maxWorkers: () => maxWorkers,
@@ -552,10 +567,10 @@ test('pause, resume, reply and kill reach the satellite exactly once, also when 
   assert.equal(hubRow(id).state, 'killed', 'stays killed');
 });
 
-test('a satellite refusing a spawn fails the agent on the hub; attach points at the host', async (t) => {
+test('a satellite refusing a spawn fails the agent on the hub; attach relays through the hub', async (t) => {
   const { hub, sat, d, spawn } = await twoHosts(t);
   const { id } = await spawn();
-  assert.match((await hub.api('attach', { agent: id })).error, /runs on sat1: run `hauptling attach/);
+  assert.deepEqual((await hub.api('attach', { agent: id })).result, { remote: 'sat1', online: true });
   // A spawn command whose agent the satellite won't take (forged local repo): [failed] on the hub.
   const at = new Date().toISOString();
   hub.db.prepare(`INSERT INTO agents (id, delegator, vendor, model, repo, base, branch, brief, title, state, token, created_at, updated_at, host)
@@ -590,4 +605,229 @@ test('a test writer on a satellite hands its spec tests to the implementer throu
   assert.equal(satRow(r.id).start_from, `hl/${r.id}`, 'it starts from the test writer\'s branch');
   assert.equal(hubRow(r.testWriter.id).state, 'handed-off');
   assert.ok((await events()).some(e => e.kind === 'tests-ready'));
+});
+
+// ---------- part 3: dashboard and terminal through the hub ----------
+
+/** Reads SSE events from a dashboard stream until `until(events)` holds. */
+async function sseUntil(res, until, ms = 5000) {
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  const events = [];
+  let buf = '';
+  const end = Date.now() + ms;
+  while (!until(events)) {
+    if (Date.now() > end) { reader.cancel().catch(() => {}); throw new Error(`timed out; got ${JSON.stringify(events)}`); }
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let i;
+    while ((i = buf.indexOf('\n\n')) >= 0) {
+      const block = buf.slice(0, i); buf = buf.slice(i + 2);
+      const ev = /^event: (.+)$/m.exec(block)?.[1], data = /^data: (.+)$/m.exec(block)?.[1];
+      if (ev) events.push({ ev, data: JSON.parse(data) });
+    }
+  }
+  reader.releaseLock();
+  return events;
+}
+
+test('board: host chips and offline/lost headlines only with satellites; actions on an offline host queue', async (t) => {
+  const { hub, sat, spawn } = await twoHosts(t);
+  const { id } = await spawn();
+  let b = (await hub.dashReq('/dash/board')).json;
+  assert.deepEqual(b.hosts.map(h => [h.name, h.online]), [['hub', true], ['sat1', true]]);
+  let a = b.agents.find(x => x.id === id);
+  assert.equal(a.host, 'sat1');
+  assert.equal(a.host_state, undefined);
+
+  await sat.sat.stop();
+  await waitFor(() => !hub.hub.linked('sat1'), 'link closed');
+  hub.hub.tick(Date.now() + OFFLINE_AFTER_MS + 1000);
+  b = (await hub.dashReq('/dash/board')).json;
+  a = b.agents.find(x => x.id === id);
+  assert.equal(a.host_state, 'offline');
+  assert.equal(a.headline, 'Host offline: sat1');
+  assert.equal(a.state, 'working', 'the state stays; the board shows host offline instead');
+  for (const [call, args] of [['pause', { agent: id }], ['reply', { agent: id, text: 'hi' }]]) {
+    const r = await hub.dashReq(`/dash/do/${call}`, { method: 'POST', body: args });
+    assert.equal(r.status, 200);
+    assert.equal(r.json.result.queued, true, `${call} queues as a command`);
+    assert.equal(r.json.result.host, 'sat1');
+  }
+  hub.hub.tick(Date.now() + LOST_AFTER_MS + OFFLINE_AFTER_MS + 2000);
+  a = (await hub.dashReq('/dash/board')).json.agents.find(x => x.id === id);
+  assert.equal(a.host_state, 'lost');
+  assert.match(a.headline, /^Host lost: sat1/);
+});
+
+test('hosts panel and per-host usage on the Usage page; nothing of it without satellites', async (t) => {
+  const caps = { ...CAPS, gpu: true, usage: [{ vendor: 'claude', window: '5h', used_pct: 42, resets_at: null, at: new Date().toISOString() }] };
+  const hub = await startBroker(t, 'hub', { host: fakeHost() });
+  const before = (await hub.dashReq('/dash/usage')).json;
+  assert.equal(before.hosts, undefined);
+  assert.ok(before.vendors.every(v => !('hosts' in v)));
+  const board = (await hub.dashReq('/dash/board')).json;
+  assert.equal(board.hosts, undefined);
+  assert.ok(board.agents.every(a => !('host_state' in a)));
+
+  const sat = await startBroker(t, 'sat1', { joinTo: hub, host: fakeHost(), capabilities: caps });
+  sat.sat.start();
+  await waitFor(() => hub.hub.list()[0]?.capabilities, 'satellite state');
+  await agentOn(hub, 'sat1');
+  hub.db.prepare("UPDATE agents SET slot = 'hl-w1' WHERE host = 'sat1'").run();
+  const u = (await hub.dashReq('/dash/usage')).json;
+  assert.equal(u.hosts.length, 1);
+  const h = u.hosts[0];
+  assert.equal(h.name, 'sat1');
+  assert.equal(h.online, true);
+  assert.deepEqual(h.vendors, { claude: ['hl-w1', 'hl-w2'] });
+  assert.deepEqual(h.free, { claude: 2 });
+  assert.equal(h.gpu, true);
+  assert.equal(h.maxWorkers, 6);
+  assert.equal(h.workers, 1);
+  assert.ok(h.lastSeen);
+  assert.equal(h.revoke, 'hauptling satellite revoke sat1');
+  const claude = u.vendors.find(v => v.vendor === 'claude');
+  assert.deepEqual(claude.hosts.map(x => [x.host, x.limits.map(l => [l.window, l.used_pct])]), [['sat1', [['5h', 42]]]]);
+  assert.ok(!u.vendors.find(v => v.vendor === 'codex').hosts.length, 'no codex readings on sat1');
+});
+
+test('dashboard: join token and revoke need the dashboard cookie; satellite keys are refused', async (t) => {
+  const hub = await startBroker(t, 'hub', { host: fakeHost() });
+  const sat = await startBroker(t, 'sat1', { joinTo: hub, host: fakeHost() });
+  sat.sat.start();
+  await waitFor(() => hub.hub.linked('sat1'), 'linked');
+  const local = await hub.dashReq('/dash/hosts/token', { method: 'POST', body: {} });
+  assert.equal(local.status, 200);
+  assert.match(local.json.token, /^hlj_/);
+  assert.equal(local.json.hubUrl, null, 'loopback is no use to a satellite');
+  assert.equal(local.json.line, `hauptling satellite join <hub-url> ${local.json.token}`);
+  assert.ok(Date.parse(local.json.expiresAt) - Date.now() > JOIN_TTL_MS - 60e3);
+  const proxied = await hub.dashReq('/dash/hosts/token', { method: 'POST', body: {}, headers: { 'x-forwarded-host': 'old.tailff0f31.ts.net', 'x-forwarded-proto': 'https' } });
+  assert.equal(proxied.json.line, `hauptling satellite join https://old.tailff0f31.ts.net ${proxied.json.token}`);
+  // The token works for a join.
+  const prev = process.env.HAUPTLING_HOME;
+  process.env.HAUPTLING_HOME = mkdtempSync(join(tmpdir(), 'hl-sat2-'));
+  try { await joinHub(hub.url, proxied.json.token, { name: 'sat2' }); } finally { if (prev === undefined) delete process.env.HAUPTLING_HOME; else process.env.HAUPTLING_HOME = prev; }
+
+  const satAuth = { authorization: `Bearer ${sat.config.key}`, 'x-hauptling-host': 'sat1' };
+  assert.equal((await hub.dashReq('/dash/hosts/token', { method: 'POST', body: {}, cookie: null, headers: satAuth })).status, 401);
+  assert.equal((await hub.dashReq('/dash/do/satellite.revoke', { method: 'POST', body: { host: 'sat2' }, cookie: null, headers: satAuth })).status, 401);
+  assert.match((await hub.api('hub.token', {}, sat.config.key, 'sat1')).error, /not allowed for satellite/);
+  assert.match((await hub.api('satellite.revoke', { host: 'sat2' }, sat.config.key, 'sat1')).error, /not allowed for satellite/);
+  assert.equal((await hub.dashReq('/dash/hosts/token', { method: 'POST', body: {}, headers: { 'x-hauptling': '' } })).status, 403, 'POSTs need X-Hauptling');
+  // A satellite's own dashboard has no hosts to add.
+  assert.match((await sat.dashReq('/dash/hosts/token', { method: 'POST', body: {} })).json.error, /satellite: add hosts on the hub/);
+
+  const r = await hub.dashReq('/dash/do/satellite.revoke', { method: 'POST', body: { host: 'sat1' } });
+  assert.deepEqual(r.json.result, { host: 'sat1', revoked: true });
+  await waitFor(() => sat.sat.status().revoked, 'satellite told it is revoked');
+  assert.equal((await hub.dashReq('/dash/usage')).json.hosts.find(h => h.name === 'sat1').revoked, true);
+});
+
+test('web terminal through the hub: frames and keys round-trip over the link, the relay stops when the browser closes', async (t) => {
+  const { hub, sat, spawn, satRow } = await twoHosts(t);
+  const { id } = await spawn();
+  await waitFor(() => satRow(id)?.slot && hub.db.prepare('SELECT slot FROM agents WHERE id = ?').get(id).slot, 'slot mirrored');
+  const ctl = new AbortController();
+  const res = await fetch(`${hub.url}/dash/term/${id}/stream`, { headers: { cookie: `hl_dash=${dashToken(hub.db)}` }, signal: ctl.signal });
+  assert.equal(res.status, 200);
+  let ev = await sseUntil(res, e => e.some(x => x.ev === 'frame') && e.some(x => x.ev === 'input'));
+  assert.equal(ev.find(x => x.ev === 'frame').data.text, 'hello from the satellite\n');
+  assert.equal(ev.find(x => x.ev === 'input').data.input, false);
+  sat.host.screen = 'second screen\n';
+  ev = await sseUntil(res, e => e.some(x => x.ev === 'frame'));
+  assert.equal(ev.find(x => x.ev === 'frame').data.text, 'second screen\n');
+
+  // Keys: refused until input is on (the switch is the hub's), then typed into the worker's tmux on sat1.
+  const keys = [{ t: 'lit', v: 'yes' }, { t: 'key', v: 'Enter' }];
+  assert.match((await hub.dashReq(`/dash/term/${id}/keys`, { method: 'POST', body: { keys } })).json.error, /Input is off/);
+  assert.equal((await hub.dashReq(`/dash/term/${id}/input`, { method: 'POST', body: { on: true } })).json.input, true);
+  assert.equal((await hub.dashReq(`/dash/term/${id}/keys`, { method: 'POST', body: { keys } })).status, 200);
+  assert.deepEqual(sat.host.keys, [[id, '-l', 'yes'], [id, 'Enter']]);
+  assert.match((await hub.dashReq(`/dash/term/${id}/keys`, { method: 'POST', body: { keys: [{ t: 'key', v: 'rm -rf' }] } })).json.error, /key/i);
+
+  // The browser closes: the hub stops asking sat1 for screens.
+  ctl.abort();
+  await new Promise(r => setTimeout(r, 400));
+  const n = sat.host.screens;
+  await new Promise(r => setTimeout(r, 600));
+  assert.equal(sat.host.screens, n, 'no more term.screen after the stream closed');
+
+  // Offline: the terminal says so and resumes when sat1 is back.
+  const ctl2 = new AbortController();
+  const res2 = await fetch(`${hub.url}/dash/term/${id}/stream`, { headers: { cookie: `hl_dash=${dashToken(hub.db)}` }, signal: ctl2.signal });
+  t.after(() => ctl2.abort());
+  await sseUntil(res2, e => e.some(x => x.ev === 'frame'));
+  await sat.sat.stop();
+  ev = await sseUntil(res2, e => e.some(x => x.ev === 'note'));
+  assert.equal(ev.find(x => x.ev === 'note').data.text, 'sat1 is offline; waiting for it to reconnect');
+  assert.match((await hub.dashReq(`/dash/term/${id}/keys`, { method: 'POST', body: { keys } })).json.error, /sat1 is offline; keys are not queued/);
+  sat.host.screen = 'back again\n';
+  sat.sat.start();
+  ev = await sseUntil(res2, e => e.some(x => x.ev === 'frame'));
+  assert.equal(ev.find(x => x.ev === 'frame').data.text, 'back again\n');
+  assert.ok(ev.some(x => x.ev === 'note' && x.data.text === ''), 'the offline note clears');
+});
+
+test('hauptling attach on the hub relays a satellite agent: screen, keys, Ctrl-] detaches', async (t) => {
+  const { hub, sat, spawn } = await twoHosts(t);
+  const { id } = await spawn();
+  const s = (await hub.api('term.screen', { agent: id })).result;
+  assert.equal(s.text, 'hello from the satellite\n');
+  assert.deepEqual((await hub.api('term.screen', { agent: id, since: s.hash })).result, { same: true, alive: true });
+  assert.match((await hub.api('term.screen', { agent: id }, `tok-${id}`)).error ?? 'refused', /not allowed|refused|Unauthorized|Bad/i);
+
+  const { EventEmitter } = await import('node:events');
+  const stdin = new EventEmitter();
+  let written = '';
+  const stdout = { write: (x) => { written += x; } };
+  const call = async (name, args) => { const r = await hub.api(name, args); if (r.error) throw new Error(r.error); return r.result; };
+  const done = attachRemote({ call, agent: id, host: 'sat1', stdin, stdout, everyMs: 20 });
+  await waitFor(() => written.includes('hello from the satellite'), 'screen drawn');
+  stdin.emit('data', Buffer.from('ok\r\x1b[A'));
+  await waitFor(() => sat.host.keys.length === 3, 'keys typed on sat1');
+  assert.deepEqual(sat.host.keys, [[id, '-l', 'ok'], [id, 'Enter'], [id, 'Up']]);
+  stdin.emit('data', Buffer.from('\x1d'));
+  assert.equal(await done, 'detached');
+  assert.deepEqual(keysFromBytes('a\x03\x1b[5~\x1dz'), { keys: [{ t: 'lit', v: 'a' }, { t: 'key', v: 'C-c' }, { t: 'key', v: 'PPage' }], detach: true });
+});
+
+test('diff and events of a satellite agent come through the link; offline they say so', async (t) => {
+  const { hub, sat, spawn, satRow } = await twoHosts(t);
+  const { id } = await spawn();
+  await waitFor(() => hub.db.prepare('SELECT dir FROM agents WHERE id = ?').get(id).dir, 'dir mirrored');
+  const d = (await hub.dashReq(`/dash/agent/${id}/diff`)).json;
+  assert.equal(d.stat, ' a.txt | 1 +\n');
+  assert.deepEqual(d.files.map(f => f.path), ['a.txt']);
+  assert.match(d.files[0].patch, /made on sat1/);
+
+  // Mail kept on sat1 (between two of its workers) shows in the hub's Events pane, once.
+  // Mail both hold (it went through the hub) shows once.
+  const mailRow = 'INSERT INTO mail (recipient, sender, text, at) VALUES (?, ?, ?, ?)';
+  const at = new Date().toISOString();
+  sat.db.prepare(mailRow).run(id, 'codex_x_11111', 'only on sat1', at);
+  for (const db of [hub.db, sat.db]) db.prepare(mailRow).run(id, 'you', 'through the hub', at);
+  const e = (await hub.dashReq(`/dash/agent/${id}/events`)).json;
+  const mine = e.items.filter(i => /only on sat1/.test(i.text));
+  assert.equal(mine.length, 1);
+  assert.equal(mine[0].host, 'sat1');
+  assert.equal(e.items.filter(i => /through the hub/.test(i.text)).length, 1, 'not twice');
+
+  await sat.sat.stop();
+  await waitFor(() => !hub.hub.linked('sat1'), 'link closed');
+  assert.equal((await hub.dashReq(`/dash/agent/${id}/diff`)).json.note, 'sat1 is offline; the diff is on that host');
+  const off = (await hub.dashReq(`/dash/agent/${id}/events`)).json;
+  assert.match(off.note, /sat1 is offline/);
+  assert.deepEqual(off.items.map(i => i.text), ['you → ' + id + ': through the hub'], 'the hub\'s part only');
+  void satRow;
+});
+
+test('the satellite answers rpcs only for its own agents, never login sessions', async (t) => {
+  const { sat, spawn } = await twoHosts(t);
+  const { id } = await spawn();
+  await assert.rejects(sat.dash.remote('term.screen', { agent: 'login-hl-w1-claude' }), /No agent/);
+  await assert.rejects(sat.dash.remote('term.keys', { agent: 'nobody', keys: [] }), /No agent/);
+  await assert.rejects(sat.dash.remote('exec', { agent: id }), /Unknown rpc/);
 });
