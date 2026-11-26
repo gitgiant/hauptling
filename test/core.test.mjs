@@ -464,6 +464,30 @@ test('gpu: held while VRAM is short; error after the wait limit; gpuMemMB overri
   assert.equal(g.state(t2.id).state, 'running', '2000 MiB needed, 2500 free');
 });
 
+test('gpuRunner host: no GPU container; runner claims one job at a time, behind pause and the VRAM wait', async () => {
+  const g = await gpuSetup({ gpu: ['run-gpu'], gpuMemMB: 2000 }, { free: 1000 });
+  g.host.gpuRunner = () => 'host';
+  const runner = g.core.authenticate('RUN', 'ADMIN');
+  const a = await g.core.call('test.request', { gpu: true }, g.who);
+  const b = await g.core.call('test.request', { gpu: true }, g.who);
+  await settle();
+  assert.equal(g.host.gpu.runs.length, 0, 'the broker starts no GPU container');
+  assert.equal((await g.core.call('test.claim', { gpu: true, wait: 0 }, runner)).job, null, 'VRAM short: nothing to claim');
+  g.host.gpu.free = 4000;
+  await g.core.call('gpu.pause', {});
+  assert.equal((await g.core.call('test.claim', { gpu: true, wait: 0 }, runner)).job, null, 'paused: nothing to claim');
+  await g.core.call('gpu.resume', {});
+  await settle();
+  assert.equal(g.host.gpu.runs.length, 0, 'resume pumps, but still no container');
+  const { job } = await g.core.call('test.claim', { gpu: true, wait: 0 }, runner);
+  assert.equal(job.id, a.id);
+  assert.equal(job.gpu, true);
+  assert.equal((await g.core.call('test.claim', { gpu: true, wait: 0 }, runner)).job, null, 'one GPU job at a time');
+  await g.core.call('test.report', { id: a.id, report: g.pass(job) }, runner);
+  assert.equal(g.state(a.id).state, 'done');
+  assert.equal((await g.core.call('test.claim', { gpu: true, wait: 0 }, runner)).job.id, b.id);
+});
+
 test('gpu pause: holds new jobs, lets the running one finish; --now kills and requeues it without a new round; resume', async () => {
   const g = await gpuSetup({ gpu: ['run-gpu'] });
   const a = await g.core.call('test.request', { gpu: true }, g.who);
