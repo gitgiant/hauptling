@@ -170,7 +170,14 @@ async function main() {
       const { loadModels, table } = await import('../src/models.mjs'); return out(table(loadModels()));
     }
     case 'attach': {
-      const { argv } = await call('attach', { agent: args._[0] });
+      const r = await call('attach', { agent: args._[0] });
+      if (r.remote) {
+        // An agent on a satellite: the hub relays its screen and keys over the link (PRD "Part 3").
+        out(`Attaching to ${args._[0]} on ${r.remote} through the hub (detach: Ctrl-])…${r.online ? '' : ` ${r.remote} is offline right now.`}`);
+        const { attachRemote } = await import('../src/terminal.mjs');
+        return out(`Detached: ${await attachRemote({ call, agent: args._[0], host: r.remote })}`);
+      }
+      const { argv } = r;
       out(`Attaching to ${args._[0]} (detach: Ctrl-b d)…`);
       const { spawnSync } = await import('node:child_process');
       spawnSync(argv[0], argv.slice(1), { stdio: 'inherit' });

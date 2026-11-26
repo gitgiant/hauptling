@@ -559,6 +559,7 @@ export function createDashboard({ db, dbPath, core, host, hub = null, log = () =
         if (p === '/dash/db/query') { json(res, 200, await query(body.sql)); return true; }
         if (p === '/dash/term/login') { json(res, 200, await terms.startLogin(body.slot, body.vendor)); return true; }
         if (p === '/dash/hosts/token') {
+          if (!hub) throw new Error('This broker is a satellite: add hosts on the hub');
           const t = await core.call('hub.token');
           json(res, 200, { ...t, ...joinLine(req.headers, t.token) });
           return true;
