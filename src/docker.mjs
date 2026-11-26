@@ -8,6 +8,7 @@ import { BROKER_PORT, home, shellLine } from './util.mjs';
 import { workerKeyEnv } from './keys.mjs';
 import { INSTALL_TIMEOUT_S } from './vendors.mjs';
 import * as codegraph from './codegraph.mjs';
+import * as sessions from './sessions.mjs';
 
 /*
  * Where workers run: a fresh Docker container per task.
@@ -306,6 +307,7 @@ export function workerRunArgs({ slot, id, dir, vendor, env = {}, apiKey = false,
 }
 
 const mcpPath = (id) => join(home(), 'mcp', `${id}.json`);
+const sessionStore = (id) => join(home(), 'sessions', String(id).replace(/[^a-zA-Z0-9_-]/g, '-'));
 
 export function dockerHost({ log = () => {}, docker: dockerCmd = docker } = {}) {
   const exec = (id, args, opts) => docker(['exec', container(id), ...args], opts);
@@ -459,6 +461,10 @@ export function dockerHost({ log = () => {}, docker: dockerCmd = docker } = {}) 
       rmSync(mcpPath(id), { force: true });
     },
     attachArgv: (_slot, id) => dockerArgv(['exec', '-it', container(id), 'tmux', 'attach', '-t', 'main']),
+    // Parked workers (PRD "Parking"): the vendor session transcript, copied between a slot and ~/.hauptling/sessions/<agent>/.
+    saveSession: ({ slot, vendor, id, sessionId }) => sessions.saveSession({ slotRoot: slotDir(slot), store: sessionStore(id), vendor, sessionId }),
+    restoreSession: ({ slot, vendor, id, billing }) => sessions.restoreSession({ slotRoot: slotDir(slot), store: sessionStore(id), vendor, billing }),
+    dropSession: (id) => sessions.dropSession(sessionStore(id)),
 
     /**
      * Runs one test job: checkout on the host, tests in a fresh detached container; returns the report. A

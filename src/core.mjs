@@ -30,6 +30,10 @@ const START_PROMPT = 'Read your brief at .hauptling/brief.md and carry it out.';
 const RESTART_PREAMBLE = 'You were restarted; continue from the current state of the branch and working tree.';
 const RESUME_PROMPT = 'Continue the task from the current state of the branch and working tree.';
 const ENDED = ['merged', 'killed', 'closed', 'handed-off'];
+/** Reported and waiting on its gate or PR: `done` still has its container, `parked` gave it up (PRD "Parking"). */
+const REPORTED = ['done', 'parked'];
+const UNPARK_PREAMBLE = 'You were parked after your report (your container was removed to free its slot) and are back because you are needed again; continue from the current state of the branch and working tree.';
+const UNPARK_PROMPT = 'You were parked after your report and are back because new mail arrived for you (it comes with this message). Continue from the current state of the branch and working tree.';
 /** Paths added to every clone's .git/info/exclude: Hauptling's own files and caches tools write into the clone. */
 // node_modules/: prepare installs dependencies into the clone (vendors.mjs installDeps); a repo that doesn't ignore it must not get it committed.
 export const CLONE_EXCLUDES = ['.hauptling/', '.pnpm-store/', 'node_modules/'];
@@ -38,7 +42,7 @@ const RUNNER_CALLS = new Set(['test.claim', 'test.report', 'test.heartbeat']);
 /** What a satellite key may call on /api: nothing. It reports through /hub/state and /hub/events (ordered, exactly once). */
 const SATELLITE_CALLS = new Set();
 /** Agent columns a satellite mirrors to the hub (`state` events), plus its status line. */
-const MIRROR_FIELDS = ['state', 'slot', 'dir', 'idle', 'sha', 'report', 'pr_url', 'pr_number', 'gate', 'base', 'usage', 'billing', 'usage_start', 'paused_state', 'start_from', 'ci_note'];
+const MIRROR_FIELDS = ['state', 'unpark', 'slot', 'dir', 'idle', 'sha', 'report', 'pr_url', 'pr_number', 'gate', 'base', 'usage', 'billing', 'usage_start', 'paused_state', 'start_from', 'ci_note'];
 /** Test job columns mirrored to the hub (`test` events). */
 const TEST_FIELDS = ['id', 'agent', 'requester', 'repo', 'sha', 'branch', 'selector', 'gpu', 'artifacts', 'timeout_s', 'round', 'purpose', 'state', 'report', 'created_at', 'claimed_at', 'done_at', 'attempt', 'retry_note'];
 /** What a satellite's spawn command carries of the hub's agent row. */
@@ -48,7 +52,7 @@ const HOST_CMDS = { pause: 'pause', unpause: 'resume', restart: 'restart', kill:
 const HANDOFF_PCT = 85;
 const WORKER_RULES = readFileSync(new URL('../prompts/worker-rules.md', import.meta.url), 'utf8').trim();
 
-export function createCore({ db, host, github, notify = () => false, models = loadModels, savePrefer = setPrefer, keys = keyStore, workerUrl, publicUrl = workerUrl, runnerToken, hub = null, satellite = null, remoteWaitMs = 30e3, log = () => {}, stallMinutes = Number(process.env.HAUPTLING_STALL_MINUTES || 10), idleMinutes = Number(process.env.HAUPTLING_IDLE_MINUTES || 15) }) {
+export function createCore({ db, host, github, notify = () => false, models = loadModels, savePrefer = setPrefer, keys = keyStore, workerUrl, publicUrl = workerUrl, runnerToken, hub = null, satellite = null, remoteWaitMs = 30e3, log = () => {}, stallMinutes = Number(process.env.HAUPTLING_STALL_MINUTES || 10), idleMinutes = Number(process.env.HAUPTLING_IDLE_MINUTES || 15), parkMinutes = 2, parkDelayMs = 3000 }) {
   const changing = new Set();
   const merging = new Set();
   const bus = new EventEmitter();
@@ -248,7 +252,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
    * and `gpu` come from their last heartbeat, minus the agents placed there that are still live.
    */
   function placements(a, drow, hubGpu) {
-    const pin = a.want_host || drow.host;
+    const pin = a.unpark ? 'hub' : a.want_host || drow.host; // an unparking agent stays on this host (its clone is here)
     const fits = [];
     if ((!pin || pin === 'hub') && (!a.gpu || hubGpu) && freeSlots(a.vendor).length && workerCount() < maxWorkers() && startable(a.vendor)) fits.push({ name: 'hub', live: workerCount() });
     if (hub && pin !== 'hub' && githubSlug(a.repo)) {
@@ -300,7 +304,8 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
         const active = db.prepare(`SELECT COUNT(*) n FROM agents WHERE delegator = ? AND (${inActive} OR (state = 'queued' AND host != 'hub'))`).get(d, ...ACTIVE).n;
         if (active >= drow.max_agents) return null;
         let a, place;
-        for (const q of db.prepare("SELECT * FROM agents WHERE delegator = ? AND state = 'queued' AND host = 'hub' ORDER BY created_at").all(d)) {
+        // Unparking agents first: they were reported work that is needed again (PRD "Parking").
+        for (const q of db.prepare("SELECT * FROM agents WHERE delegator = ? AND state = 'queued' AND host = 'hub' ORDER BY unpark IS NULL, created_at").all(d)) {
           [place] = placements(q, drow, hubGpu);
           if (place) { a = q; break; }
         }
@@ -320,7 +325,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
       if (!next) return started;
       started.push(next.id);
       if (next.remote) { log(`placed ${next.id} on ${next.remote}`); continue; }
-      launch(next).catch(e => {
+      (next.unpark ? unparkLaunch(next) : launch(next)).catch(e => {
         update(next.id, { state: 'failed', report: `spawn failed: ${e.message}`.slice(0, 600) });
         cancelAgentTests(next.id, 'failed');
         emit(next.delegator, next.id, 'failed', `${next.id} failed to start: ${e.message}`);
@@ -509,7 +514,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     return { ...a, base };
   }
 
-  async function workerOptions(a, { restart = false, newClone = !restart } = {}) {
+  async function workerOptions(a, { restart = false, newClone = !restart, unpark = null } = {}) {
     const cfg = models();
     const entry = findModel(cfg, a.vendor, a.model);
     // Inside the clone (auto modes don't read outside the workspace), excluded from git.
@@ -527,14 +532,15 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     // because the clone is a different mount from the worker's home.
     const exclude = `printf '%s\\n' ${CLONE_EXCLUDES.join(' ')} >> "$1/.git/info/exclude"`;
     await host.run(a.slot, ['sh', '-c', `mkdir -p "$(dirname "$0")" && cat > "$0"${newClone ? ` && ${exclude}` : ''}`, briefPath, a.dir],
-      { input: restart ? `${RESTART_PREAMBLE}\n\n${brief}` : brief });
-    const prompt = restart ? `${RESTART_PREAMBLE}\n${START_PROMPT}` : START_PROMPT;
+      { input: restart ? `${unpark ? UNPARK_PREAMBLE : RESTART_PREAMBLE}\n\n${brief}` : brief });
+    const prompt = restart ? `${unpark ? UNPARK_PREAMBLE : RESTART_PREAMBLE}\n${START_PROMPT}` : START_PROMPT;
     const argv = launchArgv(cfg, a.vendor, entry, prompt, a.effort);
     const args = argv.filter(arg => arg !== prompt);
     let resumeArgv;
     if (restart && a.session_id) {
-      if (a.vendor === 'claude') resumeArgv = [...args, '--resume', a.session_id, RESUME_PROMPT];
-      if (a.vendor === 'codex') resumeArgv = [args[0], 'resume', ...args.slice(1), a.session_id, RESUME_PROMPT];
+      const again = unpark?.mail ? UNPARK_PROMPT : RESUME_PROMPT;
+      if (a.vendor === 'claude') resumeArgv = [...args, '--resume', a.session_id, again];
+      if (a.vendor === 'codex') resumeArgv = [args[0], 'resume', ...args.slice(1), a.session_id, again];
     }
     return { slot: a.slot, id: a.id, dir: a.dir, vendor: a.vendor, apiKey: a.billing === 'api', argv, resumeArgv,
       mcp, codegraphCache: cg ? codegraph.cacheDir(a.repo) : null,
@@ -554,6 +560,8 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
       await host.stopWorker(a.slot, a.id, { paused: a.state === 'paused' });
       await host.run(a.slot, ['rm', '-rf', a.dir]).catch(() => {});
     }
+    await Promise.resolve(host.dropSession?.(a.id)).catch(e => log(`drop session ${a.id}: ${e.message}`));
+    kvDel(db, `screen:${a.id}`);
     kvDel(db, `held-gate:${a.id}`);
     kvDel(db, `held-land:${a.id}`);
     update(a.id, { state, idle: 0, paused_state: null });
@@ -561,10 +569,84 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     await startQueued(a.delegator);
   }
 
+  // ---------- parking (PRD "Parking") ----------
+  /**
+   * A reported (`done`), idle worker gives up its container: last screen and vendor session saved, container removed,
+   * slot freed, the next queued agent started. Left alone if it is reworked or merged while this runs.
+   */
+  async function park(id) {
+    const a = agentRow(id);
+    // Idle: its turn ended and no hook ran since (mail typed into it meanwhile means it is busy again).
+    if (!a || a.state !== 'done' || !a.idle || !a.slot || a.host !== 'hub' || changing.has(id) || merging.has(id)) return false;
+    changing.add(id);
+    try {
+      update(id, { idle: 0 }); // wake() types only into idle TUIs: mail arriving now waits for the unpark
+      const screen = await Promise.resolve(host.tmuxScreen?.(a.slot, a.id)).catch(() => null);
+      let saved = [];
+      if (a.session_id) saved = await Promise.resolve(host.saveSession?.({ slot: a.slot, vendor: a.vendor, id: a.id, sessionId: a.session_id })).catch(e => { log(`park ${id}: saving the session failed: ${e.message}`); return []; }) || [];
+      if (agentRow(id).state !== 'done') { // reworked meanwhile: it keeps its container
+        update(id, { idle: a.idle });
+        await wake(id).catch(e => log(`wake ${id}: ${e.message}`));
+        return false;
+      }
+      if (typeof screen === 'string' && screen) kvSet(db, `screen:${id}`, screen);
+      await host.stopWorker(a.slot, a.id);
+      const cur = agentRow(id);
+      if (ENDED.includes(cur.state)) { await Promise.resolve(host.dropSession?.(id)).catch(() => {}); kvDel(db, `screen:${id}`); return false; }
+      update(id, { state: 'parked', idle: 0 });
+      setStatus(id, `parked: ${a.title}`.slice(0, STATUS_MAX));
+      emit(a.delegator, id, 'parked', `${id} parked: container removed, ${a.slot} free for ${a.vendor}${saved.length ? '' : ' (no session saved: it will start fresh if needed)'}. Mail, a failed gate or CI, or \`hauptling restart ${id}\` bring it back.`);
+      if (cur.state !== 'done') unpark(agentRow(id), 'reworked while parking');
+      else if (mail.unread(db, id)) unpark(agentRow(id), 'mail arrived');
+    } finally { changing.delete(id); }
+    await startAll();
+    return true;
+  }
+
+  /** A parked agent is needed again: queued at the front of its delegator's queue, on this host. */
+  function unpark(a, why) {
+    update(a.id, { state: 'queued', unpark: String(why).slice(0, 200), idle: 0, paused_state: null });
+    setStatus(a.id, `queued: unparking (${why})`.slice(0, STATUS_MAX));
+    later(`unpark ${a.id}`, () => startQueued(a.delegator));
+  }
+
+  /** Starts an unparked agent on its new slot: the kept clone, its saved session copied in and resumed (else a fresh launch). */
+  async function unparkLaunch(a) {
+    let newClone = false;
+    try { await git(a, ['rev-parse', '--is-inside-work-tree']); }
+    catch (e) {
+      const exists = await host.run(a.slot, ['test', '-e', a.dir]).then(() => true, () => false);
+      if (exists) throw e;
+      a = await cloneWorker(a, { restart: true });
+      newClone = true;
+    }
+    const restored = a.session_id ? await Promise.resolve(host.restoreSession?.({ slot: a.slot, vendor: a.vendor, id: a.id, billing: a.billing })).catch(e => { log(`unpark ${a.id}: restoring the session failed: ${e.message}`); return []; }) || [] : [];
+    const options = await workerOptions(a, { restart: true, newClone, unpark: { mail: Boolean(mail.unread(db, a.id)) } });
+    if (!restored.length) options.resumeArgv = undefined; // nothing to resume: a fresh launch with the parked preamble
+    await host.startWorker(options);
+    const why = agentRow(a.id).unpark || 'needed again';
+    update(a.id, { state: 'working', unpark: null, base: a.base, idle: 0, usage_start: a.usage_start ?? JSON.stringify(windowSnapshot(db, a.vendor)) });
+    setStatus(a.id, `working: ${a.title}`.slice(0, STATUS_MAX));
+    emit(a.delegator, a.id, 'unparked', `${a.id} unparked on ${a.slot} (${options.resumeArgv ? 'session resumed' : 'fresh launch: no saved session'}): ${why}`);
+  }
+
+  /**
+   * Something needs a reported worker again (gate, CI or merge failure): back to working; unparked when it has no
+   * container. Mail sent after this reaches it (typed if its TUI is idle, by hooks otherwise or once unparked).
+   */
+  function reworkAgent(id, why, fields = {}) {
+    const cur = agentRow(id);
+    if (cur.state === 'parked') { if (Object.keys(fields).length) update(id, fields); unpark(cur, why); return; }
+    if (cur.state === 'queued' && cur.unpark) { if (Object.keys(fields).length) update(id, fields); return; } // already coming back
+    if (cur.state === 'paused' || cur.state === 'restarting') { update(id, { ...fields, paused_state: ['parked', 'unpark'].includes(cur.paused_state) ? 'unpark' : 'working' }); return; }
+    update(id, { ...fields, state: 'working' });
+  }
+
   // ---------- mail wake ----------
   /** Idle worker with unread mail: type the mail into its TUI (it can't be pushed any other way). */
   async function wake(id) {
     const a = agentRow(id);
+    if (a?.state === 'parked' && mail.unread(db, id)) { unpark(a, 'mail arrived'); return false; }
     if (!a || !a.idle || !PAUSABLE.includes(a.state) || !mail.unread(db, id)) return false;
     const lines = mail.take(db, id);
     update(id, { idle: 0 });
@@ -612,7 +694,12 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
         setStatus(identity, `working: ${a.title}`.slice(0, STATUS_MAX));
       }
       if (event === 'Stop') {
-        if (!mail.unread(db, identity)) { update(identity, { idle: 1 }); return {}; }
+        if (!mail.unread(db, identity)) {
+          update(identity, { idle: 1 });
+          // Reported and idle: give up the container (PRD "Parking"), once the TUI has finished this turn.
+          if (a.state === 'done') setTimeout(() => later(`park ${identity}`, () => park(identity)), parkDelayMs).unref?.();
+          return {};
+        }
         update(identity, { idle: 0 });
         return { block: `Mail arrived: ${mail.take(db, identity).join(' | ')}` };
       }
@@ -725,7 +812,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
         await git(a, ['push', '--quiet', 'origin', '--delete', a.branch]).catch(() => {});
       } catch (e) {
         await git(a, ['rebase', '--abort']).catch(() => {});
-        update(a.id, { state: 'working' });
+        reworkAgent(a.id, 'push to base failed');
         emit(a.delegator, a.id, 'gate-failed', `${a.id} tests passed but pushing to ${a.base} failed: ${e.message.slice(0, 200)}`);
         await sendMail('hauptling', a.id, `Tests passed, but your branch no longer applies on ${a.base}. Rebase onto origin/${a.base}, fix conflicts, commit, report again.`);
         return `pushing to ${a.base} failed: ${e.message}`;
@@ -766,7 +853,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     emit(a.delegator, a.id, 'merge-failed', `${a.id} merging into ${a.base} failed: ${message.slice(0, 400)}`);
     const current = agentRow(a.id);
     if (rework && !ENDED.includes(current.state)) {
-      update(a.id, ['paused', 'restarting'].includes(current.state) ? { paused_state: 'working' } : { state: 'working', idle: 0 });
+      reworkAgent(a.id, 'merge failed');
       await sendMail('hauptling', a.id, `Merge failed: ${message.slice(0, 120)}. Rebase onto origin/${a.base}, resolve conflicts, test, then report again.`.slice(0, MAIL_MAX));
     }
     return message;
@@ -1151,7 +1238,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     }
     const summary = `${r.status}: ${r.passed} passed, ${r.failed} failed${r.failures?.length ? ` — ${r.failures.slice(0, 2).map(f => f.test_id).join('; ')}` : ''}`;
     if (r.status !== 'pass') {
-      update(a.id, { state: 'working' });
+      reworkAgent(a.id, 'gate failed');
       emit(a.delegator, a.id, 'gate-failed', `${a.id} gate tests ${summary}`);
       await sendMail('hauptling', a.id, `Gate test job ${t.id} on ${t.sha.slice(0, 8)} ${summary}. \`hauptling test get ${t.id}\` for details. Fix, commit, then report again.`.slice(0, MAIL_MAX));
       return;
@@ -1250,6 +1337,11 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
 
   const pause = ({ agent }) => lifecycle(agent, async a => {
     if (a.state === 'paused') return { paused: a.id };
+    if (a.state === 'parked') { // no container to freeze: holds its gate and merge only
+      update(a.id, { state: 'paused', paused_state: 'parked' });
+      emit(a.delegator, a.id, 'paused', `${a.id} paused (parked)`);
+      return { paused: a.id };
+    }
     if (!a.slot || !PAUSABLE.includes(a.state)) throw new Error(`${a.id} is ${a.state}; no worker to pause`);
     update(a.id, { state: 'paused', paused_state: a.state });
     try { await host.pauseWorker(a.slot, a.id); }
@@ -1264,6 +1356,15 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
 
   const unpause = ({ agent }) => lifecycle(agent, async a => {
     if (a.state !== 'paused') throw new Error(`${a.id} is ${a.state}; only paused workers can resume`);
+    if (['parked', 'unpark'].includes(a.paused_state)) { // paused while parked: no container
+      update(a.id, { state: 'parked', paused_state: null });
+      setStatus(a.id, `parked: ${a.title}`.slice(0, STATUS_MAX));
+      await releaseHeldWork(a.id);
+      if (a.paused_state === 'unpark' && agentRow(a.id).state === 'parked') unpark(agentRow(a.id), 'reworked while paused');
+      await wake(a.id).catch(e => log(`wake ${a.id}: ${e.message}`));
+      emit(a.delegator, a.id, 'resumed', `${a.id} resumed`);
+      return { resumed: a.id };
+    }
     await host.unpauseWorker(a.slot, a.id);
     update(a.id, { state: agentRow(a.id).paused_state, paused_state: null });
     mail.touch(db, a.id);
@@ -1274,6 +1375,13 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   });
 
   const restart = ({ agent }) => lifecycle(agent, async a => {
+    if (a.state === 'parked' || (a.state === 'paused' && ['parked', 'unpark'].includes(a.paused_state))) {
+      // No container: unpark it (front of the queue, any free slot); its saved session resumes.
+      unpark(a, 'restart');
+      await startQueued(a.delegator);
+      if (a.state === 'paused') await releaseHeldWork(a.id);
+      return { restarted: a.id, state: agentRow(a.id).state };
+    }
     if (![...PAUSABLE, 'paused', 'exited', 'failed', 'restarting'].includes(a.state) || !a.dir) throw new Error(`${a.id} is ${a.state}; no worker to restart`);
     const free = freeSlots(a.vendor, a.id);
     const slot = a.slot && free.includes(a.slot) ? a.slot : free[0];
@@ -1324,7 +1432,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   /** Manual merge, for when auto-merge is off (or local repos): needs a passing gate test unless the gate is off or GitHub's own checks gate it. */
   async function merge({ agent }) {
     const a = mustAgent(agent);
-    if (a.state !== 'done') throw new Error(`${a.id} is ${a.state}; merge works after it reports`);
+    if (!REPORTED.includes(a.state)) throw new Error(`${a.id} is ${a.state}; merge works after it reports`);
     if (githubSlug(a.repo) && !a.pr_number && a.gate !== 'push') throw new Error(`${a.id} has no PR yet`);
     if (delegatorRow(a.delegator).gate && a.gate !== 'ci') {
       const t = db.prepare("SELECT report FROM tests WHERE agent = ? AND purpose = 'gate' AND sha = ? AND state = 'done'").get(a.id, a.sha);
@@ -1343,6 +1451,10 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
    */
   const PROMPT = /(Run this command\?|Allow this|Do you want to|Requesting permission|\(y\/n\)|Approve|Press enter to continue)/i;
   async function watch(at = Date.now()) {
+    // Reported workers whose TUI has been quiet for `parkMinutes` give up their container (PRD "Parking").
+    for (const a of db.prepare("SELECT a.id, i.seen_at FROM agents a JOIN identities i ON i.identity = a.id WHERE a.state = 'done' AND a.slot IS NOT NULL AND a.host = 'hub'").all()) {
+      if (at - Date.parse(a.seen_at) >= parkMinutes * 60e3) await park(a.id).catch(e => log(`park ${a.id}: ${e.message}`));
+    }
     for (const a of db.prepare("SELECT a.*, i.seen_at FROM agents a JOIN identities i ON i.identity = a.id WHERE a.state IN ('working','blocked') AND a.slot IS NOT NULL AND a.host = 'hub'").all()) {
       const unchanged = () => {
         const current = agentRow(a.id);
@@ -1404,7 +1516,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     await watch();
     await watchTests().catch(e => log(`test watchdog: ${e.message}`));
     syncTests();
-    for (const a of db.prepare("SELECT * FROM agents WHERE state IN ('done','working') AND pr_number IS NOT NULL AND host = 'hub'").all()) {
+    for (const a of db.prepare("SELECT * FROM agents WHERE state IN ('done','parked','working') AND pr_number IS NOT NULL AND host = 'hub'").all()) {
       try {
         const slug = githubSlug(a.repo);
         const pr = await github.prView(slug, a.pr_number);
@@ -1420,7 +1532,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
         }
         const failed = (pr.statusCheckRollup || []).filter(c => ['FAILURE', 'ERROR', 'TIMED_OUT', 'CANCELLED'].includes(c.conclusion || c.state));
         if (failed.length && a.ci_note !== pr.headRefOid) {
-          update(a.id, { ci_note: pr.headRefOid, state: 'working' });
+          reworkAgent(a.id, 'CI failed', { ci_note: pr.headRefOid });
           await sendMail('hauptling', a.id, `CI failed on ${pr.headRefOid.slice(0, 8)}: ${failed.map(c => c.name || c.context).join(', ')}. Reproduce it in your clone, fix, commit, then report again.`.slice(0, MAIL_MAX));
         }
       } catch (e) { log(`poll ${a.id}: ${e.message}`); }
@@ -1447,7 +1559,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     if (gate != null) db.prepare('UPDATE delegators SET gate = ? WHERE id = ?').run(gate ? 1 : 0, d);
     if (automerge != null) db.prepare('UPDATE delegators SET automerge = ? WHERE id = ?').run(automerge ? 1 : 0, d);
     if (gate === false) {
-      const waiting = db.prepare("SELECT DISTINCT a.id FROM agents a JOIN tests t ON t.agent = a.id WHERE a.delegator = ? AND a.host = 'hub' AND a.state = 'done' AND t.purpose = 'gate' AND t.state IN ('queued', 'running') AND t.sha = a.sha").all(d);
+      const waiting = db.prepare("SELECT DISTINCT a.id FROM agents a JOIN tests t ON t.agent = a.id WHERE a.delegator = ? AND a.host = 'hub' AND a.state IN ('done', 'parked') AND t.purpose = 'gate' AND t.state IN ('queued', 'running') AND t.sha = a.sha").all(d);
       for (const { id } of waiting) {
         cancelTests(db.prepare("SELECT id, state FROM tests WHERE agent = ? AND purpose = 'gate' AND state IN ('queued', 'running')").all(id), 'merge gate turned off');
         update(id, { gate: 'off' });
@@ -1469,7 +1581,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   function delegatorEnd({ delegator }) {
     const d = delegatorId(delegator);
     // Running or still to start; failed/exited ones need no delegator.
-    const live = db.prepare(`SELECT id FROM agents WHERE delegator = ? AND state IN (${[...ACTIVE, 'queued', 'waiting'].map(x => `'${x}'`).join(',')})`).all(d).map(r => r.id);
+    const live = db.prepare(`SELECT id FROM agents WHERE delegator = ? AND state IN (${[...ACTIVE, 'parked', 'queued', 'waiting'].map(x => `'${x}'`).join(',')})`).all(d).map(r => r.id);
     if (live.length) throw new Error(`${d} still has agents: ${live.join(', ')}. Wait for them, or \`hauptling kill\` them first.`);
     db.prepare('UPDATE delegators SET active = 0 WHERE id = ?').run(d);
     return { delegator: d };
@@ -1649,6 +1761,9 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     'agent.get': ({ agent }) => { const { token: _t, ...r } = mustAgent(agent); return r; },
     'attach': ({ agent }) => {
       const a = mustAgent(agent);
+      if (a.state === 'parked' || (a.state === 'queued' && a.unpark) || (a.state === 'paused' && ['parked', 'unpark'].includes(a.paused_state))) {
+        throw new Error(`${a.id} is parked: its container was removed after it reported, to free its slot. \`hauptling restart ${a.id}\` brings it back with its session; mail to it does too.`);
+      }
       if (a.host !== 'hub') {
         if (!hub) throw new Error(`${a.id} runs on ${a.host}: run \`hauptling attach ${a.id}\` on that host`);
         return { remote: a.host, online: hub.linked(a.host) }; // the CLI relays it: term.screen / term.keys

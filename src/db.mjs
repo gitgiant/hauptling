@@ -84,7 +84,7 @@ export function openDb(path) {
   // usage: latest normalized usage JSON (src/usage.mjs); kept as the final total once the agent ends.
   // billing: 'api' (the vendor's API key) or 'plan' (the slot's sign-in), fixed when the agent starts.
   // usage_start: the vendor's window readings at launch (src/usage.mjs windowSnapshot), for per-task deltas.
-  for (const col of ["role TEXT NOT NULL DEFAULT 'impl'", 'depends_on TEXT', 'start_from TEXT', 'usage TEXT', 'billing TEXT', 'usage_start TEXT', 'effort TEXT', 'paused_state TEXT']) {
+  for (const col of ["role TEXT NOT NULL DEFAULT 'impl'", 'depends_on TEXT', 'start_from TEXT', 'usage TEXT', 'billing TEXT', 'usage_start TEXT', 'effort TEXT', 'paused_state TEXT', 'unpark TEXT']) {
     try { db.exec(`ALTER TABLE agents ADD COLUMN ${col}`); } catch {}
   }
   try { db.exec('ALTER TABLE asks ADD COLUMN nonce TEXT'); } catch {}

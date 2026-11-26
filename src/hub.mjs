@@ -24,7 +24,7 @@ const KIND = /^[a-z][a-z0-9-]{0,39}$/;
 /** Kinds only the hub raises. */
 const HUB_KINDS = new Set(['host-lost']);
 /** Agent states that still hold (or wait for) a worker; ended and failed ones don't care where their host went. */
-const LIVE = ['queued', 'waiting', 'spawning', 'restarting', 'paused', 'working', 'blocked', 'done'];
+const LIVE = ['queued', 'waiting', 'spawning', 'restarting', 'paused', 'working', 'blocked', 'done', 'parked'];
 
 const sha = (s) => createHash('sha256').update(String(s)).digest('hex');
 const iso = (ms) => (ms == null ? null : new Date(ms).toISOString());

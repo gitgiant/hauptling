@@ -39,7 +39,7 @@ async function startBroker(t, name, opts = {}) {
     sat = createSatellite({ db, config, log, heartbeatMs: 40, minDelayMs: 10, maxDelayMs: 40, capabilities: async () => capabilities, onCommand: (c) => core.command(c), onRpc: (op, args) => dash.remote(op, args) });
     t.after(() => sat.stop());
   }
-  core = createCore({ db, host, github, notify, hub, satellite: sat, remoteWaitMs: 3000, log, keys: { ...keyStore, getKey: () => null, getBudget: () => null }, models: () => loadModels(join(tmpdir(), 'none.json')), workerUrl: 'http://127.0.0.1:1', runnerToken: 'RUN' });
+  core = createCore({ db, host, github, notify, hub, satellite: sat, remoteWaitMs: 3000, parkDelayMs: 0, log, keys: { ...keyStore, getKey: () => null, getBudget: () => null }, models: () => loadModels(join(tmpdir(), 'none.json')), workerUrl: 'http://127.0.0.1:1', runnerToken: 'RUN' });
   // The real dashboard (part 3): the hub's has its hub, a satellite's none (as in runBroker).
   dash = createDashboard({ db, dbPath: join(homeDir, 'hauptling.db'), core, host, hub: joinTo ? null : hub, log });
   const server = createServer(brokerHandler({ core, hub, dash, adminToken: `ADMIN-${name}`, log }));
@@ -475,6 +475,28 @@ test('a spawn on a satellite runs there; report, gate-passed and merged reach th
   assert.equal((await hub.api('test.get', { id: job.id })).result.report.passed, 3);
   assert.equal(sat.db.prepare('SELECT COUNT(*) n FROM events').get().n, 0, 'the satellite keeps no delegator events');
   await waitFor(() => !hub.db.prepare('SELECT 1 FROM commands WHERE acked_at IS NULL').get(), 'spawn acknowledged');
+});
+
+test('a reported worker parks on its satellite, the hub mirrors it, and a reply from the hub unparks it there', async (t) => {
+  const { hub, sat, d, spawn, hubRow, satRow, events } = await twoHosts(t);
+  await hub.api('delegator.set', { delegator: d, automerge: false }); // stays reported after its gate
+  const { id } = await spawn();
+  const who = sat.core.authenticate(satRow(id).token, 'x');
+  await sat.core.call('report', { text: 'did it' }, who);
+  await sat.core.call('hook', { vendor: 'claude', event: 'Stop' }, who);
+  await waitFor(() => hubRow(id).state === 'parked', 'parked, mirrored on the hub');
+  assert.equal(satRow(id).state, 'parked');
+  assert.ok(sat.host.calls.some(c => c[0] === 'stop' && c[1] === id), 'the satellite removed the container');
+  assert.equal(hub.host.calls.length, 0, 'the hub ran nothing');
+  await waitFor(async () => (await events()).some(e => e.kind === 'parked'), '[parked] on the hub');
+  const att = await hub.api('attach', { agent: id });
+  assert.match(att.error, /is parked/);
+
+  assert.deepEqual((await hub.api('reply', { agent: id, text: 'one more thing' })).result, { sent: [id] });
+  await waitFor(() => hubRow(id).state === 'working', 'unparked on sat1');
+  assert.equal(sat.host.calls.filter(c => c[0] === 'start' && c[2] === id).length, 2, 'started again on the satellite');
+  assert.equal(hubRow(id).host, 'sat1');
+  await waitFor(async () => (await events()).some(e => e.kind === 'unparked'), '[unparked] on the hub');
 });
 
 test('an ask on a satellite is answered on the hub; mail between hosts goes both ways', async (t) => {

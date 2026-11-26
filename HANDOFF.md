@@ -21,6 +21,8 @@
 - Several hosts parts 1–2 (PRD "Several hosts", "Part 2"): link, placement, commands and the hub mirror are tested with two brokers in one process (Docker and `gh` stubbed) only. Needs `hauptling image` (the CLI gained `--host`/`--gpu`) and `hauptling broker restart`, then a real join from a second host through the `tailscale serve` URL: SSE through the proxy, a real spawn → PR → merge on the satellite with its own `gh`, and a satellite stall notification reaching this machine.
 - Several hosts part 3 (PRD "Part 3"): host chips, offline/lost headlines, Hosts panel (Add host, Revoke), terminal/diff/events relayed over the link, `hauptling attach` relay, per-host usage chips. Tested with two in-process brokers only; the browser UI is unseen (no headless browser in the worker: `node scripts/dash-preview.mjs --hosts --shots DIR --only usage-1366x768`). Needs `hauptling broker restart` on the hub and every satellite; check that "Add host" through `tailscale serve` shows the https URL (`X-Forwarded-Host`/`Host`), and that the relayed terminal feels responsive (250 ms polls).
 
+- Parking (PRD "Parking", branch `hl/claude_opus-5-5_985e5`): stubbed tests only. Needs `hauptling broker restart`. Unchecked on real TUIs: that a Claude/Codex session copied into another slot resumes (`--resume` / `codex resume`), that mail arrives via SessionStart/first prompt after resume, the 3 s park delay vs. the TUI's last transcript write, and the saved screen in the Terminal tab.
+
 ## Open
 
 - Placement's `startable` only knows the hub's own accounts; satellites' usage readings are shown on the Usage page but not used for placement.

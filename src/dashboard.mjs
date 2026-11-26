@@ -30,7 +30,7 @@ const WEB = fileURLToPath(new URL('../web/dashboard/', import.meta.url));
 const ENDED = ['merged', 'killed', 'closed', 'handed-off'];
 const NO_SESSION = [...ENDED, 'failed', 'queued', 'waiting'];
 /** States in which an agent still has (or waits for) a worker on its host, so that host going offline matters. */
-const HOST_LIVE = ['queued', 'waiting', 'spawning', 'restarting', 'paused', 'working', 'blocked', 'done'];
+const HOST_LIVE = ['queued', 'waiting', 'spawning', 'restarting', 'paused', 'working', 'blocked', 'done', 'parked'];
 const WORKER_LIVE = ['spawning', 'restarting', 'paused', 'working', 'blocked', 'done'];
 /** A terminal relayed from a satellite ends after this many bytes; reopening starts a new one. */
 export const RELAY_MAX = 32 << 20;
@@ -54,11 +54,12 @@ export function headline(a) {
   const why = (a.status || '').replace(/^[a-z-]+:\s*/, '');
   if (a.host_state === 'lost') return `Host lost: ${a.host} (offline over 24 h)`;
   if (a.host_state === 'offline') return `Host offline: ${a.host}`;
+  if (a.state === 'parked') return `${headline({ ...a, state: 'done' })} (parked)`;
   switch (a.state) {
     case 'paused': return 'Paused by you';
     case 'restarting': return 'Restarting its session';
     case 'blocked': return a.ask ? `Needs your answer: ${a.ask.question}` : `Stuck${why ? `: ${why}` : ''}; attach or message it`;
-    case 'queued': return 'Queued: waiting for a free worker slot';
+    case 'queued': return a.unpark ? `Unparking (${a.unpark}): waiting for a free ${a.vendor} slot` : 'Queued: waiting for a free worker slot';
     case 'waiting': return `Waiting for its spec tests${a.depends_on ? ` from ${a.depends_on}` : ''}`;
     case 'spawning': return 'Starting its container';
     case 'working':
@@ -543,11 +544,12 @@ export function createDashboard({ db, dbPath, core, host, hub = null, log = () =
         if (ts) { try { termStream(req, res, ts[1]); } catch (e) { json(res, 404, { error: e.message }); } return true; }
         if (p === '/dash/db/tables') { json(res, 200, tables()); return true; }
         if (p === '/dash/db/table') { json(res, 200, table(Object.fromEntries(url.searchParams))); return true; }
-        const m = /^\/dash\/agent\/([\w.-]+)\/(diff|events)$/.exec(p);
+        const m = /^\/dash\/agent\/([\w.-]+)\/(diff|events|screen)$/.exec(p);
         if (m) {
           const a = agentRow(m[1]);
           if (!a) { json(res, 404, { error: `No agent ${m[1]}` }); return true; }
-          json(res, 200, m[2] === 'diff' ? await diff(a) : await events(a));
+          // screen: the last screen saved when a worker was parked (PRD "Parking").
+          json(res, 200, m[2] === 'diff' ? await diff(a) : m[2] === 'events' ? await events(a) : { text: kvGet(db, `screen:${a.id}`) ?? null });
           return true;
         }
       }

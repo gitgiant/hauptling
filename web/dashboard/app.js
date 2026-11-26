@@ -545,7 +545,7 @@ function renderDetailHead(a, el) {
   const dg = state.board?.delegators.find(x => x.id === a.delegator);
   const passed = a.test?.purpose === 'gate' && a.test?.status === 'pass';
   // Local repos always merge by hand; GitHub PRs only when the delegator turned auto-merge off.
-  const canMerge = a.state === 'done' && (isLocal(a) || (dg && !dg.automerge)) && (passed || a.gate === 'ci' || (dg && !dg.gate));
+  const canMerge = ['done', 'parked'].includes(a.state) && (isLocal(a) || (dg && !dg.automerge)) && (passed || a.gate === 'ci' || (dg && !dg.gate));
   put(head, 
     h('h2', { text: a.headline || a.title }),
     a.headline ? h('p', { class: 'prompt', title: 'Prompt (spawn title)', text: a.title }) : null,
@@ -565,9 +565,9 @@ function renderDetailHead(a, el) {
       ['paused', 'restarting'].includes(a.state) ? null : runNow(a.test),
       a.state === 'paused'
         ? h('button', { onclick: () => act('unpause', { agent: a.id }, `${a.id} resumed`) }, 'Resume')
-        : ['working', 'blocked', 'done'].includes(a.state)
+        : ['working', 'blocked', 'done', 'parked'].includes(a.state)
           ? h('button', { onclick: () => act('pause', { agent: a.id }, `${a.id} paused`) }, 'Pause') : null,
-      ['working', 'blocked', 'done', 'paused', 'exited', 'failed', 'restarting'].includes(a.state) && a.slot
+      ['working', 'blocked', 'done', 'parked', 'paused', 'exited', 'failed', 'restarting'].includes(a.state) && a.slot
         ? h('button', { onclick: () => confirm(`Restart ${a.id}? Its branch and working tree will be kept.`) && act('restart', { agent: a.id }, `${a.id} restarted`) }, 'Restart') : null,
       h('button', { class: 'danger', onclick: () => confirm(`Kill ${a.id}? Its container and clone are removed.`) && act('kill', { agent: a.id }, `${a.id} killed`) }, 'Kill'),
       h('span', { class: 'mono empty', text: `hauptling attach ${a.id}` })),
@@ -590,6 +590,7 @@ function renderSub(el, a) {
   if (state.sub === 'terminal') {
     // Same live states as the server's terminal (src/terminal.mjs); otherwise the stream would retry forever.
     if (a.slot && TERMINAL_STATES.includes(a.state)) state.term = openTerminal(body, a.id);
+    else if (a.state === 'parked') loadParkedScreen(a, body);
     else put(body, h('p', { class: 'empty', text: `No live session (${a.state})` }));
   }
 }
@@ -601,6 +602,15 @@ function patchView(text) {
     pre.append(cls ? h('span', { class: cls, text: line }) : line, '\n');
   }
   return pre;
+}
+
+/** A parked worker has no container: the screen saved when it was parked (PRD "Parking"). */
+async function loadParkedScreen(a, body) {
+  const note = h('p', { class: 'empty', text: `Parked: its container was removed after it reported. Mail, a failed gate or CI, or Restart bring it back.` });
+  try {
+    const s = await api.get(`/dash/agent/${encodeURIComponent(a.id)}/screen`);
+    put(body, note, s.text ? h('pre', { class: 'term' }, ansiFragment(s.text.replace(/\s+$/, ''))) : h('p', { class: 'empty', text: 'No screen was saved.' }));
+  } catch (e) { put(body, note, h('p', { class: 'empty', text: e.message })); }
 }
 
 async function loadDiff(id, body) {

@@ -142,7 +142,7 @@ body.resizing { user-select: none; }
 .dot.working { border: 2px solid var(--accent); border-right-color: transparent; background: none; animation: spin 1s linear infinite; }
 .dot.blocked { background: var(--warn); }
 .dot.paused { border: 1px solid var(--accent); border-radius: 2px; background: linear-gradient(90deg, var(--accent) 35%, transparent 35% 65%, var(--accent) 65%); }
-.dot.done { background: var(--ok); }
+.dot.done, .dot.parked { background: var(--ok); }
 .dot.merged { background: var(--ok); opacity: .55; }
 .dot.exited, .dot.failed { background: var(--bad); }
 .dot.killed, .dot.closed { background: var(--bad); opacity: .55; }
