@@ -151,6 +151,7 @@ async function main() {
       });
       out(`${r.id} (${r.vendor} ${r.model}${r.effort ? `, effort ${r.effort}` : ''}${r.billing ? `, ${r.billing}` : ''}) ${r.state}${r.host && r.host !== 'hub' ? ` on ${r.host}` : ''}`);
       if (r.testWriter) out(`${r.testWriter.id} (${r.testWriter.vendor} ${r.testWriter.model}) ${r.testWriter.state} — writes spec tests first`);
+      for (const note of new Set([r.warning, r.testWriter?.warning, r.waiting, r.testWriter?.waiting].filter(Boolean))) out(note);
       return;
     }
     case 'wait': {
@@ -349,7 +350,7 @@ function board(agents, { hosts = false } = {}) {
   return agents.map(a => {
     const age = Math.round((Date.now() - Date.parse(a.created_at)) / 60e3);
     const where = hosts ? ` ${(a.host || 'hub').padEnd(10)}${a.host_offline ? ' (host offline)' : ''}` : '';
-    return `${a.id.padEnd(34)} ${a.state.padEnd(8)}${where} ${a.slot || '-'}  ${age}m  ${a.pr_url || a.branch}${a.gate ? ` gate:${a.gate}` : ''}\n    ${a.status || a.title}${a.report ? `\n    report: ${a.report}` : ''}`;
+    return `${a.id.padEnd(34)} ${a.state.padEnd(8)}${where} ${a.slot || '-'}  ${age}m  ${a.pr_url || a.branch}${a.gate ? ` gate:${a.gate}` : ''}\n    ${a.headroom || a.status || a.title}${a.report ? `\n    report: ${a.report}` : ''}`;
   }).join('\n');
 }
 

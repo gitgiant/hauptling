@@ -5,6 +5,7 @@
 - Agent lifecycle controls passed stubbed tests. A Docker host is still needed to verify freeze/unfreeze, vendor session resume and container recreation from the existing clone, and to rebuild the worker image and restart the broker. External-merge cancellation was tested with a fake host. The live broker still needs to run the updated code. Test jobs surviving a broker restart and `[merge-failed]` (PRD "Merge gate"): tested with fake Docker/`gh` only. Needs `hauptling broker restart`; then restart again during a real test job (CPU and GPU) and check it is adopted and reported once.
 - Broker not restarted since `cli-fixes`: header CPU/Mem/GPU graphs, card headlines, usage chips and the CodeGraph launch path go live after `hauptling broker stop` (a test job was running, so it was left up).
 - CodeGraph with a real task: whether agents (and their subagents) actually use it; first-index time on a large repo (nullpunkt). The container path itself is verified (index 3 s / 1 s from cache on this repo, no MCP prompt, repo `.mcp.json` ignored).
+- Headroom routing (PRD "Token economy" stage 3): tested with a fake host only. Needs `hauptling broker restart` (no image); check a real `[headroom]` toast and a queued spawn starting after a reset.
 - Token economy changed worker code (`src/vendors.mjs` turns Claude plugins off in the slot): run `hauptling image`, then `hauptling broker stop`.
 - Claude workers start with `--effort <tier default>` and Codex with `-c model_reasoning_effort="…"`; confirm both TUIs accept them. Codex's `-c mcp_servers={}` actually drops servers from the slot's `config.toml` (may merge instead of replace). Claude workers with plugins off still get CodeGraph from `managed-mcp.json` (the token-economy branch's `--strict-mcp-config` was dropped in the merge).
 - Re-run `hauptling setup` to install the host status lines (`hauptling usage <vendor> --host`, chaining your old one); check the host Claude status line still shows your old output and `host_usage` fills.
@@ -28,7 +29,6 @@
 - Placement's `startable` only knows the hub's own accounts; satellites' usage readings are shown on the Usage page but not used for placement.
 - nullpunkt: commit `b9a0f6e8` (drops the coagent mailbox for `hauptling mail`) sits in `nullpunkt/.worktrees/claude_opus-5-5_d72c0`, unpushed. Before `node scripts/worktree.mjs sync claude_opus-5-5_d72c0`, discard the main checkout's local edits to `.mcp.json` and `.codex/hooks.json` (the commit replaces both). Sync restarts the user's game.
 - Codex/agy: can either exclude a repo's own MCP servers? (CodeGraph reaches them via the CLI only.) agy's bare config (MCP off) is unknown.
-- Token economy stage 3 (headroom routing at 80%): not started.
 - Codex prices in `models.json` are `null`, so Codex cost shows "unknown".
 - agy's own sign-in token rotation is unconfirmed (PRD "Open").
 - macOS / Ubuntu install untested; only WSL so far.

@@ -59,7 +59,7 @@ export function headline(a) {
     case 'paused': return 'Paused by you';
     case 'restarting': return 'Restarting its session';
     case 'blocked': return a.ask ? `Needs your answer: ${a.ask.question}` : `Stuck${why ? `: ${why}` : ''}; attach or message it`;
-    case 'queued': return a.unpark ? `Unparking (${a.unpark}): waiting for a free ${a.vendor} slot` : 'Queued: waiting for a free worker slot';
+    case 'queued': return a.headroom ? cap(a.headroom) : a.unpark ? `Unparking (${a.unpark}): waiting for a free ${a.vendor} slot` : 'Queued: waiting for a free worker slot';
     case 'waiting': return `Waiting for its spec tests${a.depends_on ? ` from ${a.depends_on}` : ''}`;
     case 'spawning': return 'Starting its container';
     case 'working':
@@ -223,6 +223,7 @@ export function createDashboard({ db, dbPath, core, host, hub = null, log = () =
         ended: ENDED.includes(a.state),
         usage: a.usage ? JSON.parse(a.usage) : null,
         spend: a.usage_start != null && core.spend ? core.spend(a) : null,
+        headroom: core.headroomNote?.(a) ?? null,
         status: db.prepare('SELECT text FROM status WHERE identity = ?').get(a.id)?.text || null,
         test: t ? { id: t.id, state: t.state, gpu: Boolean(t.gpu), purpose: t.purpose, status: r?.status || null, passed: r?.passed ?? null, failed: r?.failed ?? null, at: t.done_at || t.created_at,
           position: t.state === 'queued' ? ((t.gpu ? gpuLine : tq.line).indexOf(t.id) + 1 || null) : null, retry: retryLabel(t) } : null,

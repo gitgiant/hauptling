@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events';
 import { kvDel, kvGet, kvSet, tx } from './db.mjs';
 import * as mail from './mail.mjs';
 import * as codegraph from './codegraph.mjs';
-import { checkTier, effortFor, findModel, launchArgv, loadModels, nextVendor, pick, preferOf, setPrefer } from './models.mjs';
+import { checkTier, effortFor, enabledVendors, findModel, launchArgv, loadModels, nextVendor, pick, preferOf, setPrefer } from './models.mjs';
 import { canInject } from './vendors.mjs';
 import { readFileSync } from 'node:fs';
 import { normalizeUsage, scrub, spendLine, statusText, windowSnapshot, accumulate, outOfCredit, reportedCost } from './usage.mjs';
@@ -50,6 +50,8 @@ const SPAWN_FIELDS = ['id', 'delegator', 'vendor', 'model', 'repo', 'base', 'bra
 const HOST_CMDS = { pause: 'pause', unpause: 'resume', restart: 'restart', kill: 'kill', merge: 'merge' };
 
 const HANDOFF_PCT = 85;
+/** A vendor with a usage window at this % or more is skipped by the rotation (`headroomPct` in config.json). */
+const HEADROOM_PCT = 80;
 const WORKER_RULES = readFileSync(new URL('../prompts/worker-rules.md', import.meta.url), 'utf8').trim();
 
 export function createCore({ db, host, github, notify = () => false, models = loadModels, savePrefer = setPrefer, keys = keyStore, workerUrl, publicUrl = workerUrl, runnerToken, hub = null, satellite = null, remoteWaitMs = 30e3, log = () => {}, stallMinutes = Number(process.env.HAUPTLING_STALL_MINUTES || 10), idleMinutes = Number(process.env.HAUPTLING_IDLE_MINUTES || 15), parkMinutes = 2, parkDelayMs = 3000 }) {
@@ -196,12 +198,10 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     checkHost(wantHost ?? drow.host, repo);
     const cfg = models();
     if (vendor && !isFamily(vendor)) throw new Error(`Vendor must be claude, codex or agy, got "${vendor}"`);
-    if (!vendor) {
-      // Round robin, skipping vendors whose every slot is at 100% of a usage window (if all are, the spawn waits in the queue).
-      const tried = [];
-      for (let i = 0; i < 3 && !vendor; i++) { const v = nextVendor(db, cfg); tried.push(v); if (startable(v)) vendor = v; }
-      vendor ||= tried.find(v => !refused(v)) || tried[0];
-    }
+    vendor ||= model && impliedVendor(cfg, model);
+    // What the rotation needs to move a queued agent to another vendor; null when the caller chose the vendor.
+    const auto = vendor || model ? null : JSON.stringify({ mode, difficulty, allowTier: Boolean(allowTier), effort: effort ?? null });
+    vendor ||= rotate(cfg);
     const entry = checkTier(cfg, vendor, model ? findModel(cfg, vendor, model) : pick(cfg, vendor, mode, difficulty), allowTier);
     const eff = effortFor(cfg, vendor, entry, effort);
     if (!brief?.trim()) throw new Error('Brief is empty');
@@ -212,23 +212,48 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     const id = `${vendor}_${sanitizeModel(entry.id)}_${hex(3).slice(0, 5)}`;
     title ||= (brief.match(/^#+\s*(.+)$/m)?.[1] || brief.trim().split('\n')[0]).slice(0, 72);
     const insert = (row) => {
-      db.prepare(`INSERT INTO agents (id, delegator, vendor, model, repo, base, branch, brief, title, test_writer, state, token, created_at, updated_at, role, depends_on, effort, want_host, gpu)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(row.id, d, row.vendor, row.model, repo, base || '', `hl/${id}`, brief, row.title, testWriter ? 1 : 0, row.state, token(), now(), now(), row.role, row.depends_on ?? null, row.effort ?? null, wantHost, row.gpu ? 1 : 0);
+      db.prepare(`INSERT INTO agents (id, delegator, vendor, model, repo, base, branch, brief, title, test_writer, state, token, created_at, updated_at, role, depends_on, effort, want_host, gpu, auto)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(row.id, d, row.vendor, row.model, repo, base || '', `hl/${id}`, brief, row.title, testWriter ? 1 : 0, row.state, token(), now(), now(), row.role, row.depends_on ?? null, row.effort ?? null, wantHost, row.gpu ? 1 : 0, row.auto);
       mail.addIdentity(db, row.id, row.vendor, sanitizeModel(row.model), repo);
     };
     let tw = null;
     if (testWriter) {
       // Tests first: the test writer (cheapest model unless chosen) commits spec tests on the task branch; the implementer waits.
-      const twVendor = testWriter.vendor || nextVendor(db, cfg);
+      let twVendor = testWriter.vendor || (testWriter.model && impliedVendor(cfg, testWriter.model));
+      const twAuto = twVendor || testWriter.model ? null : JSON.stringify({ mode: 'cheapest' });
+      twVendor ||= rotate(cfg);
       checkCredit(twVendor);
       const twEntry = testWriter.model ? findModel(cfg, twVendor, testWriter.model) : pick(cfg, twVendor, 'cheapest');
-      tw = { id: `${twVendor}_${sanitizeModel(twEntry.id)}_${hex(3).slice(0, 5)}`, vendor: twVendor, model: twEntry.id, effort: effortFor(cfg, twVendor, twEntry) };
+      tw = { id: `${twVendor}_${sanitizeModel(twEntry.id)}_${hex(3).slice(0, 5)}`, vendor: twVendor, model: twEntry.id, effort: effortFor(cfg, twVendor, twEntry), auto: twAuto };
     }
-    insert({ id, vendor, model: entry.id, effort: eff, title, state: tw ? 'waiting' : 'queued', role: 'impl', depends_on: tw?.id, gpu });
+    insert({ id, vendor, model: entry.id, effort: eff, title, state: tw ? 'waiting' : 'queued', role: 'impl', depends_on: tw?.id, gpu, auto });
     if (tw) insert({ ...tw, title: `Spec tests: ${title}`.slice(0, 72), state: 'queued', role: 'tests' });
     const started = await startQueued(d);
-    const state = (x) => (started.includes(x) ? 'spawning' : agentRow(x).state);
-    return { id, vendor, model: entry.id, effort: eff, state: state(id), billing: agentRow(id).billing, host: agentRow(id).host, ...(tw ? { testWriter: { id: tw.id, vendor: tw.vendor, model: tw.model, state: state(tw.id), host: agentRow(tw.id).host } } : {}) };
+    // The rows as they are now: a queued agent may have moved to another vendor.
+    const result = (x, chosen) => {
+      const a = agentRow(x);
+      const warning = chosen ? headroomWarning(a.vendor) : null;
+      const waiting = headroomNote(a);
+      return { id: x, vendor: a.vendor, model: a.model, effort: a.effort, state: started.includes(x) ? 'spawning' : a.state, host: a.host, ...(warning ? { warning } : {}), ...(waiting ? { waiting } : {}) };
+    };
+    return { ...result(id, !auto), billing: agentRow(id).billing, ...(tw ? { testWriter: result(tw.id, !tw.auto) } : {}) };
+  }
+
+  /** The vendor a model id belongs to, when only one enabled vendor has it. */
+  function impliedVendor(cfg, model) {
+    const has = enabledVendors(cfg).filter(v => cfg.vendors[v].models.some(m => m.id === model || m.model === model));
+    return has.length === 1 ? has[0] : null;
+  }
+
+  /**
+   * Round robin, skipping vendors without headroom (or out of credit). If none has it, the turn still moves on by
+   * one among the vendors that can start at all: the spawn waits in the queue and may change vendor there.
+   */
+  function rotate(cfg) {
+    const tried = enabledVendors(cfg).map(() => nextVendor(db, cfg));
+    const v = tried.find(roomy) || tried.find(v => !refused(v)) || tried[0] || nextVendor(db, cfg);
+    kvSet(db, 'rr_vendor', v);
+    return v;
   }
 
   // ---------- placement (PRD "Part 2") ----------
@@ -254,7 +279,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   function placements(a, drow, hubGpu) {
     const pin = a.unpark ? 'hub' : a.want_host || drow.host; // an unparking agent stays on this host (its clone is here)
     const fits = [];
-    if ((!pin || pin === 'hub') && (!a.gpu || hubGpu) && freeSlots(a.vendor).length && workerCount() < maxWorkers() && startable(a.vendor)) fits.push({ name: 'hub', live: workerCount() });
+    if ((!pin || pin === 'hub') && (!a.gpu || hubGpu) && freeSlots(a.vendor).length && workerCount() < maxWorkers() && (headroomGated(a) ? roomy(a.vendor) : startable(a.vendor))) fits.push({ name: 'hub', live: workerCount() });
     if (hub && pin !== 'hub' && githubSlug(a.repo)) {
       for (const h of db.prepare('SELECT name, capabilities FROM hosts WHERE online = 1 AND key_hash IS NOT NULL ORDER BY name').all()) {
         if (pin && pin !== h.name) continue;
@@ -292,10 +317,12 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   /**
    * Starts queued agents while the delegator is under its limit (agents on every host count): each goes to the
    * first host from `placements`. On the hub: a slot free for its vendor, the hub under `maxWorkers`, and on the
-   * API key or on a plan that isn't at 100% (else it waits for the reset). On a satellite: a `spawn` command.
+   * API key or on a plan that isn't at 100% (below the headroom threshold if the rotation chose the vendor),
+   * else it waits for the reset. On a satellite: a `spawn` command.
    */
   async function startQueued(d) {
     const started = [];
+    endHeadroomStretch();
     const wantsGpu = db.prepare("SELECT 1 FROM agents WHERE delegator = ? AND state = 'queued' AND host = 'hub' AND gpu = 1").get(d);
     const hubGpu = wantsGpu ? Boolean(await Promise.resolve(host.gpuAvailable?.()).catch(() => false)) : false;
     for (;;) {
@@ -305,9 +332,11 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
         if (active >= drow.max_agents) return null;
         let a, place;
         // Unparking agents first: they were reported work that is needed again (PRD "Parking").
-        for (const q of db.prepare("SELECT * FROM agents WHERE delegator = ? AND state = 'queued' AND host = 'hub' ORDER BY unpark IS NULL, created_at").all(d)) {
+        for (const q of db.prepare("SELECT * FROM agents WHERE delegator = ? AND state = 'queued' AND host = 'hub' ORDER BY unpark IS NULL, created_at, rowid").all(d)) {
           [place] = placements(q, drow, hubGpu);
           if (place) { a = q; break; }
+          const moved = revendor(q, drow, hubGpu);
+          if (moved) { ({ a, place } = moved); break; }
         }
         if (!a) return null;
         if (place.name !== 'hub') {
@@ -318,11 +347,11 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
         const slot = freeSlots(a.vendor)[0];
         const dir = `${host.workRoot}/${a.id}`;
         const billing = billingFor(a.vendor);
-        db.prepare("UPDATE agents SET state = 'spawning', slot = ?, dir = ?, billing = ?, updated_at = ? WHERE id = ?").run(slot, dir, billing, now(), a.id);
+        db.prepare("UPDATE agents SET state = 'spawning', slot = ?, dir = ?, billing = ?, auto = NULL, updated_at = ? WHERE id = ?").run(slot, dir, billing, now(), a.id);
         synced(a.id);
         return { ...a, slot, dir, billing, state: 'spawning' };
       });
-      if (!next) return started;
+      if (!next) { announceHeadroom(d); return started; }
       started.push(next.id);
       if (next.remote) { log(`placed ${next.id} on ${next.remote}`); continue; }
       (next.unpark ? unparkLaunch(next) : launch(next)).catch(e => {
@@ -342,11 +371,90 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   }
   const live = (at) => !at || Date.parse(at) > Date.now();
   /**
-   * The vendor's account is at 100% of some window (until it resets). One account per vendor, signed
-   * in on every slot (or one API key): a reading from any slot speaks for all of them.
+   * The newest reading of each of the vendor's windows. One account per vendor, signed in on every slot (or one
+   * API key): the newest reading from any slot speaks for all of them.
    */
-  function exhausted(vendor) {
-    return db.prepare('SELECT used_pct, resets_at FROM slot_usage WHERE vendor = ? AND used_pct >= 100').all(vendor).some(r => live(r.resets_at));
+  const readings = (vendor) => [...new Map(db.prepare('SELECT window, used_pct, resets_at FROM slot_usage WHERE vendor = ? ORDER BY at, used_pct').all(vendor).map(r => [r.window, r])).values()];
+  /** The windows at `pct` or more that haven't reset yet. */
+  const over = (vendor, pct) => readings(vendor).filter(r => r.used_pct >= pct && live(r.resets_at));
+  /** The vendor's account is at 100% of some window (until it resets). */
+  const exhausted = (vendor) => over(vendor, 100).length > 0;
+
+  // ---------- headroom (PRD "Token economy", stage 3; this host's readings only) ----------
+  const headroomPct = () => Math.min(100, Number(host.headroomPct?.() ?? HEADROOM_PCT) || HEADROOM_PCT);
+  const headroom = (vendor) => !over(vendor, headroomPct()).length;
+  /** May the rotation give this vendor a worker now? API billing ignores the windows. */
+  const roomy = (vendor) => !refused(vendor) && (billingFor(vendor) === 'api' || headroom(vendor));
+  /** Only a vendor the rotation chose is held below 100%; an unparking agent was already running. */
+  const headroomGated = (a) => Boolean(a.auto) && !a.unpark;
+  /** No enabled vendor (that can start at all) has headroom. */
+  function allFull() {
+    const usable = enabledVendors(models()).filter(v => !refused(v));
+    return usable.length > 0 && !usable.some(roomy);
+  }
+  const clock = (ms) => {
+    const t = new Date(ms);
+    const hm = t.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+    return t.toDateString() === new Date().toDateString() ? hm : `${t.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' })} ${hm}`;
+  };
+  const fullest = (rows) => rows.reduce((m, r) => (r.used_pct > m.used_pct ? r : m));
+  /** "claude 91% 5h, codex 84% week; next reset 14:20": each full vendor, and when the first one has headroom again. */
+  function headroomSummary() {
+    const full = enabledVendors(models()).filter(v => !refused(v)).map(v => [v, over(v, headroomPct())]).filter(([, rows]) => rows.length);
+    // A vendor is free again when the last of its full windows resets.
+    const free = full.filter(([, rows]) => rows.every(r => r.resets_at)).map(([, rows]) => Math.max(...rows.map(r => Date.parse(r.resets_at))));
+    return `${full.map(([v, rows]) => `${v} ${Math.round(fullest(rows).used_pct)}% ${fullest(rows).window}`).join(', ')}; ${free.length ? `next reset ${clock(Math.min(...free))}` : 'reset time unknown'}`;
+  }
+  /** "waiting for headroom (…)" for a queued agent held back by it on this host, else null. */
+  function headroomNote(a) {
+    if (a.state !== 'queued' || a.host !== 'hub' || !headroomGated(a)) return null;
+    const pin = a.want_host || db.prepare('SELECT host FROM delegators WHERE id = ?').get(a.delegator)?.host;
+    return (!pin || pin === 'hub') && allFull() ? `waiting for headroom (${headroomSummary()})` : null;
+  }
+  /** The warning for a spawn whose caller chose a vendor that is short on headroom. */
+  function headroomWarning(vendor) {
+    if (billingFor(vendor) === 'api' || headroom(vendor)) return null;
+    const r = fullest(over(vendor, headroomPct()));
+    return `warning: ${vendor} is at ${Math.round(r.used_pct)}% of its ${r.window} window${r.resets_at ? ` (resets ${clock(Date.parse(r.resets_at))})` : ''}; ${exhausted(vendor) ? 'the spawn waits for the reset' : 'starting there anyway, as you chose it'}`;
+  }
+  /** A queued agent whose rotation-chosen vendor is full moves to the next vendor with headroom and a free slot. */
+  function revendor(a, drow, hubGpu) {
+    if (!headroomGated(a) || roomy(a.vendor)) return null;
+    const cfg = models();
+    const order = enabledVendors(cfg);
+    const at = order.indexOf(a.vendor);
+    const opts = JSON.parse(a.auto);
+    for (let i = 1; i <= order.length; i++) {
+      const vendor = order[(at + i) % order.length];
+      let entry, effort;
+      try {
+        entry = checkTier(cfg, vendor, pick(cfg, vendor, opts.mode, opts.difficulty), opts.allowTier);
+        effort = effortFor(cfg, vendor, entry, opts.effort);
+      } catch (e) { log(`headroom: ${a.id} can't move to ${vendor}: ${e.message}`); continue; }
+      const moved = { ...a, vendor, model: entry.id, effort };
+      const place = placements(moved, drow, hubGpu).find(p => p.name === 'hub');
+      if (!place) continue;
+      db.prepare('UPDATE agents SET vendor = ?, model = ?, effort = ? WHERE id = ?').run(vendor, entry.id, effort, a.id);
+      db.prepare('UPDATE identities SET family = ?, model = ? WHERE identity = ?').run(vendor, sanitizeModel(entry.id), a.id);
+      log(`headroom: ${a.id} moves from ${a.vendor} to ${vendor} ${entry.id}`);
+      return { a: moved, place };
+    }
+    return null;
+  }
+  /** A stretch with every vendor full ends as soon as one has headroom: the next one is announced again. */
+  function endHeadroomStretch() {
+    if (kvGet(db, 'headroom:stretch') && !allFull()) kvDel(db, 'headroom:stretch');
+  }
+  /** Once per stretch: one `[headroom]` event per delegator with a held spawn, and one notification. */
+  function announceHeadroom(d) {
+    const held = db.prepare("SELECT * FROM agents WHERE delegator = ? AND state = 'queued' AND host = 'hub' ORDER BY created_at, rowid").all(d).find(headroomNote);
+    if (!held) return;
+    const told = JSON.parse(kvGet(db, 'headroom:stretch') || '[]');
+    if (told.includes(d)) return;
+    kvSet(db, 'headroom:stretch', JSON.stringify([...told, d]));
+    const text = `All vendors are at ${headroomPct()}% or more (${headroomSummary()}): new spawns stay queued until one has headroom; running workers continue`;
+    emit(d, null, 'headroom', text);
+    if (!told.length) toast(held.id, { title: 'Spawns are waiting for headroom', body: text, choices: [], links: null, dashboard: `${publicUrl}/#usage` });
   }
 
   /** API spend of this vendor in the budget's current period (the reported cost of its `api` agents). */
@@ -1360,7 +1468,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
       ? db.prepare(`SELECT * FROM agents WHERE delegator = ? ${all ? '' : `AND state NOT IN (${ENDED.map(x => `'${x}'`).join(',')})`} ORDER BY created_at`).all(delegatorId(delegator))
       : db.prepare('SELECT * FROM agents ORDER BY created_at').all();
     const offline = new Set(db.prepare('SELECT name FROM hosts WHERE online = 0').all().map(h => h.name));
-    return rows.map(({ token: _t, brief: _b, ...r }) => ({ ...r, status: db.prepare('SELECT text FROM status WHERE identity = ?').get(r.id)?.text || null, ...(offline.has(r.host) ? { host_offline: true } : {}) }));
+    return rows.map(({ token: _t, brief: _b, ...r }) => ({ ...r, status: db.prepare('SELECT text FROM status WHERE identity = ?').get(r.id)?.text || null, headroom: headroomNote(r), ...(offline.has(r.host) ? { host_offline: true } : {}) }));
   }
 
   async function lifecycle(agent, change) {
@@ -1573,6 +1681,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   async function poll() {
     await refreshUsage({ force: true }).catch(e => log(`usage: ${e.message}`));
     // A usage window may have reset: queued spawns that were waiting for it can start.
+    endHeadroomStretch();
     for (const { id } of db.prepare("SELECT DISTINCT delegator id FROM agents WHERE state = 'queued' AND host = 'hub'").all()) await startQueued(id).catch(e => log(`start ${id}: ${e.message}`));
     await watch();
     await watchTests().catch(e => log(`test watchdog: ${e.message}`));
@@ -1897,5 +2006,5 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   hub?.bind({ receive, onState: placeSoon, onResult: commandDone });
   if (satellite) syncTests();
 
-  return { call, authenticate, emit, keyOut, command, startAll, syncTests, freeSlots, spend, poll, watch, watchTests, startQueued, bus, askForPage, answer, pump, recover, gpuReady, refreshUsage, recordUsage, budgetState, billingFor };
+  return { call, authenticate, emit, keyOut, command, startAll, syncTests, freeSlots, headroomNote, spend, poll, watch, watchTests, startQueued, bus, askForPage, answer, pump, recover, gpuReady, refreshUsage, recordUsage, budgetState, billingFor };
 }

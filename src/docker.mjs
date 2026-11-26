@@ -563,6 +563,7 @@ export function dockerHost({ log = () => {}, docker: dockerCmd = docker } = {}) 
       if (state === 'gone' && Date.now() - live.at < 60e3) state = 'running'; // `docker run` may not have created it yet
       return { state: ['created', 'running', 'restarting', 'paused'].includes(state) ? 'running' : ['gone', 'unknown'].includes(state) ? state : 'exited', activity };
     },
+    headroomPct: () => config().headroomPct,
     testWatchdog: () => { const c = config(); return { stallSec: c.testStallSec, retries: c.testRetries }; },
 
     /** `gpu pause --now`: stop a running test job's container (the broker has already requeued it). */
