@@ -56,13 +56,11 @@ code, pre, .mono { font-family: var(--mono); font-size: 12.5px; }
 .gpu.open .pop { display: grid; gap: .5rem; position: fixed; top: calc(var(--header-h, 3rem) - .5rem); right: .5rem; z-index: 4; max-width: calc(100vw - 1rem); padding: .6rem .75rem; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 6px 20px rgb(0 0 0 / .3); white-space: normal; }
 .gpu .pop > div { display: flex; flex-wrap: wrap; align-items: center; gap: .3rem .6rem; }
 .pop .views button[aria-current] { border-color: var(--accent); color: var(--text); font-weight: 600; }
-/* Phone: two rows — title, tabs, live dot and theme; then the chips, CPU, Mem and GPU in one strip that scrolls sideways. */
+/* Phone: two rows — title, Board tab, live dot and theme; then the chips, CPU, Mem and GPU in one strip that scrolls sideways. */
 .top.h-phone { flex-wrap: wrap; gap: .35rem .6rem; padding: .4rem .6rem; }
-.top.h-phone .tabs { flex: 0 1 auto; min-width: 0; overflow-x: auto; scrollbar-width: none; }
-.top.h-phone .tabs button { padding: .3rem .45rem; }
 .top.h-phone .conn { margin-left: auto; }
 .top.h-phone .strip { order: 1; flex: 1 1 100%; min-width: 0; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none; touch-action: pan-x; }
-.top.h-phone .strip::-webkit-scrollbar, .top.h-phone .tabs::-webkit-scrollbar { display: none; }
+.top.h-phone .strip::-webkit-scrollbar { display: none; }
 .top.h-phone .strip > * { flex: none; }
 /* The GPU group dissolves into the strip so that ⋯ can stick to the strip's right edge, whatever is scrolled. */
 .top.h-phone .gpu { display: contents; }

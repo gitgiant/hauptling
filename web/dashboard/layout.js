@@ -95,7 +95,7 @@ export const DRAG_IGNORE = 'button, a, input, textarea, select, label, [role=tab
 
 /**
  * How the header degrades as the window narrows, one step at a time; each step keeps the ones before it.
- * Steps 0–4 keep the header on one row; the last (`phone`) uses two: title, tabs and theme, then a
+ * Steps 0–4 keep the header on one row; the last (`phone`) uses two: title, Board tab and theme, then a
  * horizontally scrolling strip of usage chips, CPU, Mem and GPU.
  */
 export const HEADER_STEPS = ['full', 'no-host', 'no-spark', 'short', 'brief', 'phone'];

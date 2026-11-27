@@ -417,7 +417,7 @@ function moreMenu(open, title, label, ...sections) {
   };
   return [h('button', { class: 'more-btn', type: 'button', title, 'aria-label': label, 'aria-expanded': String(open) }, '⋯'),
     h('div', { class: 'pop', role: 'group', 'aria-label': label },
-      h('div', { class: 'views' }, link('history', 'History'), link('db', 'Database')), sections)];
+      h('div', { class: 'views' }, link('board', 'Board'), link('history', 'History'), link('db', 'Database')), sections)];
 }
 function markCurrent(b) {
   if (b.dataset.view === state.view) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
