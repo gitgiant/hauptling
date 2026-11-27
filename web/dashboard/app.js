@@ -976,7 +976,8 @@ function openTerminal(container, sid, { autoInput = false, onEnd } = {}) {
     e.preventDefault();
     send(k);
   };
-  const onPaste = (e) => { if (!inputOn) return; e.preventDefault(); const t = e.clipboardData.getData('text'); if (t) send({ t: 'lit', v: t.slice(0, 4000) }); };
+  const pasteText = (t) => { if (t) send({ t: 'lit', v: t.slice(0, 4000) }); };
+  const onPaste = (e) => { if (!inputOn) return; e.preventDefault(); pasteText(e.clipboardData.getData('text')); };
   // Text a phone keyboard inserts without a usable keydown (predictive text, dictation, IME): send it, clear the field.
   const onText = () => { const v = kb.value; kb.value = ''; if (v && inputOn) send({ t: 'lit', v }); };
   for (const el of [pre, kb]) { el.addEventListener('keydown', onKey); el.addEventListener('paste', onPaste); }
@@ -989,6 +990,15 @@ function openTerminal(container, sid, { autoInput = false, onEnd } = {}) {
     b.addEventListener('click', () => { if (inputOn) send({ t: 'key', v }); });
     keyRow.append(b);
   }
+  // A button too: phones have no Ctrl+V, and the screen is not a text field to right-click or long-press.
+  const pasteBtn = h('button', { type: 'button', text: 'Paste', title: 'Paste the clipboard into the terminal (or press Ctrl+V)' });
+  pasteBtn.addEventListener('pointerdown', (e) => e.preventDefault());
+  pasteBtn.addEventListener('click', () => {
+    if (!inputOn) return toast('Enable input first', true);
+    if (!navigator.clipboard?.readText) return toast('This browser has no clipboard access here: click the terminal and press Ctrl+V', true);
+    navigator.clipboard.readText().then(pasteText, () => toast('Clipboard access was refused: click the terminal and press Ctrl+V', true));
+  });
+  note.after(pasteBtn); // in the bar: the key row only shows on touch screens
   const es = new EventSource(`/dash/term/${encodeURIComponent(sid)}/stream`);
   // "Word wrap" on: the worker's tmux window takes this pane's size in cells. Off (or hidden): this viewer has none.
   const fit = fitTerminal(pre, (size, viewer) => api.post(`/dash/term/${encodeURIComponent(sid)}/size`, { viewer, size }));

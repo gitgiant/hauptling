@@ -6,6 +6,8 @@ export const NAMED = { Enter: 'Enter', Backspace: 'BSpace', Escape: 'Escape', Ar
 /** The send-keys item for a keydown, or null to leave it to the browser (or to the `input` event on a phone). */
 export function keyFor(e) {
   if (e.metaKey || e.isComposing) return null;
+  // Ctrl+V (and Ctrl+Shift+V) is the browser's paste: taking the key would cancel the `paste` event.
+  if (e.ctrlKey && /^v$/i.test(e.key)) return null;
   if (e.ctrlKey && /^[a-z]$/i.test(e.key)) return { t: 'key', v: `C-${e.key.toLowerCase()}` };
   if (e.key === 'Tab') return { t: 'key', v: e.shiftKey ? 'BTab' : 'Tab' };
   if (NAMED[e.key]) return { t: 'key', v: NAMED[e.key] };

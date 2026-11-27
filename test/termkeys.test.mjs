@@ -27,3 +27,9 @@ test('terminalInputFocused: the live terminal or its phone keyboard field', () =
   assert.equal(terminalInputFocused({ activeElement: el('kb', deadPre) }), false);
   assert.equal(terminalInputFocused({ activeElement: null }), false);
 });
+
+test('Ctrl+V is left to the browser so the paste event fires', () => {
+  assert.equal(keyFor({ key: 'v', ctrlKey: true }), null);
+  assert.equal(keyFor({ key: 'V', ctrlKey: true, shiftKey: true }), null);
+  assert.deepEqual(keyFor({ key: 'c', ctrlKey: true }), { t: 'key', v: 'C-c' });
+});
