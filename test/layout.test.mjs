@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { clampRatio, parseRatio, defaultRatio, splitKey, keyRatio, collapseAfterDrag, HEADER_STEPS, stepClasses, pickStep, handleKey, STRIP_PX, SNAP_PX, snapPx, dragSplit, keySplit, readSplit, writeSplit, hiddenAfter } from '../web/dashboard/layout.js';
+import { clampRatio, parseRatio, defaultRatio, splitKey, keyRatio, collapseAfterDrag, HEADER_STEPS, stepClasses, pickStep, handleKey, STRIP_PX, SNAP_PX, STRIP_CLASS, dragSplit, keySplit, readSplit, writeSplit, hiddenAfter } from '../web/dashboard/layout.js';
 
 test('clampRatio keeps both panes at their minimum', () => {
   assert.equal(clampRatio(0.4, 1000, 200, 300), 0.4);
@@ -120,13 +120,13 @@ test('header markup: the title leads to the board, no nav tabs, never a second r
 });
 
 
-test('dragSplit snaps to the strip below the threshold and clamps above it', () => {
-  assert.equal(snapPx(288), SNAP_PX);
-  assert.equal(snapPx(96), 72, 'stacked: below the pane minimum');
-  assert.deepEqual(dragSplit(SNAP_PX - 1, 1000, 288, 320), { strip: true });
-  assert.deepEqual(dragSplit(SNAP_PX, 1000, 288, 320), { strip: false, ratio: 0.288 }, 'between threshold and minimum');
-  assert.deepEqual(dragSplit(500, 1000, 288, 320), { strip: false, ratio: 0.5 });
-  assert.deepEqual(dragSplit(96, 600, 96, 140), { strip: false, ratio: 0.16 });
+test('dragSplit snaps only next to the strip and follows the pointer above it', () => {
+  assert.equal(SNAP_PX, STRIP_PX + 24);
+  assert.deepEqual(dragSplit(SNAP_PX - 1, 1000, 320), { strip: true });
+  assert.deepEqual(dragSplit(SNAP_PX, 1000, 320), { strip: false, ratio: SNAP_PX / 1000 }, 'under the pane minimum while dragging');
+  assert.deepEqual(dragSplit(180, 1000, 320), { strip: false, ratio: 0.18 });
+  assert.deepEqual(dragSplit(900, 1000, 250), { strip: false, ratio: 0.75 }, 'second pane keeps its minimum');
+  assert.equal(clampRatio(SNAP_PX / 1000, 1000, 180, 320), 0.18, 'released under the minimum');
 });
 
 test('keySplit: shrinking at the minimum collapses, growing from the strip restores', () => {
@@ -161,4 +161,14 @@ test('hiddenAfter counts the strip items past the visible end', () => {
 test('the strip is as wide in the stylesheet as in the logic', () => {
   const css = readFileSync(new URL('../web/dashboard/style.css', import.meta.url), 'utf8');
   assert.equal(css.split(`${STRIP_PX}px 1rem minmax(0, 1fr)`).length - 1, 2, 'side by side and stacked');
+});
+
+test('no style meant for something else hits a split view in strip mode', () => {
+  const read = (f) => readFileSync(new URL(`../web/dashboard/${f}`, import.meta.url), 'utf8');
+  const css = read('style.css').replace(/\/\*[\s\S]*?\*\//g, '');
+  const uses = css.match(new RegExp(`[^\\s,{}>+~]*\\.${STRIP_CLASS}(?![\\w-])[^\\s,{}>+~]*`, 'g')) ?? [];
+  assert.ok(uses.length > 0);
+  for (const sel of uses) assert.equal(sel, `.split.${STRIP_CLASS}`);
+  // Nothing else puts the class on an element.
+  for (const f of ['app.js', 'index.html']) assert.doesNotMatch(read(f), new RegExp(`['" ]${STRIP_CLASS}['" ]`), f);
 });

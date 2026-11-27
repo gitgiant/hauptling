@@ -71,23 +71,26 @@ export function keyRatio(key, shift, ratio, total, minA, minB) {
 /** Size of a first pane collapsed to its strip, px. */
 export const STRIP_PX = 44;
 
-/** A pane dragged narrower than this (px) snaps to the strip. */
-export const SNAP_PX = 140;
+/**
+ * Class of a split view whose first pane is collapsed. Style it only as `.split.in-strip`, and keep the name
+ * unused elsewhere: it was once `mini`, which the usage bars style, and that shrank the whole view to 28px.
+ */
+export const STRIP_CLASS = 'in-strip';
 
-/** The snap threshold of a pane: SNAP_PX, but below the pane's own minimum so every allowed size stays reachable. */
-export const snapPx = (minA) => Math.min(SNAP_PX, 0.75 * minA);
+/** A pane dragged narrower than this (px), i.e. to within 24 px of its strip, snaps to it. */
+export const SNAP_PX = STRIP_PX + 24;
 
 /**
- * Where a drag of a collapsible split puts the first pane.
+ * Where a drag of a collapsible split puts the first pane. It follows the pointer below the pane's
+ * minimum too; releasing there falls back to the minimum (`clampRatio`).
  * @param {number} px  wanted size of the first pane
  * @param {number} total
- * @param {number} minA
  * @param {number} minB
  * @returns {{strip: true} | {strip: false, ratio: number}}
  */
-export function dragSplit(px, total, minA, minB) {
-  if (px < snapPx(minA)) return { strip: true };
-  return { strip: false, ratio: clampRatio(px / total, total, minA, minB) };
+export function dragSplit(px, total, minB) {
+  if (px < SNAP_PX) return { strip: true };
+  return { strip: false, ratio: clampRatio(px / total, total, 0, minB) };
 }
 
 /**

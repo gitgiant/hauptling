@@ -7,7 +7,7 @@ import { testProgress } from './progress.js';
 import { updateView, afterHello } from './update.js';
 import { movable, canDrop, dropSide, keyMove } from './queue.js';
 import { starting, spinner, wheel, startFailure, tickWheels } from './wheel.js';
-import { STACKED_QUERY, HANDLE_PX, DRAG_IGNORE, STRIP_PX, clampRatio, defaultRatio, splitKey, keyRatio, dragSplit, keySplit, readSplit, writeSplit, hiddenAfter, collapseAfterDrag, HEADER_STEPS, stepClasses, pickStep, handleKey } from './layout.js';
+import { STACKED_QUERY, HANDLE_PX, DRAG_IGNORE, STRIP_PX, STRIP_CLASS, clampRatio, defaultRatio, splitKey, keyRatio, dragSplit, keySplit, readSplit, writeSplit, hiddenAfter, collapseAfterDrag, HEADER_STEPS, stepClasses, pickStep, handleKey } from './layout.js';
 // Text from the store is always set with textContent (h() below), never parsed as HTML.
 
 const $ = (sel) => document.querySelector(sel);
@@ -208,8 +208,8 @@ handle.addEventListener('pointerdown', dragHeader);
 const stacked = matchMedia(STACKED_QUERY);
 /** Defaults and minimum px of [first, second] pane, side by side and stacked; `strip`: collapses to a strip. */
 const SPLITS = {
-  board: { def: [0.4, 0.45], min: [[288, 320], [96, 140]], strip: true },
-  history: { def: [0.4, 0.45], min: [[288, 320], [96, 140]], strip: true },
+  board: { def: [0.4, 0.45], min: [[180, 320], [96, 140]], strip: true },
+  history: { def: [0.4, 0.45], min: [[180, 320], [96, 140]], strip: true },
   db: { def: [{ px: 208 }, 0.3], min: [[128, 320], [64, 140]] },
 };
 /** Wires one splitter; returns `expand()`, which restores a collapsed first pane. */
@@ -228,12 +228,12 @@ function initSplitter(sp) {
     const total = (st ? r.height : r.width) - a - b - (st ? sp.offsetHeight : sp.offsetWidth);
     return { st, total, start: (st ? r.top : r.left) + a, min: cfg.min[st ? 1 : 0] };
   };
-  /** Applies a state; `ratio` is ignored while collapsed. */
-  const set = (want, save) => {
+  /** Applies a state; `ratio` is ignored while collapsed. `minA`: 0 while dragging a collapsible split. */
+  const set = (want, save, minA) => {
     const g = geo();
     strip = !!want.strip;
-    if (!strip) ratio = clampRatio(want.ratio, g.total, ...g.min);
-    view.classList.toggle('mini', strip);
+    if (!strip) ratio = clampRatio(want.ratio, g.total, minA ?? g.min[0], g.min[1]);
+    view.classList.toggle(STRIP_CLASS, strip);
     view.style.setProperty('--split', ratio.toFixed(4));
     sp.setAttribute('aria-orientation', g.st ? 'horizontal' : 'vertical');
     sp.setAttribute('aria-valuenow', String(Math.round((strip ? STRIP_PX / g.total : ratio) * 100)));
@@ -263,7 +263,8 @@ function initSplitter(sp) {
       if (!moved && Math.abs(pos(ev) - p0) < 3) return; // a click, or half of a double-click
       moved = true;
       const px = pos(ev) - grab;
-      set(cfg.strip ? dragSplit(px, g.total, ...g.min) : { ratio: px / g.total }, false);
+      if (cfg.strip) set(dragSplit(px, g.total, g.min[1]), false, 0);
+      else set({ ratio: px / g.total }, false);
     };
     const end = () => {
       sp.removeEventListener('pointermove', move);
@@ -733,7 +734,7 @@ function renderBoard(b) {
   if (focused) $(`#board .${focusClass}[data-id="${CSS.escape(focusId)}"]`)?.focus({ preventScroll: true });
 }
 
-// ---------- board strip: the collapsed board, one icon per card (shown by CSS while .split.mini) ----------
+// ---------- board strip: the collapsed board, one icon per card (shown by CSS while .split.in-strip) ----------
 function miniButton(a) {
   const v = vendorBadge(a.vendor), status = a.host_state ? `host ${a.host_state}` : a.state;
   const label = `${a.headline || a.title} · ${status}`, on = state.selected === a.id;
