@@ -11,7 +11,7 @@ import { isHeld } from './db.mjs';
 import { platform } from './platform/index.mjs';
 import { getBudget, getUpTo, keyHints } from './keys.mjs';
 import { loadModels, tierName } from './models.mjs';
-import { NET, PROXY, WORKER_BROKER_URL, baseImageTag, docker, proxyEnv, dockerReady, ensureBaseImage, ensureNetwork, slotDir, vendorRoot, signinSlot, signins, CREDS, config, hasGpu, gpuAvailable } from './docker.mjs';
+import { NET, PROXY, WORKER_BROKER_URL, baseImageTag, docker, proxyEnv, dockerReady, ensureBaseImage, ensureNetwork, slotDir, vendorRoot, signinSlot, signins, signinStamp, CREDS, config, hasGpu, gpuAvailable } from './docker.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const step = (m) => console.log(`\n▶ ${m}`);
@@ -102,7 +102,7 @@ async function restartBroker() {
  */
 export const logins = (slots, vendors) => {
   const keys = keyHints();
-  const signedIn = (slot, v) => spawnSync('test', ['-s', join(vendorRoot(slot, v), CREDS[v])]).status === 0;
+  const signedIn = (slot, v) => signinStamp(slot, v) != null;
   return slots.flatMap(slot => vendors.map(v => {
     if (!keys[v]) return { slot, vendor: v, ok: signedIn(slot, v) };
     const budget = getBudget(v), upTo = getUpTo(v);

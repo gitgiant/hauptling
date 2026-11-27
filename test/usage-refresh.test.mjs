@@ -216,3 +216,24 @@ test('a sign-in session is over once its credentials were written after it opene
   assert.equal(signinDone({ createdAt, writtenAt: now - SIGNIN_DONE_MS + 1000, now }), false, 'just written: the CLI may still be finishing');
   assert.equal(signinDone({ createdAt, writtenAt: createdAt + 60e3, now }), true);
 });
+
+test('signed in: a Claude slot needs a subscription sign-in in its credential file; a Console sign-in leaves {}', async () => {
+  const { signinStamp } = await import('../src/docker.mjs');
+  const { mkdtempSync, mkdirSync, writeFileSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const dir = mkdtempSync(join(tmpdir(), 'hl-signin-'));
+  mkdirSync(join(dir, 'claude')); mkdirSync(join(dir, 'codex'));
+  const creds = join(dir, 'claude', '.credentials.json');
+  assert.equal(signinStamp('hl-w1', 'claude', dir), null, 'no file');
+  writeFileSync(creds, '{}');
+  assert.equal(signinStamp('hl-w1', 'claude', dir), null, 'Console sign-in: nothing a worker can use');
+  writeFileSync(creds, '{"mcpOAuth":{}}');
+  assert.equal(signinStamp('hl-w1', 'claude', dir), null);
+  writeFileSync(creds, 'not json');
+  assert.equal(signinStamp('hl-w1', 'claude', dir), null);
+  writeFileSync(creds, '{"claudeAiOauth":{"accessToken":"a","refreshToken":"r"}}');
+  assert.equal(typeof signinStamp('hl-w1', 'claude', dir), 'number');
+  writeFileSync(join(dir, 'codex', 'auth.json'), '{}');
+  assert.equal(typeof signinStamp('hl-w1', 'codex', dir), 'number', 'other vendors: any non-empty file');
+});

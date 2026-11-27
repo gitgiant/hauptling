@@ -517,6 +517,20 @@ export function setSignins(vendor, n) {
 export const CREDS = { claude: 'claude/.credentials.json', codex: 'codex/auth.json', agy: 'gemini/antigravity-cli/antigravity-oauth-token' };
 
 /**
+ * When the slot's sign-in for this vendor was last written (ms), or null when it holds none: the credential file
+ * is missing or empty, or for Claude holds no subscription sign-in. Claude's Console sign-in ("API usage billing")
+ * leaves `{}` there and keeps its key outside the slot dir, where no worker container can read it.
+ */
+export function signinStamp(slot, vendor, dir = vendorRoot(slot, vendor)) {
+  try {
+    const p = join(dir, CREDS[vendor]), st = statSync(p);
+    if (!(st.size > 0)) return null;
+    if (vendor === 'claude') { const o = JSON.parse(readFileSync(p, 'utf8')).claudeAiOauth; if (!o?.accessToken && !o?.refreshToken) return null; }
+    return st.mtimeMs;
+  } catch { return null; }
+}
+
+/**
  * Signs a slot out of a vendor: removes its credential file (nothing else; settings and sessions stay), so the
  * next sign-in asks for an account. Returns whether it was signed in.
  */
@@ -814,9 +828,7 @@ export function dockerHost({ log = () => {}, docker: dockerCmd = docker } = {}) 
     headroomPct: () => config().headroomPct,
     signinSlot: (slot, vendor) => signinSlot(slot, vendor),
     /** When the credential file a worker slot uses was last written (ms), or null when it is missing or empty. */
-    signinStamp(slot, vendor) {
-      try { const st = statSync(join(vendorRoot(slot, vendor), CREDS[vendor])); return st.size > 0 ? st.mtimeMs : null; } catch { return null; }
-    },
+    signinStamp: (slot, vendor) => signinStamp(slot, vendor),
     signins: (vendor) => signins(vendor),
     setSignins,
     testWatchdog: () => { const c = config(); return { stallSec: c.testStallSec, retries: c.testRetries }; },
