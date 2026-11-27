@@ -94,11 +94,13 @@ export function collapseAfterDrag({ collapsed, dy, vy, height }) {
 export const DRAG_IGNORE = 'button, a, input, textarea, select, label, [role=tab], [contenteditable]';
 
 /**
- * How the header degrades as the window narrows, one step at a time; each step keeps the ones before it.
- * Steps 0–4 keep the header on one row; the last (`phone`) uses two: title, Board tab and theme, then a
- * horizontally scrolling strip of usage chips, CPU, Mem and GPU.
+ * How the one-row header degrades as the window narrows, one step at a time; each step keeps the ones before it:
+ * no host name; no sparklines; short labels (live and theme as icons); GPU and test details only in the ⋯ popover;
+ * usage chips as bare bars; Report as an icon; tight spacing without Mem, spend and the test count;
+ * last (`min`), theme and Report move into the popover and the usage chips are clipped to the room left.
+ * The title, CPU and GPU numbers and the ⋯ button stay at every step.
  */
-export const HEADER_STEPS = ['full', 'no-host', 'no-spark', 'short', 'brief', 'phone'];
+export const HEADER_STEPS = ['full', 'no-host', 'no-spark', 'short', 'brief', 'minis', 'icons', 'tight', 'min'];
 
 /** The header's classes for a step: every degrade up to and including it (`h-no-spark`, `h-short`, …). */
 export function stepClasses(step) {
@@ -106,7 +108,7 @@ export function stepClasses(step) {
 }
 
 /**
- * The least degraded step whose single row fits, else the last (two-row) step.
+ * The least degraded step whose row fits, else the last (it shrinks to the window).
  * Going back to a less degraded step than the current one needs `margin` px to spare, so a
  * number ticking from 9% to 10% can't make the header flip between two steps.
  * @param {(step:number) => number} slack  px left over on the row at a step (negative: it overflows)

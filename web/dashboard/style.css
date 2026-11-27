@@ -25,12 +25,14 @@ a { color: var(--accent); }
 code, pre, .mono { font-family: var(--mono); font-size: 12.5px; }
 [hidden] { display: none !important; }
 
-/* The header is fixed and stays on one row, degrading in steps (app.js fitHeader, layout.js HEADER_STEPS);
+/* The header is fixed and always one row, degrading in steps (app.js fitHeader, layout.js HEADER_STEPS);
    below it sits its handle, a horizontal splitter. --header-h (app.js) is the visible height of both, which the layout follows. */
 .top { position: fixed; top: 0; left: 0; right: 0; z-index: 2; touch-action: pan-x; user-select: none; display: flex; align-items: center; gap: 1rem; flex-wrap: nowrap; white-space: nowrap; padding: .5rem 1rem; background: var(--panel); }
 .top > * { flex: none; }
 .top.measuring { right: auto; width: max-content; }
-.top h1 { font-size: 1rem; margin: 0; cursor: grab; }
+.top h1 { font-size: 1rem; margin: 0; }
+.top h1 a { color: inherit; text-decoration: none; cursor: pointer; border-radius: 4px; }
+.top h1 a:hover { opacity: .75; }
 .top.collapsed { transform: translateY(-100%); visibility: hidden; }
 .top.dragging { visibility: visible; }
 .strip { display: flex; align-items: center; gap: 1rem; flex: 1 0 auto; }
@@ -56,19 +58,24 @@ code, pre, .mono { font-family: var(--mono); font-size: 12.5px; }
 .gpu.open .pop { display: grid; gap: .5rem; position: fixed; top: calc(var(--header-h, 3rem) - .5rem); right: .5rem; z-index: 4; max-width: calc(100vw - 1rem); padding: .6rem .75rem; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 6px 20px rgb(0 0 0 / .3); white-space: normal; }
 .gpu .pop > div { display: flex; flex-wrap: wrap; align-items: center; gap: .3rem .6rem; }
 .pop .views button[aria-current] { border-color: var(--accent); color: var(--text); font-weight: 600; }
-/* Phone: two rows — title, Board tab, live dot and theme; then the chips, CPU, Mem and GPU in one strip that scrolls sideways. */
-.top.h-phone { flex-wrap: wrap; gap: .35rem .6rem; padding: .4rem .6rem; }
-.top.h-phone .conn { margin-left: auto; }
-.top.h-phone .strip { order: 1; flex: 1 1 100%; min-width: 0; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none; touch-action: pan-x; }
-.top.h-phone .strip::-webkit-scrollbar { display: none; }
-.top.h-phone .strip > * { flex: none; }
-/* The GPU group dissolves into the strip so that ⋯ can stick to the strip's right edge, whatever is scrolled. */
-.top.h-phone .gpu { display: contents; }
-.top.h-phone .gpu > * { flex: none; }
-.top.h-phone .gpu .more-btn { position: sticky; right: 0; flex: none; background: var(--panel); }
-.tabs { display: flex; gap: .25rem; }
-.tabs button, .subtabs button { border: none; background: none; padding: .3rem .6rem; border-radius: 6px; color: var(--muted); }
-.tabs button[aria-selected=true], .subtabs button[aria-selected=true] { color: var(--text); background: var(--bg); font-weight: 600; }
+.gpu .pop > .extra, .report-btn .icon { display: none; }
+.top.h-minis .uchip:not(.spend) .vname { display: none; }
+.top.h-minis .usagebar { gap: .45rem; }
+.top.h-icons .report-btn .icon { display: inline; }
+.top.h-icons .report-btn .text { display: none; }
+.top.h-tight { gap: .4rem; padding-inline: .5rem; }
+.top.h-tight .strip, .top.h-tight .gpu { gap: .35rem; }
+.top.h-tight .sys + .gpu { margin-left: 0; }
+.top.h-tight .m-mem, .top.h-tight .cputests, .top.h-tight .uchip.spend:not(.full) { display: none; }
+.top.h-tight .mini { width: 16px; }
+/* Last step: theme and report move into the ⋯ popover, and the usage chips take only what room is left (clipped). */
+.top.h-min > .theme, .top.h-min > .report-btn { display: none; }
+.top.h-min .gpu .pop > .extra { display: flex; }
+.top.h-min .strip { flex: 1 1 0; min-width: 0; }
+.top.h-min .strip > * { flex: none; }
+.top.h-min .strip > .usagebar { flex: 0 1 auto; min-width: 0; overflow: hidden; }
+.subtabs button { border: none; background: none; padding: .3rem .6rem; border-radius: 6px; color: var(--muted); }
+.subtabs button[aria-selected=true] { color: var(--text); background: var(--bg); font-weight: 600; }
 .usagebar { display: inline-flex; align-items: center; gap: .7rem; padding: .2rem .55rem; font-size: 12px; color: var(--muted); background: none; }
 .usagebar[aria-pressed=true] { background: var(--bg); border-color: var(--accent); }
 .uchip { display: inline-flex; align-items: center; gap: .3rem; }

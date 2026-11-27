@@ -79,7 +79,8 @@ function setTheme(t) {
 }
 setTheme(localStorage.getItem('hl-theme') === 'light' ? 'light' : 'dark');
 $('#usagebar').addEventListener('click', () => show(state.view === 'usage' ? 'board' : 'usage'));
-$('#theme').addEventListener('click', () => setTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'));
+const toggleTheme = () => setTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark');
+$('#theme').addEventListener('click', toggleTheme);
 
 // ---------- header: one row while it fits, degrading step by step (layout.js HEADER_STEPS) ----------
 const top = $('header.top');
@@ -107,7 +108,7 @@ new MutationObserver(queueFit).observe(top, { childList: true, subtree: true, ch
 document.fonts?.ready.then(queueFit);
 fitHeader();
 
-// The ⋯ popover: the History and Database views, then GPU details (jobs, free VRAM, queue controls).
+// The ⋯ popover: the views (theme and report too, once the header hides their buttons), then GPU details (jobs, free VRAM, queue controls).
 function closeMore() { $('#gpu').classList.remove('open'); $('#gpu .more-btn')?.setAttribute('aria-expanded', 'false'); }
 document.addEventListener('click', (e) => {
   const g = $('#gpu');
@@ -139,7 +140,7 @@ function setCollapsed(c) {
   localStorage.setItem('hl-top', c ? 'collapsed' : 'open');
   applyTop();
 }
-new ResizeObserver(() => { topFull = top.offsetHeight + HANDLE_PX; if (!topDragging) applyTop(); }).observe(top); // two rows on phones
+new ResizeObserver(() => { topFull = top.offsetHeight + HANDLE_PX; if (!topDragging) applyTop(); }).observe(top);
 applyTop();
 
 let dragged = false; // the click that ends a drag must not also toggle
@@ -272,14 +273,15 @@ for (const sp of document.querySelectorAll('.splitter[data-split]')) initSplitte
 // ---------- state ----------
 const state = { board: null, selected: null, sub: 'terminal', view: 'board', histSelected: null };
 
-// ---------- tabs ----------
-for (const b of document.querySelectorAll('.tabs button')) {
-  b.addEventListener('click', () => show(b.dataset.view));
-}
+// ---------- views ----------
+$('#home').addEventListener('click', (e) => {
+  if (e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return; // open in a new tab or window
+  e.preventDefault();
+  show('board');
+});
 function show(view) {
   state.view = view;
-  for (const b of document.querySelectorAll('.tabs button')) b.setAttribute('aria-selected', String(b.dataset.view === view));
-  for (const b of document.querySelectorAll('.pop button[data-view]')) markCurrent(b);
+  for (const b of document.querySelectorAll('#home, .pop button[data-view]')) markCurrent(b);
   $('#usagebar').setAttribute('aria-pressed', String(view === 'usage'));
   for (const v of ['board', 'usage', 'history', 'db']) $(`#view-${v}`).hidden = v !== view;
   if (view !== 'board') closeTerm();
@@ -338,7 +340,7 @@ function spark(values, label) {
 
 function metric(name, v, values, title) {
   const mins = Math.round(((state.host?.every_s || 5) * 120) / 60);
-  return h('span', { class: 'metric', title: `${title}; graph: last ${mins} min` }, name ? `${name} ` : null, h('b', { text: v == null ? '?' : `${v}%` }), spark(values, `${name} over the last ${mins} minutes`));
+  return h('span', { class: `metric${name ? ` m-${name.toLowerCase()}` : ''}`, title: `${title}; graph: last ${mins} min` }, name ? `${name} ` : null, h('b', { text: v == null ? '?' : `${v}%` }), spark(values, `${name} over the last ${mins} minutes`));
 }
 
 function renderSys() {
@@ -386,7 +388,8 @@ function renderGpu(g, tq) {
   const el = $('#gpu');
   const cpu = cpuTests(tq);
   const open = el.classList.contains('open');
-  if (!g?.available) { put(el, cpu, h('span', { text: g ? 'GPU: none' : 'GPU: ?' }), moreMenu(open, 'Views', 'Views')); return; }
+  const testSection = () => (tq ? h('div', {}, h('b', { text: `Tests ${tq.running.length}/${tq.limit}` }), testDetails(tq)) : null);
+  if (!g?.available) { put(el, cpu, h('span', { text: g ? 'GPU: none' : 'GPU: ?' }), moreMenu(open, 'Views', 'Views and test job details', testSection())); return; }
   const running = g.running[0];
   const details = () => [
     h('span', { title: 'Free VRAM / what a job waits for', text: `${g.freeMB ?? '?'} MiB free` }),
@@ -403,12 +406,12 @@ function renderGpu(g, tq) {
     h('span', { class: 'gpu-util' }),
     h('span', { class: 'more' }, details()),
     moreMenu(open, `${tip}\n(click for views, details and queue controls)`, 'Views, GPU and test job details',
-      tq ? h('div', {}, h('b', { text: `Tests ${tq.running.length}/${tq.limit}` }), testDetails(tq)) : null,
+      testSection(),
       h('div', {}, h('b', { text: `GPU ${g.paused ? 'paused' : running ? 'busy' : 'idle'}` }), details())),
   );
 }
 
-/** The ⋯ button and its popover: the view links, then any detail sections. */
+/** The ⋯ button and its popover: the view links (plus theme and report at the last header step), then any detail sections. */
 function moreMenu(open, title, label, ...sections) {
   const link = (view, text) => {
     const b = h('button', { type: 'button', 'data-view': view, onclick: () => { closeMore(); show(view); } }, text);
@@ -417,10 +420,15 @@ function moreMenu(open, title, label, ...sections) {
   };
   return [h('button', { class: 'more-btn', type: 'button', title, 'aria-label': label, 'aria-expanded': String(open) }, '⋯'),
     h('div', { class: 'pop', role: 'group', 'aria-label': label },
-      h('div', { class: 'views' }, link('board', 'Board'), link('history', 'History'), link('db', 'Database')), sections)];
+      h('div', { class: 'views' }, link('board', 'Board'), link('history', 'History'), link('db', 'Database')),
+      h('div', { class: 'extra' },
+        h('button', { type: 'button', onclick: () => { closeMore(); toggleTheme(); } }, 'Light / dark'),
+        h('button', { type: 'button', onclick: () => { closeMore(); report(); } }, 'Report issue (F2)')),
+      sections)];
 }
+/** Marks the title (it leads to the board) or a popover view link when its view is shown. */
 function markCurrent(b) {
-  if (b.dataset.view === state.view) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
+  if ((b.dataset.view || 'board') === state.view) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
 }
 
 /** With satellites joined (the board has `hosts`): a small muted chip naming the agent's host; none otherwise. */

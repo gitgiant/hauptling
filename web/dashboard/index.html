@@ -9,10 +9,7 @@
 </head>
 <body>
 <header class="top" id="top">
-  <h1>Hauptling</h1>
-  <nav class="tabs" role="tablist">
-    <button role="tab" data-view="board" aria-selected="true">Board</button>
-  </nav>
+  <h1><a id="home" href="#board" title="Board" aria-current="page">Hauptling</a></h1>
   <div class="strip">
     <button id="usagebar" class="usagebar" type="button" aria-label="Usage and spend: open the usage page" aria-pressed="false">Usage</button>
     <section id="sys" class="gpu sys" aria-label="Host load"></section>
@@ -20,7 +17,7 @@
   </div>
   <span id="conn" class="conn" title="Live updates"><span class="long">connecting…</span></span>
   <button id="theme" class="theme" type="button"></button>
-  <button id="report" class="report-btn" type="button" title="Report a Hauptling issue to GitHub">Report issue (F2)</button>
+  <button id="report" class="report-btn" type="button" title="Report issue (F2): file a Hauptling issue on GitHub" aria-label="Report issue (F2)"><span class="icon" aria-hidden="true">⚑</span><span class="text">Report issue (F2)</span></button>
 </header>
 <div id="top-handle" class="splitter top-handle" role="separator" tabindex="0" aria-controls="top" aria-orientation="horizontal" aria-valuemin="0" aria-valuemax="100"></div>
 
