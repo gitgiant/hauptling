@@ -218,6 +218,11 @@ export async function login(slot, vendor, { force = false } = {}) {
   const busy = force ? null : (await call('agents', { all: true }).catch(() => []))
     .find(a => a.slot === slot && a.vendor === vendor && ['spawning', 'restarting', 'paused', 'working', 'blocked', 'done'].includes(a.state));
   if (busy) throw new Error(`${busy.id} is running on ${slot} with this ${vendor} sign-in; signing in again now could sign it out mid-task. Wait until it ends (or kill it), or pass --force.`);
-  runLogin(slot, vendor);
+  const held = await call('signin.begin', { slot, vendor }).then(() => true, (e) => {
+    if (/Unknown call|Broker/.test(e.message)) return false; // an older or stopped broker: nothing refreshes then
+    throw e;
+  });
+  try { runLogin(slot, vendor); }
+  finally { if (held) await call('signin.end', { slot, vendor }).catch(() => {}); }
 }
 export { BROKER_PORT };

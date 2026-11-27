@@ -809,6 +809,31 @@ function closeTerm() { state.term?.close(); state.term = null; }
 
 // ---------- usage ----------
 let usageTimer = null;
+let refreshing = false;
+async function refreshUsageNow() {
+  if (refreshing) return;
+  refreshing = true;
+  setRefreshButton();
+  try { await api.post('/dash/usage/refresh'); }
+  catch (e) { toast(`Refresh: ${e.message}`, true); }
+  finally { refreshing = false; setRefreshButton(); loadUsage(); }
+}
+function setRefreshButton() {
+  const b = $('#usage-refresh');
+  b.disabled = refreshing;
+  b.classList.toggle('busy', refreshing);
+  b.setAttribute('aria-busy', String(refreshing));
+}
+$('#usage-refresh').addEventListener('click', refreshUsageNow);
+/** Under a card's meters: how old its newest reading is, and what the last Refresh could not do. */
+function freshness(v) {
+  const at = v.limits.map(l => l.at).filter(Boolean).sort().at(-1);
+  const r = v.refresh;
+  return [
+    at ? h('span', { class: 'resets', title: clock(at), text: `updated ${ago(at)} ago` }) : null,
+    r && r.status !== 'ok' ? h('span', { class: r.status === 'failed' ? 'refresh-note no' : 'refresh-note resets', text: r.status === 'failed' ? `✗ refresh failed: ${r.note}` : r.note }) : null,
+  ];
+}
 function meter(l) {
   const cls = l.used_pct >= 100 ? 'full' : l.used_pct >= 90 ? 'warn' : '';
   const label = l.window === 'week' ? 'week' : l.window;
@@ -834,6 +859,7 @@ async function loadUsage() {
         : v.key && !v.budget ? h('div', { class: 'ok', title: `Every slot uses this key; billed per token. hauptling key rm ${v.vendor} switches back to sign-ins.`, text: `✓ API key ${v.key}` })
           : h('div', { class: signed === v.slots.length ? 'ok' : 'no', text: `${signed === v.slots.length ? '✓' : '✗'} signed in on ${signed}/${v.slots.length} slots${v.budget ? ' (after the API budget)' : ''}` }),
         v.limits.length ? v.limits.sort((a) => (a.window === '5h' ? -1 : 1)).map(meter) : h('p', { class: 'resets', text: 'No usage reported yet; workers report it while they run.' }),
+        freshness(v),
         (v.hosts || []).map(x => h('div', { class: 'hostusage' }, h('span', { class: 'chip host', title: x.online ? 'online' : 'offline: last reading', text: x.host }),
           [...x.limits].sort((a) => (a.window === '5h' ? -1 : 1)).map(meter))),
         v.key && !v.budget ? null : h('details', { class: 'slots', open: signed < v.slots.length },

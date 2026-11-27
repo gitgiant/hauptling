@@ -47,11 +47,11 @@ const delegators = [
 ];
 const board = { agents, delegators, blocked: 1, gpu: { available: true, paused: false, freeMB: 6210, running: [{ id: 'g12', agent: agents[0].id }], queued: [{ id: 'g13', waiting_since: ago(1) }] } };
 const host = { name: 'preview-host-with-a-long-name', cpu: 37, mem: 61, gpu: 88, every_s: 5, hist: { cpu: wave(120, i => 30 + 20 * Math.sin(i / 9)), mem: wave(120, i => 55 + i / 20), gpu: wave(120, i => (i % 40 < 25 ? 90 : 5)) } };
-const vendor = (v, l5, lw, extra = {}) => ({ vendor: v, key: null, limits: [{ window: '5h', used_pct: l5, resets_at: ago(-90) }, { window: '7d', used_pct: lw, resets_at: ago(-3000) }],
+const vendor = (v, l5, lw, extra = {}) => ({ vendor: v, key: null, limits: [{ window: '5h', used_pct: l5, resets_at: ago(-90), at: ago(3) }, { window: '7d', used_pct: lw, resets_at: ago(-3000), at: ago(3) }],
   slots: ['hl-w1', 'hl-w2', 'hl-w3'].map((s, i) => ({ slot: s, signed_in: i < 3, busy: i === 0 ? agents[0].id : null, login: `${v} login` })), ...extra });
 const row = (key, n) => ({ key, agents: n, cost_usd: n * 2.37, unknown: 0, estimated: 0, tokens_in: n * 310e3, tokens_out: n * 21e3 });
 const usage = {
-  vendors: [vendor('claude', 42, 71, { key: 'sk-…a1', budget: { usd: 100, spent: 38.2, stop_at: 95, until: ago(-20 * 1440) } }), vendor('codex', 93, 40), vendor('agy', 12, 8)],
+  vendors: [vendor('claude', 42, 71, { key: 'sk-…a1', budget: { usd: 100, spent: 38.2, stop_at: 95, until: ago(-20 * 1440) } }), vendor('codex', 93, 40), vendor('agy', 12, 8, { refresh: { status: 'failed', note: 'timed out after 45 s', at: ago(1) } })],
   spend: { total: row('total', 31), byVendor: [row('claude', 22), row('codex', 9)], byRepo: [row('/home/me/hauptling', 25), row('example/nullpunkt', 6)], byDay: [0, 1, 2, 3].map(d => row(ago(d * 1440).slice(0, 10), 8 - d)) },
 };
 const tables = ['agents', 'events', 'tests', 'gpu_jobs', 'mail', 'usage', 'keys'].map((name, i) => ({ name, rows: (i + 1) * 37 }));

@@ -9,6 +9,7 @@ import { workerKeyEnv } from './keys.mjs';
 import { INSTALL_TIMEOUT_S } from './vendors.mjs';
 import * as codegraph from './codegraph.mjs';
 import * as sessions from './sessions.mjs';
+import { PROBE } from './usage-refresh.mjs';
 
 /*
  * Where workers run: a fresh Docker container per task.
@@ -290,6 +291,43 @@ async function codexRollout(roots, since) {
     readSync(fd, buf, 0, len, newest.size - len);
     return lastTokenCount(buf.toString('utf8'));
   } finally { closeSync(fd); }
+}
+
+/** Talks to `codex app-server` (JSON lines on stdio): initialize, then `account/rateLimits/read`. */
+export function codexRateLimits(argv, { timeoutMs }) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(argv[0], argv.slice(1), { stdio: ['pipe', 'pipe', 'pipe'] });
+    let buf = '', err = '', done = false;
+    const end = (e, result) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      child.stdin.end();
+      child.kill();
+      e ? reject(e) : resolve(result);
+    };
+    const timer = setTimeout(() => end(new Error(`timed out after ${Math.round(timeoutMs / 1000)} s`)), timeoutMs);
+    const send = (m) => child.stdin.write(`${JSON.stringify(m)}\n`);
+    child.stdin.on('error', () => {});
+    child.stderr.on('data', d => { err = (err + d).slice(-600); });
+    child.on('error', end);
+    child.on('close', code => end(new Error(`codex app-server exited (${code}) without an answer: ${err.trim()}`)));
+    child.stdout.on('data', d => {
+      buf += d;
+      for (let i; (i = buf.indexOf('\n')) >= 0;) {
+        const line = buf.slice(0, i);
+        buf = buf.slice(i + 1);
+        let m;
+        try { m = JSON.parse(line); } catch { continue; }
+        if (m.id !== 1 && m.id !== 2) continue;
+        if (m.error) return end(new Error(m.error.message || 'codex app-server error'));
+        if (m.id === 2) return end(null, m.result);
+        send({ method: 'initialized' });
+        send({ id: 2, method: 'account/rateLimits/read' });
+      }
+    });
+    send({ id: 1, method: 'initialize', params: { clientInfo: { name: 'hauptling', title: 'hauptling', version: '1' } } });
+  });
 }
 
 /** Each vendor's config dirs inside a slot (and inside a worker, under /home/worker/.vendor). */
@@ -603,6 +641,26 @@ export function dockerHost({ log = () => {}, docker: dockerCmd = docker } = {}) 
     testConcurrency: () => config().testConcurrency,
     maxWorkers: () => config().maxWorkers,
     testRoundAsk: () => config().testRoundAsk,
+
+    /**
+     * Asks the vendor's CLI for its usage, in a throwaway container with the slot's credentials for that vendor
+     * (one per slot × vendor; removed when done or timed out). Resolves with stdout; codex: the RPC result.
+     */
+    async usageProbe(slot, vendor, { timeoutMs }) {
+      const tag = baseImageTag();
+      if (!await imageExists(tag)) throw new Error('worker image not built: run `hauptling image`');
+      const name = `hauptling-usage-${slot}-${vendor}`;
+      const remove = () => dockerCmd(['rm', '-f', name], { timeout: 20e3 }).catch(() => {});
+      await remove(); // left over from a broker that stopped mid-refresh
+      const args = ['run', '--rm', '-i', '--init', '--name', name, '--user', uid(), '--network', NET, ...vendorMounts(slot, vendor), ...proxyEnv(), '-e', 'TZ=UTC', tag, ...PROBE[vendor]];
+      try {
+        if (vendor === 'codex') return await codexRateLimits(dockerArgv(args), { timeoutMs });
+        return (await dockerCmd(args, { timeout: timeoutMs }).catch(e => {
+          if (e.stdout?.trim()) return e; // a failing CLI still says why on stdout
+          throw e;
+        })).stdout;
+      } finally { await remove(); }
+    },
 
     /** argv for an interactive sign-in in a throwaway container with the slot's credentials for this vendor. */
     loginArgv(slot, vendor, vendorArgv) {

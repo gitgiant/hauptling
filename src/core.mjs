@@ -6,6 +6,7 @@ import { checkTier, effortFor, enabledVendors, findModel, launchArgv, loadModels
 import { canInject } from './vendors.mjs';
 import { readFileSync } from 'node:fs';
 import { normalizeUsage, scrub, spendLine, statusText, windowSnapshot, accumulate, outOfCredit, reportedCost } from './usage.mjs';
+import { parseProbe, shortError } from './usage-refresh.mjs';
 import { dashToken } from './dashboard.mjs';
 import { checkKeys } from './terminal.mjs';
 import { MAIL_MAX, STATUS_MAX, bounded, githubSlug, hex, isFamily, now, sanitizeModel, token, wslPath } from './util.mjs';
@@ -54,6 +55,9 @@ const HOST_CMDS = { pause: 'pause', unpause: 'resume', restart: 'restart', kill:
 const HANDOFF_PCT = 85;
 /** A vendor with a usage window at this % or more is skipped by the rotation (`headroomPct` in config.json). */
 const HEADROOM_PCT = 80;
+/** Usage refresh: one per this long, and how long each vendor's CLI gets. */
+const REFRESH_GAP_MS = 30e3;
+const REFRESH_TIMEOUT_MS = 45e3;
 const WORKER_RULES = readFileSync(new URL('../prompts/worker-rules.md', import.meta.url), 'utf8').trim();
 
 export function createCore({ db, host, github, notify = () => false, models = loadModels, savePrefer = setPrefer, keys = keyStore, workerUrl, publicUrl = workerUrl, runnerToken, hub = null, satellite = null, remoteWaitMs = 30e3, log = () => {}, stallMinutes = Number(process.env.HAUPTLING_STALL_MINUTES || 10), idleMinutes = Number(process.env.HAUPTLING_IDLE_MINUTES || 15), parkMinutes = 2, parkDelayMs = 3000 }) {
@@ -309,7 +313,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
    */
   function freeSlots(vendor, except = null) {
     const used = new Set(db.prepare(`SELECT slot FROM agents WHERE slot IS NOT NULL AND host = 'hub' AND vendor = ? AND id IS NOT ? AND ${inActive}`).all(vendor, except, ...ACTIVE).map(r => r.slot));
-    return slots().filter(s => !used.has(s));
+    return slots().filter(s => !used.has(s) && held.get(`${s}:${vendor}`) !== 'refreshing usage');
   }
   /** Live worker containers on this host, across every delegator. */
   const workerCount = (except = null) => db.prepare(`SELECT COUNT(*) n FROM agents WHERE slot IS NOT NULL AND host = 'hub' AND id IS NOT ? AND ${inActive}`).get(except, ...ACTIVE).n;
@@ -521,24 +525,42 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     const u = accumulate(prev ? JSON.parse(prev) : null, reading, { vendor: a.vendor, sessionId, reported: reportedCost(a.vendor, payload) });
     update(a.id, { usage: JSON.stringify({ ...u, at: now() }) });
     if (a.billing === 'api') budgetWarn(a);
-    if (!a.slot) return u;
-    for (const l of u.limits) {
+    if (a.slot) recordSlotUsage(a.slot, a.vendor, u.limits, a);
+    return u;
+  }
+
+  /** Providers round a reset differently (status line: to the second; `/usage`: to the minute): within this, it is one reset. */
+  const SAME_RESET_MS = 120e3;
+  function sameReset(vendor, window, resetsAt) {
+    const old = db.prepare('SELECT resets_at FROM slot_usage WHERE vendor = ? AND window = ? ORDER BY at DESC').get(vendor, window)?.resets_at;
+    return old && resetsAt && Math.abs(Date.parse(old) - Date.parse(resetsAt)) < SAME_RESET_MS ? old : resetsAt;
+  }
+
+  /**
+   * A slot's limit windows, from a worker's reading (`a`) or a usage refresh (no agent: every active delegator
+   * is told). Warns once per window at 90%.
+   */
+  function recordSlotUsage(slot, vendor, limits, a = null) {
+    for (const l of limits) {
+      l.resets_at = sameReset(vendor, l.window, l.resets_at);
       db.prepare(`INSERT INTO slot_usage (slot, vendor, window, used_pct, resets_at, at) VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT (slot, vendor, window) DO UPDATE SET used_pct = excluded.used_pct, resets_at = excluded.resets_at, at = excluded.at`).run(a.slot, a.vendor, l.window, l.used_pct, l.resets_at, now());
+        ON CONFLICT (slot, vendor, window) DO UPDATE SET used_pct = excluded.used_pct, resets_at = excluded.resets_at, at = excluded.at${
+        // Codex readings are re-read from a log: an unchanged one isn't news, and mustn't outdate a refresh on another slot.
+        a?.vendor === 'codex' ? ' WHERE used_pct IS NOT excluded.used_pct OR resets_at IS NOT excluded.resets_at' : ''}`).run(slot, vendor, l.window, l.used_pct, l.resets_at, now());
       // Slot readings stand in for the delegator's own only until its host CLI reports (same-account assumption).
-      if (l.used_pct >= HANDOFF_PCT && !hostReports(a.vendor)) handoffDue(a.vendor, l);
+      if (l.used_pct >= HANDOFF_PCT && !hostReports(vendor)) handoffDue(vendor, l);
       if (l.used_pct < 90) continue;
-      const key = `usage:warn:${a.vendor}:${l.window}:${l.resets_at || 'unknown'}`; // once per account window, whichever slot reports it
+      const key = `usage:warn:${vendor}:${l.window}:${l.resets_at || 'unknown'}`; // once per account window, whichever slot reports it
       if (kvGet(db, key)) continue;
       kvSet(db, key, now());
       const when = l.resets_at ? `resets ${new Date(l.resets_at).toLocaleString()}` : 'reset time unknown';
       const full = l.used_pct >= 100;
-      const text = `${a.vendor} ${l.window} window at ${Math.round(l.used_pct)}% (${when})${full ? `; new ${a.vendor} spawns wait until then` : ''}`;
-      emit(a.delegator, a.id, 'usage-high', text);
-      toast(a.id, { title: `${a.vendor} usage ${Math.round(l.used_pct)}%`, body: text, choices: [], links: null, dashboard: `${publicUrl}/#usage` });
+      const text = `${vendor} ${l.window} window at ${Math.round(l.used_pct)}% (${when})${full ? `; new ${vendor} spawns wait until then` : ''}`;
+      const to = a ? [a.delegator] : db.prepare('SELECT id FROM delegators WHERE active = 1').all().map(d => d.id);
+      for (const d of to) emit(d, a?.id ?? null, 'usage-high', text);
+      toast(a?.id ?? null, { title: `${vendor} usage ${Math.round(l.used_pct)}%`, body: text, choices: [], links: null, dashboard: `${publicUrl}/#usage` });
       log(`usage-high ${text}`);
     }
-    return u;
   }
 
   /** Once per budget period, when API spend reaches STOP_AT: new spawns of that vendor go to the plan. */
@@ -607,6 +629,77 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
         if (p) recordUsage(a, p);
       } catch (e) { log(`codex usage ${a.id}: ${e.message} (format changed? usage shows unknown)`); }
     }
+  }
+
+  // ---------- usage refresh (PRD "Usage refresh") ----------
+  /** `slot:vendor` → why nothing else may use that sign-in right now: a refresh or a sign-in being started. */
+  const held = new Map();
+  /** A sign-in in the user's own terminal (`hauptling login`) is recorded in kv, and forgotten after this long. */
+  const CLI_SIGNIN_MS = 30 * 60e3;
+  const cliSignin = (slot, vendor) => Date.now() - Date.parse(kvGet(db, `signin:${slot}:${vendor}`) || 0) < CLI_SIGNIN_MS;
+  /** Takes a slot's sign-in for `why` (synchronously, so check-and-take can't race); returns the release. */
+  function holdSignin(slot, vendor, why = 'signing in') {
+    const key = `${slot}:${vendor}`;
+    if (held.get(key) === 'refreshing usage') throw new Error(`${slot}'s ${vendor} usage is being refreshed; try again in a minute`);
+    if (held.has(key)) throw new Error(`${slot} ${vendor} is ${held.get(key)}`);
+    held.set(key, why);
+    return () => held.delete(key);
+  }
+
+  /** Why a refresh must leave this slot's sign-in alone, or null. One process per refresh token (PRD "Security"). */
+  function signinBusy(slot, vendor) {
+    const w = db.prepare(`SELECT id FROM agents WHERE slot = ? AND vendor = ? AND host = 'hub' AND ${inActive}`).get(slot, vendor, ...ACTIVE);
+    if (w) return `${w.id} is running`;
+    if (held.has(`${slot}:${vendor}`)) return held.get(`${slot}:${vendor}`);
+    return cliSignin(slot, vendor) ? 'signing in' : null;
+  }
+
+  /** One vendor: the first signed-in slot nobody else is using, its CLI asked once, the windows stored on that slot. */
+  async function refreshVendor(vendor, timeoutMs) {
+    const skipped = (note) => ({ vendor, status: 'skipped', note });
+    // A running Codex worker's session log is free to read, whether or not a slot is free to ask.
+    if (vendor === 'codex') await refreshUsage({ force: true });
+    if (getKey(vendor) && !getBudget(vendor)) return skipped('billed on an API key: no plan windows');
+    const signed = await host.signedIn(slots(), vendor);
+    if (!signed.length) return skipped('not signed in on any slot');
+    let why = null;
+    for (const slot of signed) {
+      const busy = signinBusy(slot, vendor);
+      if (busy) { why ||= busy; continue; }
+      const release = holdSignin(slot, vendor, 'refreshing usage');
+      let probe;
+      try {
+        if (await host.signingIn?.(slot, vendor)) { release(); why ||= 'signing in'; continue; }
+        probe = Promise.resolve(host.usageProbe(slot, vendor, { timeoutMs }));
+      } catch (e) { release(); throw e; }
+      // The slot stays held until the CLI has really ended, even when we stop waiting for it.
+      probe.finally(() => { release(); later('start queued after a usage refresh', startAll); }).catch(() => {});
+      let timer;
+      const late = new Promise((_, no) => { timer = setTimeout(() => no(new Error(`timed out after ${Math.round(timeoutMs / 1000)} s`)), timeoutMs); });
+      const limits = parseProbe(vendor, await Promise.race([probe, late]).finally(() => clearTimeout(timer)));
+      recordSlotUsage(slot, vendor, limits);
+      return { vendor, status: 'ok', slot, limits };
+    }
+    return skipped(`refreshes while a worker runs (every signed-in slot is busy: ${why})`);
+  }
+
+  let refreshedAt = -Infinity;
+  /** vendor → the last refresh's { status, note, at }, for the Usage page. */
+  const refreshed = new Map();
+  const lastRefresh = (vendor) => refreshed.get(vendor) || null;
+  /** Asks every vendor for its current 5h/week usage, in parallel; at most once per `REFRESH_GAP_MS`. */
+  async function refreshAllUsage({ timeoutMs = REFRESH_TIMEOUT_MS } = {}) {
+    const wait = Math.ceil((refreshedAt + REFRESH_GAP_MS - Date.now()) / 1000);
+    if (wait > 0) throw Object.assign(new Error(`Usage was just refreshed; try again in ${wait} s`), { status: 429 });
+    refreshedAt = Date.now();
+    const vendors = await Promise.all(['claude', 'codex', 'agy'].map(async (vendor) => {
+      let r;
+      try { r = await refreshVendor(vendor, timeoutMs); }
+      catch (e) { r = { vendor, status: 'failed', note: shortError(e.message) }; log(`usage refresh ${vendor}: ${r.note}`); }
+      refreshed.set(vendor, { status: r.status, note: r.note || null, at: now() });
+      return r;
+    }));
+    return { vendors };
   }
 
   async function cloneWorker(a, { restart = false } = {}) {
@@ -1997,6 +2090,10 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
       if (!isFamily(vendor)) throw new Error(`Vendor must be claude, codex or agy, got "${vendor}"`);
       return { text: statusText(recordHostUsage(vendor, normalizeUsage(vendor, scrub(payload)))) };
     },
+    'usage.refresh': () => refreshAllUsage(),
+    // `hauptling login` runs in the user's terminal: it says so, so no refresh touches that sign-in meanwhile.
+    'signin.begin': ({ slot, vendor }) => { const release = holdSignin(slot, vendor); kvSet(db, `signin:${slot}:${vendor}`, now()); release(); return { ok: true }; },
+    'signin.end': ({ slot, vendor }) => { kvDel(db, `signin:${slot}:${vendor}`); return { ok: true }; },
     'dashboard.token': ({ rotate = false }) => ({ token: dashToken(db, { rotate }), url: publicUrl }),
     'gpu.pause': gpuPause, 'gpu.resume': gpuResume, 'gpu.status': gpuStatus,
     'models.prefer': ({ value }) => (value ? savePrefer(value) : preferOf(models())),
@@ -2040,5 +2137,5 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   hub?.bind({ receive, onState: placeSoon, onResult: commandDone });
   if (satellite) syncTests();
 
-  return { call, authenticate, emit, keyOut, command, startAll, syncTests, freeSlots, headroomNote, spend, testProgress, poll, watch, watchTests, startQueued, bus, askForPage, answer, pump, recover, gpuReady, refreshUsage, recordUsage, budgetState, billingFor };
+  return { call, authenticate, emit, keyOut, command, startAll, syncTests, freeSlots, headroomNote, spend, testProgress, poll, watch, watchTests, startQueued, bus, askForPage, answer, pump, recover, gpuReady, refreshUsage, refreshAllUsage, lastRefresh, holdSignin, recordUsage, budgetState, billingFor };
 }

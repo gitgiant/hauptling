@@ -34,7 +34,7 @@
 
 <main id="view-usage" class="usage" hidden>
   <section class="panel">
-    <h2>Accounts</h2>
+    <div class="panelhead"><h2>Accounts</h2><button id="usage-refresh" type="button" title="Read each vendor's current 5h and week usage now (no model tokens; once per 30 s)"><span class="spinner" aria-hidden="true"></span>Refresh</button></div>
     <p class="empty">One account per vendor, signed in once on each slot (or one API key for all). At 90% of a window you get a notification; at 100% new spawns of that vendor wait until it resets.</p>
     <div id="vendors"></div>
   </section>
