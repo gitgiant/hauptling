@@ -66,21 +66,22 @@ test('collapseAfterDrag: the tab expands on a click, a drag down or a flick down
 
 test('stepClasses: each header step keeps the degrades before it', () => {
   assert.deepEqual(stepClasses(0), []);
-  assert.deepEqual(stepClasses(1), ['h-no-spark']);
-  assert.deepEqual(stepClasses(3), ['h-no-spark', 'h-short', 'h-brief']);
-  assert.deepEqual(stepClasses(HEADER_STEPS.length - 1), ['h-no-spark', 'h-short', 'h-brief', 'h-phone']);
+  assert.deepEqual(stepClasses(1), ['h-no-host'], 'the host name goes first');
+  assert.deepEqual(stepClasses(4), ['h-no-host', 'h-no-spark', 'h-short', 'h-brief']);
+  assert.deepEqual(stepClasses(HEADER_STEPS.length - 1), ['h-no-host', 'h-no-spark', 'h-short', 'h-brief', 'h-phone']);
 });
 
 test('pickStep: the least degraded step whose row fits at a given width', () => {
-  const needs = [1700, 1450, 1250, 700]; // row width at full, no sparklines, short labels, brief GPU
+  const needs = [1800, 1700, 1450, 1250, 700]; // row width at full, no host name, no sparklines, short labels, brief GPU
   const at = (width, current = 0) => pickStep((s) => width - needs[s], current);
   assert.equal(at(3440), 0, 'ultrawide: everything');
   assert.equal(at(1920), 0, '1920: everything on one row');
-  assert.equal(at(1600), 1, 'drop the sparklines first');
-  assert.equal(at(1366), 2, 'then shorten labels');
-  assert.equal(at(1000), 3, 'then hide GPU details');
-  assert.equal(at(768), 3);
-  assert.equal(at(390), 4, 'phone: two rows');
+  assert.equal(at(1750), 1, 'drop the host name first');
+  assert.equal(at(1600), 2, 'then the sparklines');
+  assert.equal(at(1366), 3, 'then shorten labels');
+  assert.equal(at(1000), 4, 'then hide GPU details');
+  assert.equal(at(768), 4);
+  assert.equal(at(390), 5, 'phone: two rows');
 });
 
 test('pickStep: going back needs a margin, so a ticking number cannot flip the step', () => {

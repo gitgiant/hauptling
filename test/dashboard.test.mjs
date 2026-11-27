@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { tmpdir } from 'node:os';
+import { tmpdir, hostname } from 'node:os';
 import { openDb } from '../src/db.mjs';
 import { createCore } from '../src/core.mjs';
 import * as keyStore from '../src/keys.mjs';
@@ -216,12 +216,13 @@ test('usage panel and spend: slot × vendor limits, sign-in state, totals of fin
   s.done();
 });
 
-test('host load: CPU, memory and GPU as whole percents', async () => {
+test('host load: host name; CPU, memory and GPU as whole percents', async () => {
   const { dash, host, done } = await setup();
   host.gpuUtil = async () => 37;
   try {
     for (let i = 0; i < 1e6; i++); // some CPU between samples
-    const { cpu, mem, gpu } = await dash.hostLoad();
+    const { name, cpu, mem, gpu } = await dash.hostLoad();
+    assert.equal(name, hostname(), 'the header shows the host name');
     assert.equal(gpu, 37);
     for (const v of [cpu, mem]) assert.ok(v === null || (Number.isInteger(v) && v >= 0 && v <= 100), `got ${v}`);
     assert.ok(mem > 0);

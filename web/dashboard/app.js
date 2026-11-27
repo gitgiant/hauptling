@@ -17,7 +17,7 @@ function h(tag, props = {}, ...kids) {
     else if (k === 'text') el.textContent = v;
     else el.setAttribute(k, v === true ? '' : v);
   }
-  for (const kid of kids.flat()) if (kid != null && kid !== false) el.append(kid instanceof Node ? kid : String(kid));
+  for (const kid of kids.flat(Infinity)) if (kid != null && kid !== false) el.append(kid instanceof Node ? kid : String(kid));
   return el;
 }
 
@@ -107,14 +107,15 @@ new MutationObserver(queueFit).observe(top, { childList: true, subtree: true, ch
 document.fonts?.ready.then(queueFit);
 fitHeader();
 
-// GPU details (jobs, free VRAM, queue controls) sit behind a ⋯ popover once the header is brief.
+// The ⋯ popover: the History and Database views, then GPU details (jobs, free VRAM, queue controls).
+function closeMore() { $('#gpu').classList.remove('open'); $('#gpu .more-btn')?.setAttribute('aria-expanded', 'false'); }
 document.addEventListener('click', (e) => {
   const g = $('#gpu');
   if (e.target.closest('#gpu .more-btn')) { const open = !g.classList.contains('open'); g.classList.toggle('open', open); e.target.closest('button').setAttribute('aria-expanded', String(open)); return; }
-  if (g.classList.contains('open') && !e.target.closest('#gpu .pop')) { g.classList.remove('open'); $('#gpu .more-btn')?.setAttribute('aria-expanded', 'false'); }
+  if (g.classList.contains('open') && !e.target.closest('#gpu .pop')) closeMore();
 });
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && $('#gpu').classList.contains('open')) { $('#gpu').classList.remove('open'); $('#gpu .more-btn')?.setAttribute('aria-expanded', 'false'); }
+  if (e.key === 'Escape') closeMore();
 });
 
 // ---------- header handle: a horizontal splitter along its bottom edge; drag, click or keys hide and show it ----------
@@ -278,6 +279,7 @@ for (const b of document.querySelectorAll('.tabs button')) {
 function show(view) {
   state.view = view;
   for (const b of document.querySelectorAll('.tabs button')) b.setAttribute('aria-selected', String(b.dataset.view === view));
+  for (const b of document.querySelectorAll('.pop button[data-view]')) markCurrent(b);
   $('#usagebar').setAttribute('aria-pressed', String(view === 'usage'));
   for (const v of ['board', 'usage', 'history', 'db']) $(`#view-${v}`).hidden = v !== view;
   if (view !== 'board') closeTerm();
@@ -341,7 +343,7 @@ function metric(name, v, values, title) {
 function renderSys() {
   const l = state.host;
   if (!l) return;
-  put($('#sys'), metric('CPU', l.cpu, l.hist.cpu, 'Host CPU in use, all cores'), metric('Mem', l.mem, l.hist.mem, 'Host memory in use'));
+  put($('#sys'), l.name ? h('span', { class: 'hostname', title: `Host: ${l.name}`, text: l.name }) : null, metric('CPU', l.cpu, l.hist.cpu, 'Host CPU in use, all cores'), metric('Mem', l.mem, l.hist.mem, 'Host memory in use'));
   const g = $('#gpu .gpu-util');
   if (g) put(g, metric('', l.gpu, l.hist.gpu, 'GPU utilization'));
 }
@@ -376,13 +378,14 @@ function runNow(t) {
 
 /**
  * Header GPU area: CPU tests, GPU state and load, then details (free VRAM, jobs, queue controls).
- * Once the header is brief (layout.js HEADER_STEPS) the details hide and a ⋯ button shows them in a popover.
+ * A ⋯ button opens a popover with the view links and the details; once the header is brief (layout.js
+ * HEADER_STEPS) the inline details hide, so the popover is where they are. Without a GPU it holds the links only.
  */
 function renderGpu(g, tq) {
   const el = $('#gpu');
   const cpu = cpuTests(tq);
-  if (!g) { put(el, cpu, h('span', { text: 'GPU: ?' })); return; }
-  if (!g.available) { put(el, cpu, h('span', { text: 'GPU: none' })); return; }
+  const open = el.classList.contains('open');
+  if (!g?.available) { put(el, cpu, h('span', { text: g ? 'GPU: none' : 'GPU: ?' }), moreMenu(open, 'Views', 'Views')); return; }
   const running = g.running[0];
   const details = () => [
     h('span', { title: 'Free VRAM / what a job waits for', text: `${g.freeMB ?? '?'} MiB free` }),
@@ -394,16 +397,29 @@ function renderGpu(g, tq) {
         running ? h('button', { class: 'danger', onclick: () => confirm(`Kill ${running.id} and requeue it?`) && act('gpu.pause', { now: true }, `Paused; ${running.id} requeued`) }, 'Pause now') : null],
   ];
   const tip = [tq ? testsTip(tq) : null, `GPU ${g.paused ? 'paused' : running ? `busy: ${running.id}${running.agent ? ` (${running.agent})` : ''}` : 'idle'} · ${g.freeMB ?? '?'} MiB free${g.queued.length ? ` · ${g.queued.length} queued` : ''}`].filter(Boolean).join('\n');
-  const open = el.classList.contains('open');
   put(el, cpu,
     h('span', { title: tip }, 'GPU ', g.paused ? h('b', { text: 'paused' }) : h('b', { class: 'long', text: running ? 'busy' : 'idle' })),
     h('span', { class: 'gpu-util' }),
     h('span', { class: 'more' }, details()),
-    h('button', { class: 'more-btn', type: 'button', title: `${tip}\n(click for details and queue controls)`, 'aria-label': 'GPU and test job details', 'aria-expanded': String(open) }, '⋯'),
-    h('div', { class: 'pop', role: 'group', 'aria-label': 'GPU and test job details' },
+    moreMenu(open, `${tip}\n(click for views, details and queue controls)`, 'Views, GPU and test job details',
       tq ? h('div', {}, h('b', { text: `Tests ${tq.running.length}/${tq.limit}` }), testDetails(tq)) : null,
       h('div', {}, h('b', { text: `GPU ${g.paused ? 'paused' : running ? 'busy' : 'idle'}` }), details())),
   );
+}
+
+/** The ⋯ button and its popover: the view links, then any detail sections. */
+function moreMenu(open, title, label, ...sections) {
+  const link = (view, text) => {
+    const b = h('button', { type: 'button', 'data-view': view, onclick: () => { closeMore(); show(view); } }, text);
+    markCurrent(b);
+    return b;
+  };
+  return [h('button', { class: 'more-btn', type: 'button', title, 'aria-label': label, 'aria-expanded': String(open) }, '⋯'),
+    h('div', { class: 'pop', role: 'group', 'aria-label': label },
+      h('div', { class: 'views' }, link('history', 'History'), link('db', 'Database')), sections)];
+}
+function markCurrent(b) {
+  if (b.dataset.view === state.view) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
 }
 
 /** With satellites joined (the board has `hosts`): a small muted chip naming the agent's host; none otherwise. */
