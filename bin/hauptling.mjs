@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
-import { resolve } from 'node:path';
-import { githubSlug, parseArgs } from '../src/util.mjs';
+import { readFileSync, readdirSync, writeFileSync, existsSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import { githubSlug, home, parseArgs } from '../src/util.mjs';
 import { spawnSync } from 'node:child_process';
 
 const USAGE = `hauptling — delegate coding tasks to Claude, Codex and agy workers
@@ -45,6 +45,7 @@ Setup:
   image                                    build the worker image if hauptling changed
   key set VENDOR | key rm VENDOR | key list   API key instead of slot sign-ins (one key for all slots; billed per token)
   key budget VENDOR USD|off [--resets-on DAY] API first up to USD a month (new API spawns stop at 90%), then slot sign-ins
+  key up-to VENDOR TIER|MODEL|off          the key pays only for models up to this tier (also --up-to on set/budget); above it: plan
   login SLOT VENDOR [--force]              sign one slot in to claude|codex|agy (refused while a worker of that vendor runs on the slot)
   init [DIR]                               write the detected hauptling.json
   broker start|stop|restart|status|run
@@ -158,8 +159,8 @@ async function main() {
         testWriter: args.testWriter || args.testWriterModel ? { vendor: args.testWriterVendor, model: args.testWriterModel } : false,
         brief: readFileSync(args.brief, 'utf8'), host: args.host, gpu: Boolean(args.gpu),
       });
-      out(`${r.id} (${r.vendor} ${r.model}${r.effort ? `, effort ${r.effort}` : ''}${r.billing ? `, ${r.billing}` : ''}) ${r.state}${r.host && r.host !== 'hub' ? ` on ${r.host}` : ''}`);
-      if (r.testWriter) out(`${r.testWriter.id} (${r.testWriter.vendor} ${r.testWriter.model}) ${r.testWriter.state} — writes spec tests first`);
+      out(`${r.id} (${r.vendor} ${r.model}${r.effort ? `, effort ${r.effort}` : ''}${bill(r)}) ${r.state}${r.host && r.host !== 'hub' ? ` on ${r.host}` : ''}`);
+      if (r.testWriter) out(`${r.testWriter.id} (${r.testWriter.vendor} ${r.testWriter.model}${bill(r.testWriter)}) ${r.testWriter.state} — writes spec tests first`);
       for (const note of new Set([r.warning, r.testWriter?.warning, r.waiting, r.testWriter?.waiting].filter(Boolean))) out(note);
       return;
     }
@@ -326,34 +327,70 @@ async function main() {
     case 'doctor': { const { doctor } = await import('../src/setup.mjs'); if (!await doctor({ vendors: args.vendors ? args.vendors.split(',') : undefined })) process.exitCode = 1; return; }
     case 'key': {
       const keys = await import('../src/keys.mjs');
+      const { ceilingTier, loadModels, tierName } = await import('../src/models.mjs');
       const [sub, vendor] = args._;
+      const upTo = (v) => { const t = keys.getUpTo(v); return t ? ` up to ${tierName(loadModels(), v, t)} (tier ${t})` : ''; };
       const mode = (v, h, b = keys.getBudget(v)) => (!h ? 'slot sign-ins (subscription)'
-        : b ? `API key ${h} first, up to $${b.usd} a month (new API spawns stop at $${Math.round(b.usd * keys.STOP_AT * 100) / 100}; resets on day ${b.resets_on}), then slot sign-ins`
+        : b ? `API key ${h}${upTo(v)} first, up to $${b.usd} a month (new API spawns stop at $${Math.round(b.usd * keys.STOP_AT * 100) / 100}; resets on day ${b.resets_on}), then slot sign-ins`
+        : keys.getUpTo(v) ? `API key ${h}${upTo(v)} (billed per token; models above it use the slot sign-ins)`
         : `API key ${h} (all slots, billed per token)`);
+      // --up-to: resolved before anything is stored, so an unknown name changes nothing. undefined = not given.
+      const ceiling = (value) => {
+        if (value == null) return undefined;
+        if (value === true || value === '') throw new Error('--up-to needs a tier (1–3), a model name, or off');
+        return ceilingTier(loadModels(), vendor, value);
+      };
+      /** A key for every slot with a ceiling still sends the models above it to the plan: those slots need a sign-in. */
+      const signInWarning = async () => {
+        if (!keys.getUpTo(vendor) || keys.getBudget(vendor)) return '';
+        const { logins } = await import('../src/setup.mjs');
+        let names = [];
+        try { names = readdirSync(join(home(), 'slots')).sort(); } catch {}
+        if (!names.length) names = ['hl-w1', 'hl-w2', 'hl-w3'];
+        const missing = logins(names, [vendor]).filter(l => !l.ok);
+        return missing.length ? `\nwarning: models above the ceiling use your plan, but ${missing.map(l => l.slot).join(', ')} ${missing.length > 1 ? 'are' : 'is'} not signed in to ${vendor}: ${missing.map(l => `\`hauptling login ${l.slot} ${vendor}\``).join(', ')}` : '';
+      };
       if (sub === 'list' || !sub) return out(Object.entries(keys.keyHints()).map(([v, h]) => `${v.padEnd(7)} ${mode(v, h)}`).join('\n'));
       if (sub === 'budget') {
         if (!keys.getKey(vendor)) throw new Error(`${vendor}: no API key; first: hauptling key set ${vendor}`);
         const amount = args._[2] ?? args.budget;
-        if (amount == null) throw new Error('key budget VENDOR USD [--resets-on DAY] | key budget VENDOR off');
+        if (amount == null) throw new Error('key budget VENDOR USD [--resets-on DAY] [--up-to TIER|MODEL|off] | key budget VENDOR off');
+        const tier = ceiling(args.upTo);
         keys.setBudget(vendor, amount === 'off' ? null : amount, args.resetsOn ?? 1);
-        return out(`${vendor}: ${mode(vendor, keys.keyHints()[vendor])}.\nApplies to new workers; spend so far shows on the dashboard's usage page.`);
+        if (tier !== undefined) keys.setUpTo(vendor, tier);
+        return out(`${vendor}: ${mode(vendor, keys.keyHints()[vendor])}.\nApplies to new workers; spend so far shows on the dashboard's usage page.${await signInWarning()}`);
+      }
+      if (sub === 'up-to') {
+        if (!keys.getKey(vendor)) throw new Error(`${vendor}: no API key; first: hauptling key set ${vendor}`);
+        const tier = ceiling(args._[2]);
+        if (tier === undefined) throw new Error('key up-to VENDOR TIER|MODEL|off');
+        keys.setUpTo(vendor, tier);
+        return out(`${vendor}: ${mode(vendor, keys.keyHints()[vendor])}.\nApplies to new workers.${await signInWarning()}`);
       }
       if (sub === 'rm') { const r = keys.removeKey(vendor); return out(r.removed ? `${vendor}: key removed; new workers use the slots' sign-ins again.` : `${vendor}: no key was set.`); }
       if (sub === 'set') {
+        const tier = ceiling(args.upTo);
         // Read the key from stdin (pipe) or a hidden prompt; never from argv, so it stays out of shell history.
         const key = process.stdin.isTTY ? await hiddenPrompt(`${keys.KEY_ENV[vendor] || 'API key'} for ${vendor}: `) : (await (async () => { let s = ''; for await (const c of process.stdin) s += c; return s; })());
         const r = keys.setKey(vendor, key);
-        if (args.budget != null) {
-          keys.setBudget(vendor, args.budget, args.resetsOn ?? 1);
-          return out(`${vendor}: API key ${r.hint} stored (~/.hauptling/keys/${vendor}, mode 600).\n${mode(vendor, r.hint)}. Keep the slots signed in for the fallback.\nKey for every spawn instead: hauptling key budget ${vendor} off`);
-        }
-        return out(`${vendor}: API key ${r.hint} stored (~/.hauptling/keys/${vendor}, mode 600).\nNew ${vendor} workers on every slot now use it and are billed per token by the API, not your subscription. Running workers are unchanged.\nAPI first, then your plan: hauptling key budget ${vendor} USD [--resets-on DAY]\nSwitch back: hauptling key rm ${vendor}`);
+        if (tier !== undefined) keys.setUpTo(vendor, tier);
+        const stored = `${vendor}: API key ${r.hint} stored (~/.hauptling/keys/${vendor}, mode 600).`;
+        if (args.budget != null) keys.setBudget(vendor, args.budget, args.resetsOn ?? 1);
+        if (args.budget != null) return out(`${stored}\n${mode(vendor, r.hint)}. Keep the slots signed in for the fallback.\nKey for every spawn instead: hauptling key budget ${vendor} off`);
+        if (keys.getBudget(vendor)) return out(`${stored}\n${mode(vendor, r.hint)}.`);
+        if (keys.getUpTo(vendor)) return out(`${stored}\nNew ${vendor} workers${upTo(vendor).replace(' up to', ' on models up to')} use it and are billed per token by the API; models above it use your subscription, so keep the slots signed in. Running workers are unchanged.\nSwitch back: hauptling key rm ${vendor}${await signInWarning()}`);
+        return out(`${stored}\nNew ${vendor} workers on every slot now use it and are billed per token by the API, not your subscription. Running workers are unchanged.\nAPI first, then your plan: hauptling key budget ${vendor} USD [--resets-on DAY]\nSwitch back: hauptling key rm ${vendor}`);
       }
-      throw new Error('key set VENDOR [--budget USD [--resets-on DAY]] (reads the key from stdin or a hidden prompt) | key budget VENDOR USD|off [--resets-on DAY] | key rm VENDOR | key list');
+      throw new Error('key set VENDOR [--budget USD [--resets-on DAY]] [--up-to TIER|MODEL] (reads the key from stdin or a hidden prompt) | key budget VENDOR USD|off [--resets-on DAY] [--up-to …] | key up-to VENDOR TIER|MODEL|off | key rm VENDOR | key list');
     }
     case 'login': { const { login } = await import('../src/setup.mjs'); return login(args._[0], args._[1], { force: Boolean(args.force) }); }
     default: throw new Error(`Unknown command ${cmd}\n\n${USAGE}`);
   }
+}
+
+/** ", api" | ", plan" | ", plan (above API ceiling)" for a spawned agent; nothing while its billing is open. */
+function bill(r) {
+  return r.billing ? `, ${r.billing}${r.aboveCeiling ? ' (above API ceiling)' : ''}` : '';
 }
 
 function normalizeRepo(r) {

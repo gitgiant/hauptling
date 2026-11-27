@@ -31,6 +31,36 @@ export function findModel(cfg, vendor, id) {
   return m;
 }
 
+/** A model id without its version, for messages: "sonnet-5-5" → "sonnet". */
+export const shortModel = (id) => String(id).replace(/(-\d+)+$/, '');
+
+/** "sonnet": the name of the vendor's first model at `tier`, else "tier N". */
+export function tierName(cfg, vendor, tier) {
+  const m = cfg.vendors[vendor]?.models.find(m => m.tier === tier);
+  return m ? shortModel(m.id) : `tier ${tier}`;
+}
+
+/**
+ * An API ceiling (`--up-to`) as a tier: 1–3, or a model name ("sonnet", "sonnet-5-5") resolved through
+ * models.json. 'off' → null. A name that is unknown, or fits models of several tiers, is refused.
+ */
+export function ceilingTier(cfg, vendor, value) {
+  const v = cfg.vendors[vendor];
+  if (!v) throw new Error(`Unknown vendor ${vendor}`);
+  const name = String(value).trim().toLowerCase();
+  if (name === 'off') return null;
+  if (/^[123]$/.test(name)) return Number(name);
+  const ids = (m) => [m.id, m.model].filter(Boolean);
+  let hits = v.models.filter(m => ids(m).includes(name));
+  // A part of an id, on "-" boundaries: "sonnet" fits "claude-sonnet-5-5".
+  if (!hits.length && /[a-z]/.test(name)) hits = v.models.filter(m => ids(m).some(id => `-${id}-`.includes(`-${name}-`)));
+  const tiers = [...new Set(hits.map(m => m.tier))];
+  if (tiers.length === 1) return tiers[0];
+  const have = v.models.map(m => `${m.id} (tier ${m.tier})`).join(', ');
+  throw new Error(tiers.length ? `"${value}" fits ${vendor} models of several tiers; name one: ${have}`
+    : `--up-to takes a tier 1–3, off, or a ${vendor} model name; got "${value}" (have: ${have})`);
+}
+
 /** Cheaper-model preference → highest tier spawn may use without --allow-tier. */
 export const PREFER = { cheap: 1, balanced: 2, best: 3 };
 export const preferOf = (cfg) => (cfg.prefer in PREFER ? cfg.prefer : 'best');

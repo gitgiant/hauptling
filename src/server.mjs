@@ -115,7 +115,7 @@ export async function runBroker({ port = BROKER_PORT } = {}) {
     const gpu = await gpuAvailable().catch(() => false);
     const capabilities = async () => {
       const vendors = {};
-      for (const l of logins(await core.call('slots.get'), VENDORS)) if (l.ok) (vendors[l.vendor] ||= []).push(l.slot);
+      for (const l of logins(await core.call('slots.get'), VENDORS)) if (l.ok || l.covered) (vendors[l.vendor] ||= []).push(l.slot);
       const free = Object.fromEntries(Object.entries(vendors).map(([v, signed]) => [v, core.freeSlots(v).filter(s => signed.includes(s)).length]));
       return { vendors, free, gpu, maxWorkers: dockerConfig().maxWorkers, usage: usageReadings(db) };
     };

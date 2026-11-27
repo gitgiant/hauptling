@@ -8,7 +8,8 @@ import { BROKER_PORT, VENDORS, home } from './util.mjs';
 import { call, ensureBroker } from './client.mjs';
 import { readBrokerFile } from './brokerfile.mjs';
 import { platform } from './platform/index.mjs';
-import { getBudget, keyHints } from './keys.mjs';
+import { getBudget, getUpTo, keyHints } from './keys.mjs';
+import { loadModels, tierName } from './models.mjs';
 import { NET, PROXY, WORKER_BROKER_URL, baseImageTag, docker, proxyEnv, dockerReady, ensureBaseImage, ensureNetwork, slotDir, config, hasGpu, gpuAvailable } from './docker.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -97,12 +98,18 @@ async function restartBroker() {
 /**
  * Per slot × vendor: signed in, or covered by an API key (`hauptling key set`), which every slot shares.
  * A key with a monthly budget covers nothing on its own: spawns fall back to the sign-ins once it is used up.
+ * Nor does one with a ceiling: models above it run on the sign-ins. `ok`: usable as that vendor needs (signed in,
+ * or a key that covers everything); `covered`: the key (without budget) can start workers on the slot regardless.
  */
 export const logins = (slots, vendors) => {
   const keys = keyHints();
   const signedIn = (slot, v) => spawnSync('test', ['-s', join(slotDir(slot), CREDS[v])]).status === 0;
-  return slots.flatMap(slot => vendors.map(v => (keys[v] && !getBudget(v) ? { slot, vendor: v, ok: true, key: keys[v] }
-    : { slot, vendor: v, ok: signedIn(slot, v), ...(keys[v] ? { key: keys[v], budget: getBudget(v) } : {}) })));
+  return slots.flatMap(slot => vendors.map(v => {
+    if (!keys[v]) return { slot, vendor: v, ok: signedIn(slot, v) };
+    const budget = getBudget(v), upTo = getUpTo(v);
+    if (!budget && !upTo) return { slot, vendor: v, ok: true, key: keys[v], covered: true };
+    return { slot, vendor: v, ok: signedIn(slot, v), key: keys[v], budget, ...(upTo ? { upTo } : {}), ...(budget ? {} : { covered: true }) };
+  }));
 };
 
 async function loginMissing(slots, vendors) {
@@ -199,10 +206,12 @@ export async function doctor({ slots, vendors = VENDORS } = {}) {
   for (const [v, h] of Object.entries(keyHints())) {
     if (!h || !vendors.includes(v)) continue;
     const b = getBudget(v);
-    ok(b ? `${v}: API key ${h} first, up to $${b.usd} a month (resets on day ${b.resets_on}), then the slots' sign-ins`
-      : `${v}: API key ${h} (billed per token; every slot uses it — \`hauptling key rm ${v}\` to go back to sign-ins)`);
+    const cap = getUpTo(v);
+    const upTo = cap ? ` for models up to ${tierName(loadModels(), v, cap)} (tier ${cap}; above it the slots' sign-ins)` : '';
+    ok(b ? `${v}: API key ${h} first${upTo}, up to $${b.usd} a month (resets on day ${b.resets_on}), then the slots' sign-ins`
+      : `${v}: API key ${h}${upTo} (billed per token; ${cap ? '' : 'every slot uses it — '}\`hauptling key rm ${v}\` to go back to sign-ins)`);
   }
-  for (const l of logins(names, vendors)) if (!l.key || l.budget) check(l.ok, `${l.slot} ${l.vendor} signed in`, `${l.slot} ${l.vendor} not signed in: \`hauptling login ${l.slot} ${l.vendor}\` (or \`hauptling key set ${l.vendor}\`)`);
+  for (const l of logins(names, vendors)) if (!l.key || l.budget || l.upTo) check(l.ok, `${l.slot} ${l.vendor} signed in`, `${l.slot} ${l.vendor} not signed in: \`hauptling login ${l.slot} ${l.vendor}\` (or \`hauptling key set ${l.vendor}\`)`);
   return report(all);
 }
 
