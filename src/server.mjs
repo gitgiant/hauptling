@@ -9,7 +9,7 @@ import { createDashboard } from './dashboard.mjs';
 import { createHub } from './hub.mjs';
 import { createSatellite, readSatellite } from './satellite.mjs';
 import { platform } from './platform/index.mjs';
-import { config as dockerConfig, dockerHost, gpuAvailable, slotDir, WORKER_BROKER_URL } from './docker.mjs';
+import { config as dockerConfig, dockerHost, gpuAvailable, slotDir, signOutSlot, WORKER_BROKER_URL } from './docker.mjs';
 import { logins } from './setup.mjs';
 import { createUpdater } from './update.mjs';
 import { signingIn } from './terminal.mjs';
@@ -105,7 +105,7 @@ export async function runBroker({ port = BROKER_PORT } = {}) {
   const db = openDb(dbPath);
   const plat = await platform();
   const signedIn = (slots, vendor) => logins(slots, [vendor]).filter(l => l.ok).map(l => l.slot);
-  const host = { ...dockerHost({ log }), hostGit, signingIn, signedIn };
+  const host = { ...dockerHost({ log }), hostGit, signingIn, signedIn, signOut: signOutSlot };
   const base = `http://127.0.0.1:${port}`;
   const hub = createHub({ db, log, emit: (...a) => core.emit(...a) });
   // Satellite mode (PRD "Several hosts"): `hauptling satellite join` left a key, so dial the hub, run the agents it

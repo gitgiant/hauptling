@@ -634,6 +634,7 @@ export function createDashboard({ db, dbPath, core, host, hub = null, updater = 
           run?.(); // after the response: it ends with this broker restarting
           return true;
         }
+        if (p === '/dash/signout') { json(res, 200, await core.call('signin.out', { slot: body.slot, vendor: body.vendor })); return true; }
         if (p === '/dash/term/login') { json(res, 200, await terms.startLogin(body.slot, body.vendor)); return true; }
         if (p === '/dash/hosts/token') {
           if (!hub) throw new Error('This broker is a satellite: add hosts on the hub');

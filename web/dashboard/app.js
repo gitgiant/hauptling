@@ -1,6 +1,7 @@
 // Hauptling dashboard (phase 4). Vanilla ES module; all data comes from the broker's /dash routes.
 import { ansiFragment } from './ansi.js';
 import { vendorBadge } from './vendors.js';
+import { windowLabel, sortWindows } from './windows.js';
 import { openReport, shouldOpenReport, terminalInputFocused } from './report.js';
 import { keyFor, TOUCH_KEYS } from './termkeys.js';
 import { testProgress } from './progress.js';
@@ -1050,11 +1051,11 @@ function freshness(v) {
     r && r.status !== 'ok' ? h('span', { class: r.status === 'failed' ? 'refresh-note no' : 'refresh-note resets', text: r.status === 'failed' ? `✗ refresh failed: ${r.note}` : r.note }) : null,
   ];
 }
-function meter(l) {
+function meter(l, vendor) {
   const cls = l.used_pct >= 100 ? 'full' : l.used_pct >= 90 ? 'warn' : '';
-  const label = l.window === 'week' ? 'week' : l.window;
+  const label = windowLabel(l.window, vendor);
   return h('div', { class: 'acct' },
-    h('div', { class: `meter ${cls}`, role: 'meter', 'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-valuenow': String(l.used_pct), 'aria-label': `${label} window used` },
+    h('div', { class: `meter ${cls}${vendor === 'agy' ? ' wide' : ''}`, role: 'meter', 'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-valuenow': String(l.used_pct), 'aria-label': `${label} window used` },
       h('span', { text: label }), h('span', { class: 'track' }, h('span', { class: 'fill', style: `width:${Math.min(100, l.used_pct)}%` })), h('span', { class: 'val', text: `${Math.round(l.used_pct)}%` })),
     h('span', { class: 'resets', text: l.resets_at ? `resets ${clock(l.resets_at)}` : l.used_pct === 0 ? 'not started' : 'no reset time' }));
 }
@@ -1076,16 +1077,17 @@ async function loadUsage() {
         : v.key && !v.budget ? h('div', { class: 'ok', title: `${v.up_to ? `Billed per token for models ${upTo(v)}.` : 'Every slot uses this key; billed per token.'} hauptling key rm ${v.vendor} switches back to sign-ins.`, text: `✓ API key ${v.key}` }) : null,
         v.key && !v.budget && !v.up_to ? null
           : h('div', { class: signed === v.slots.length ? 'ok' : 'no', text: `${signed === v.slots.length ? '✓' : '✗'} signed in on ${signed}/${v.slots.length} slots${v.budget ? ' (after the API budget)' : ''}` }),
-        v.limits.length ? v.limits.sort((a) => (a.window === '5h' ? -1 : 1)).map(meter) : h('p', { class: 'resets', text: 'No usage reported yet; workers report it while they run.' }),
+        v.limits.length ? sortWindows(v.limits).map(l => meter(l, v.vendor)) : h('p', { class: 'resets', text: 'No usage reported yet; workers report it while they run.' }),
         freshness(v),
         (v.hosts || []).map(x => h('div', { class: 'hostusage' }, h('span', { class: 'chip host', title: x.online ? 'online' : 'offline: last reading', text: x.host }),
-          [...x.limits].sort((a) => (a.window === '5h' ? -1 : 1)).map(meter))),
+          sortWindows(x.limits).map(l => meter(l, v.vendor)))),
         v.key && !v.budget && !v.up_to ? null : h('details', { class: 'slots', open: signed < v.slots.length },
           h('summary', { text: 'Slot sign-ins' }),
           v.slots.map(s => h('div', { class: 'slotrow' },
             h('span', { class: 'mono', text: s.slot }),
             s.signed_in ? h('span', { class: 'ok', text: '✓' }) : h('span', { class: 'no', text: '✗' }),
             h('button', { disabled: Boolean(s.busy), title: s.busy ? `Locked while ${s.busy} runs: refresh tokens rotate, so a second sign-in could sign it out mid-task.` : s.login, onclick: () => startLogin(s.slot, v.vendor) }, s.signed_in ? 'Sign in again' : 'Sign in'),
+            s.signed_in ? h('button', { disabled: Boolean(s.busy), title: s.busy ? `Locked while ${s.busy} runs.` : `Removes ${s.slot}'s ${v.vendor} sign-in, so "Sign in" asks for an account. To switch accounts, do it on every slot.`, onclick: () => signOut(s.slot, v.vendor) }, 'Sign out') : null,
             s.busy ? h('span', { class: 'resets', text: `locked: ${s.busy} running` }) : null))));
     })));
     renderSpend(u.spend);
@@ -1106,8 +1108,8 @@ function budgetLine(v) {
 function renderUsageBar(u) {
   const level = (p) => (p >= 100 ? 'full' : p >= 90 ? 'warn' : '');
   const chips = u.vendors.map(v => {
-    const ls = [...v.limits].sort((a) => (a.window === '5h' ? -1 : 1));
-    const tip = ls.length ? ls.map(l => `${l.window} ${Math.round(l.used_pct)}%${l.resets_at ? ` (resets ${clock(l.resets_at)})` : ''}`).join(' · ') : 'no usage reported yet';
+    const ls = sortWindows(v.limits);
+    const tip = ls.length ? ls.map(l => `${windowLabel(l.window, v.vendor)} ${Math.round(l.used_pct)}%${l.resets_at ? ` (resets ${clock(l.resets_at)})` : ''}`).join(' · ') : 'no usage reported yet';
     return h('span', { class: `uchip ${level(Math.max(0, ...ls.map(l => l.used_pct)))}`, title: `${v.vendor}${v.key ? ' (API key)' : ''}: ${tip}` },
       h('span', { class: 'vname', text: v.vendor }),
       ls.length ? h('span', { class: 'minis' }, ls.map(l => h('span', { class: `mini ${level(l.used_pct)}` }, h('span', { style: `width:${Math.min(100, l.used_pct)}%` }))))
@@ -1115,8 +1117,8 @@ function renderUsageBar(u) {
   });
   // Satellites' accounts (part 3): one chip per vendor and host, `vendor@host`.
   for (const v of u.vendors) for (const x of v.hosts || []) {
-    const ls = [...x.limits].sort((a) => (a.window === '5h' ? -1 : 1));
-    chips.push(h('span', { class: `uchip ${level(Math.max(0, ...ls.map(l => l.used_pct)))}`, title: `${v.vendor} on ${x.host}${x.online ? '' : ' (offline)'}: ${ls.map(l => `${l.window} ${Math.round(l.used_pct)}%`).join(' · ')}` },
+    const ls = sortWindows(x.limits);
+    chips.push(h('span', { class: `uchip ${level(Math.max(0, ...ls.map(l => l.used_pct)))}`, title: `${v.vendor} on ${x.host}${x.online ? '' : ' (offline)'}: ${ls.map(l => `${windowLabel(l.window, v.vendor)} ${Math.round(l.used_pct)}%`).join(' · ')}` },
       h('span', { class: 'vname', text: `${v.vendor}@${x.host}` }),
       h('span', { class: 'minis' }, ls.map(l => h('span', { class: `mini ${level(l.used_pct)}` }, h('span', { style: `width:${Math.min(100, l.used_pct)}%` }))))));
   }
@@ -1189,6 +1191,12 @@ function renderSpend(sp) {
   put($('#spend'),
     h('div', { class: 'figure' }, money(t.cost_usd, t.estimated > 0), ' ', h('small', { text: `${t.agents} agents · ${kfmt(t.tokens_in)} in / ${kfmt(t.tokens_out)} out tokens${t.unknown ? ` · ${t.unknown} with unknown cost` : ''}` })),
     spendTable('By vendor', sp.byVendor), spendTable('By repo', sp.byRepo), spendTable('By day', sp.byDay));
+}
+async function signOut(slot, vendor) {
+  if (!confirm(`Sign ${slot} out of ${vendor}? Its saved sign-in is removed; new ${vendor} workers skip this slot until you sign in again.`)) return;
+  try { await api.post('/dash/signout', { slot, vendor }); toast(`${slot} signed out of ${vendor}`); }
+  catch (e) { toast(e.message, true); }
+  loadUsage();
 }
 async function startLogin(slot, vendor) {
   try {

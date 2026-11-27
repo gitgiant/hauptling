@@ -7,7 +7,7 @@ import { openDb } from '../src/db.mjs';
 import { createCore } from '../src/core.mjs';
 import * as keyStore from '../src/keys.mjs';
 import { loadModels } from '../src/models.mjs';
-import { accumulate, estimateCost, lastTokenCount, normalizeUsage, outOfCredit, scrub, statusText } from '../src/usage.mjs';
+import { accumulate, estimateCost, lastTokenCount, normalizeUsage, outOfCredit, scrub, statusText, poolOf, windowLabel } from '../src/usage.mjs';
 
 // The key store reads and writes under here, never the real ~/.hauptling.
 const HOME = mkdtempSync(join(tmpdir(), 'hl-usage-'));
@@ -49,7 +49,12 @@ test('usage: agy quota "remaining" → used (fullest bucket per window); email n
   const u = normalizeUsage('agy', scrub(AGY));
   assert.equal(u.cost_usd, 0.05);
   assert.equal(u.cost_estimated, true);
-  assert.deepEqual(u.limits, [{ window: '5h', used_pct: 75, resets_at: '2026-11-24T20:00:00Z' }, { window: 'week', used_pct: 40, resets_at: '2026-11-30T00:00:00Z' }]);
+  assert.deepEqual(u.limits, [{ window: '5h', used_pct: 75, resets_at: '2026-11-24T20:00:00Z' }, { window: '3p-5h', used_pct: 10, resets_at: '2026-11-24T21:00:00Z' }, { window: 'week', used_pct: 40, resets_at: '2026-11-30T00:00:00Z' }],
+    'the Claude/GPT ("3p") buckets are their own windows');
+  assert.equal(statusText(u), 'hauptling · ctx 5% · ~$0.05 · 5h 75% · week 40%', 'a Gemini worker shows the Gemini windows');
+  assert.equal(statusText({ ...u, model: 'Claude Sonnet 5.5 (Medium)' }), 'hauptling · ctx 5% · ~$0.05 · 5h 10%', 'a Claude worker on agy shows the Claude/GPT ones');
+  assert.deepEqual([poolOf('agy', 'claude-opus-5-5-high'), poolOf('agy', 'gpt-oss-120b-medium'), poolOf('agy', 'gemini-4-neon-high'), poolOf('claude', 'claude-opus-5-5')], ['3p', '3p', '', '']);
+  assert.deepEqual([windowLabel('3p-week', 'agy'), windowLabel('5h', 'agy'), windowLabel('5h', 'claude')], ['Claude/GPT week', 'Gemini 5h', '5h']);
 });
 
 test('usage: Codex rollout tail → last token_count; cost estimated from models.json prices or unknown', () => {

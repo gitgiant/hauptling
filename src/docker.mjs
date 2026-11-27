@@ -351,6 +351,21 @@ export function slotDir(slot) {
   return d;
 }
 
+/** Credential file per vendor inside a slot dir: present and non-empty means signed in. */
+export const CREDS = { claude: 'claude/.credentials.json', codex: 'codex/auth.json', agy: 'gemini/antigravity-cli/antigravity-oauth-token' };
+
+/**
+ * Signs a slot out of a vendor: removes its credential file (nothing else; settings and sessions stay), so the
+ * next sign-in asks for an account. Returns whether it was signed in.
+ */
+export function signOutSlot(slot, vendor, dir = slotDir(slot)) {
+  if (!CREDS[vendor]) throw new Error(`Unknown vendor ${vendor}`);
+  const p = join(dir, CREDS[vendor]);
+  const was = existsSync(p);
+  rmSync(p, { force: true });
+  return was;
+}
+
 /** `-v` flags mounting only this vendor's dirs from the slot: a codex worker on hl-w2 never sees hl-w2's Claude token. */
 export function vendorMounts(slot, vendor) {
   const dirs = VENDOR_DIRS[vendor];

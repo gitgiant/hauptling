@@ -282,6 +282,7 @@ details.slots > summary { cursor: pointer; font-size: 12px; color: var(--muted);
 .acct { display: grid; gap: .3rem; }
 .ok { color: var(--ok); } .no { color: var(--bad); }
 .meter { display: grid; grid-template-columns: 2.6rem 1fr 3.2rem; gap: .4rem; align-items: center; font-size: 12px; color: var(--muted); }
+.meter.wide { grid-template-columns: 7.2rem 1fr 3.2rem; }
 .meter .track { height: 6px; border-radius: 3px; background: color-mix(in srgb, var(--muted) 22%, transparent); overflow: hidden; }
 .meter .fill { display: block; height: 100%; border-radius: 3px; background: var(--accent); }
 .meter.warn .fill { background: var(--warn); } .meter.full .fill { background: var(--bad); }

@@ -51,6 +51,7 @@ Setup:
   key budget VENDOR USD|off [--resets-on DAY] API first up to USD a month (new API spawns stop at 90%), then slot sign-ins
   key up-to VENDOR TIER|MODEL|off          the key pays only for models up to this tier (also --up-to on set/budget); above it: plan
   login SLOT VENDOR [--force]              sign one slot in to claude|codex|agy (refused while a worker of that vendor runs on the slot)
+  logout SLOT|all VENDOR                   sign a slot (or every slot) out of a vendor, to sign in with another account
   init [DIR]                               write the detected hauptling.json
   broker start|stop|restart|status|run
   hub token                                one-time join token for a satellite (15 min)
@@ -217,8 +218,8 @@ async function main() {
     case 'usage': {
       if (args._[0] === 'refresh') {
         const { vendors } = await call('usage.refresh');
-        const { noReset } = await import('../src/usage.mjs');
-        return out(vendors.map(v => `${v.vendor.padEnd(7)}${v.status === 'ok' ? `${v.limits.map(l => `${l.window} ${Math.round(l.used_pct)}%${l.resets_at ? ` (resets ${new Date(l.resets_at).toLocaleString()})` : ` (${noReset(l.used_pct)})`}`).join(' · ')}  [${v.slot}]` : `${v.status}: ${v.note}`}`).join('\n'));
+        const { noReset, windowLabel } = await import('../src/usage.mjs');
+        return out(vendors.map(v => `${v.vendor.padEnd(7)}${v.status === 'ok' ? `${v.limits.map(l => `${windowLabel(l.window, v.vendor)} ${Math.round(l.used_pct)}%${l.resets_at ? ` (resets ${new Date(l.resets_at).toLocaleString()})` : ` (${noReset(l.used_pct)})`}`).join(' · ')}  [${v.slot}]` : `${v.status}: ${v.note}`}`).join('\n'));
       }
       // A worker's status line command: forward the vendor's JSON, print a short line. Never blocks the TUI for long.
       let raw = '';
@@ -419,6 +420,16 @@ async function main() {
       throw new Error('key set VENDOR [--budget USD [--resets-on DAY]] [--up-to TIER|MODEL] (reads the key from stdin or a hidden prompt) | key budget VENDOR USD|off [--resets-on DAY] [--up-to …] | key up-to VENDOR TIER|MODEL|off | key rm VENDOR | key list');
     }
     case 'login': { const { login } = await import('../src/setup.mjs'); return login(args._[0], args._[1], { force: Boolean(args.force) }); }
+    case 'logout': {
+      const [slot, vendor] = args._;
+      if (!slot || !vendor) throw new Error('logout <hl-wN|all> <claude|codex|agy>');
+      const names = slot === 'all' ? await call('slots.get') : [slot];
+      for (const s of names) {
+        const r = await call('signin.out', { slot: s, vendor }).catch(e => ({ error: e.message }));
+        out(r.error ? `${s} ${vendor}: not signed out (${r.error})` : `${s} ${vendor}: ${r.was_signed_in ? 'signed out' : 'was not signed in'}. Sign in: hauptling login ${s} ${vendor}`);
+      }
+      return;
+    }
     default: throw new Error(`Unknown command ${cmd}\n\n${USAGE}`);
   }
 }

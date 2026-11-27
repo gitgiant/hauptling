@@ -10,6 +10,23 @@
 const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 const iso = (epochS) => (num(epochS) ? new Date(epochS * 1000).toISOString() : null);
 const pct = (v) => (num(v) == null ? null : Math.max(0, Math.min(100, Math.round(v * 10) / 10)));
+
+/*
+ * Quota pools (PRD "agy's Claude and GPT models"). agy's plan counts its Claude and GPT models against their own
+ * 5h and week windows, apart from the Gemini ones. Those are stored as windows '3p-5h' and '3p-week' (agy's own
+ * bucket ids say "3p"); every other window is in the default pool ''.
+ */
+export const THIRD_PARTY = '3p';
+/** The pool a worker's model draws from: '3p' for agy's Claude and GPT models (by id or display name), else ''. */
+export const poolOf = (vendor, model) => (vendor === 'agy' && /^\s*(claude|gpt)/i.test(String(model || '')) ? THIRD_PARTY : '');
+export const windowPool = (window) => (String(window).startsWith(`${THIRD_PARTY}-`) ? THIRD_PARTY : '');
+/** '3p-5h' → '5h'. */
+export const bareWindow = (window) => String(window).slice(windowPool(window) ? THIRD_PARTY.length + 1 : 0);
+/** A window as people read it: "5h", and for agy, whose plan has two pools, "Gemini 5h" or "Claude/GPT 5h". */
+export const windowLabel = (window, vendor = null) => (windowPool(window) ? `Claude/GPT ${bareWindow(window)}` : vendor === 'agy' ? `Gemini ${window}` : String(window));
+/** "agy Claude/GPT": what runs out when this window is full. */
+export const poolLabel = (vendor, pool) => (vendor === 'agy' ? `agy ${pool ? 'Claude/GPT' : 'Gemini'}` : vendor);
+
 const windowName = (minutes) => (minutes === 300 ? '5h' : minutes === 10080 ? 'week' : `${minutes}m`);
 
 /** API-equivalent cost from models.json prices (USD per million tokens); null when a price is unknown. */
@@ -36,11 +53,13 @@ function claude(j, price, api) {
 
 function agy(j, price, api) {
   const cw = j.context_window || {};
-  // Quota arrives as *remaining* per bucket (3p-5h, gemini-5h, 3p-weekly, gemini-weekly); keep the fullest bucket per window.
+  // Quota arrives as *remaining* per bucket (3p-5h, gemini-5h, 3p-weekly, gemini-weekly). The "3p" buckets (Claude
+  // and GPT models) are their own windows; of several buckets for one window, keep the fullest.
   const byWindow = {};
   for (const [name, q] of Object.entries(j.quota || {})) {
-    const window = /5h$/.test(name) ? '5h' : /week/.test(name) ? 'week' : null;
-    if (!window || num(q?.remaining_fraction) == null) continue;
+    const bare = /5h$/.test(name) ? '5h' : /week/.test(name) ? 'week' : null;
+    if (!bare || num(q?.remaining_fraction) == null) continue;
+    const window = /^3p\b/i.test(name) ? `${THIRD_PARTY}-${bare}` : bare;
     const used = pct((1 - q.remaining_fraction) * 100);
     // An unset reset comes as "", 0 or the epoch ("1970-01-01T00:00:00Z"): none of them is a time.
     // (`Date.parse` reads "0" and 0 as the year 2000, hence the date shape.)
@@ -136,22 +155,27 @@ export function lastTokenCount(text) {
   return null;
 }
 
-/** Short text a worker's status line shows (the vendor TUI prints it). */
+/** Short text a worker's status line shows (the vendor TUI prints it): of agy's two pools, only its model's. */
 export function statusText(u) {
+  const pool = poolOf(u.limits.some(l => windowPool(l.window)) ? 'agy' : null, u.model);
   const parts = [];
   if (u.context_pct != null) parts.push(`ctx ${Math.round(u.context_pct)}%`);
   if (u.cost_usd != null) parts.push(`${u.cost_estimated ? '~' : ''}$${u.cost_usd.toFixed(2)}`);
-  for (const l of u.limits) parts.push(`${l.window} ${Math.round(l.used_pct)}%`);
+  for (const l of u.limits) if (windowPool(l.window) === pool) parts.push(`${bareWindow(l.window)} ${Math.round(l.used_pct)}%`);
   return `hauptling · ${parts.join(' · ') || 'usage pending'}`;
 }
 
 /** What to show for a window with no reset time. Nothing used and no reset: the window hasn't started. */
 export const noReset = (usedPct) => (usedPct === 0 ? 'not started' : 'no reset time');
 
-/** Newest reading of each of a vendor's account windows, from any slot: { [window]: { used_pct, resets_at } }. */
-export function windowSnapshot(db, vendor) {
+/**
+ * Newest reading of each account window a worker of `model` draws from, from any slot:
+ * { [window]: { used_pct, resets_at } }. Without `model`: every window of the vendor.
+ */
+export function windowSnapshot(db, vendor, model = null) {
   const out = {};
   for (const r of db.prepare('SELECT window, used_pct, resets_at FROM slot_usage WHERE vendor = ? ORDER BY at DESC').all(vendor)) {
+    if (model != null && windowPool(r.window) !== poolOf(vendor, model)) continue;
     out[r.window] ||= { used_pct: r.used_pct, resets_at: r.resets_at };
   }
   return out;
@@ -172,7 +196,7 @@ export function spendLine({ usage, start, now, rounds }) {
   for (const [w, n] of Object.entries(now || {})) {
     const s = start?.[w];
     if (!s || s.resets_at !== n.resets_at) continue;
-    parts.push(`${w} +${Math.max(0, Math.round(n.used_pct - s.used_pct))}`);
+    parts.push(`${bareWindow(w)} +${Math.max(0, Math.round(n.used_pct - s.used_pct))}`);
   }
   parts.push(`${rounds} test round${rounds === 1 ? '' : 's'}`);
   return parts.join(' · ');

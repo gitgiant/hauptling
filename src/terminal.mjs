@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { existsSync, mkdirSync, symlinkSync } from 'node:fs';
-import { join } from 'node:path';
+import { join as pathJoin } from 'node:path';
 import { HELD, isHeld } from './db.mjs';
 import { shellLine } from './util.mjs';
 
@@ -88,7 +88,7 @@ export function clampSize(size) {
 }
 
 /** `rpc(host, op, args)`: on the hub, a request to a satellite over its link (hub.rpc); null elsewhere. */
-export function createTerminals({ db, host, slotDir, hold = () => () => {}, rpc = null, log = () => {}, now = () => Date.now(), later = (fn, ms) => { const t = setTimeout(fn, ms); t.unref?.(); return () => clearTimeout(t); } }) {
+export function createTerminals({ db, host, slotDir, loginTmux = tmux, hold = () => () => {}, rpc = null, log = () => {}, now = () => Date.now(), later = (fn, ms) => { const t = setTimeout(fn, ms); t.unref?.(); return () => clearTimeout(t); } }) {
   const inputUntil = new Map(); // session → epoch ms
   /** session → { views: viewer → size|null, sent: last applied key, held: a web size may be in force, at, busy, cancel, fails } */
   const sizing = new Map();
@@ -286,18 +286,18 @@ export function createTerminals({ db, host, slotDir, hold = () => () => {}, rpc 
   }
   async function openLogin(slot, vendor) {
     const sid = `login-${slot}-${vendor}`;
-    await tmux(['kill-session', '-t', sid]).catch(() => {});
+    await loginTmux(['kill-session', '-t', sid]).catch(() => {});
     const dir = slotDir(slot);
-    const env = vendor === 'claude' ? { CLAUDE_CONFIG_DIR: join(dir, 'claude') } : vendor === 'codex' ? { CODEX_HOME: join(dir, 'codex') } : {};
+    const env = vendor === 'claude' ? { CLAUDE_CONFIG_DIR: pathJoin(dir, 'claude') } : vendor === 'codex' ? { CODEX_HOME: pathJoin(dir, 'codex') } : {};
     if (vendor === 'agy') {
-      const fake = join(dir, 'agy-home');
+      const fake = pathJoin(dir, 'agy-home');
       mkdirSync(fake, { recursive: true });
-      if (!existsSync(join(fake, '.gemini'))) symlinkSync(join(dir, 'gemini'), join(fake, '.gemini'));
+      if (!existsSync(pathJoin(fake, '.gemini'))) symlinkSync(pathJoin(dir, 'gemini'), pathJoin(fake, '.gemini'));
       env.HOME = fake;
     }
     const cmd = shellLine(['env', ...Object.entries(env).map(([k, v]) => `${k}=${v}`), ...LOGIN[vendor]]);
-    await tmux(['new-session', '-d', '-s', sid, '-x', '120', '-y', '36', '-c', dir, cmd]);
-    await tmux(['set-option', '-t', sid, 'remain-on-exit', 'on']).catch(() => {});
+    await loginTmux(['new-session', '-d', '-s', sid, '-x', '120', '-y', '36', '-c', dir, cmd]);
+    await loginTmux(['set-option', '-t', sid, 'remain-on-exit', 'on']).catch(() => {});
     inputUntil.set(sid, now() + INPUT_IDLE_MS);
     log(`login session ${sid}`);
     return { sid };

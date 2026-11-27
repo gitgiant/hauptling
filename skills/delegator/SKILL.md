@@ -26,6 +26,7 @@ Other delegator sessions may run at the same time. Once you have your delegator 
 - Pick the model. Default is suggest mode: read `hauptling models` and pass `--model`. Its first line is the user's cheaper-model preference (`prefer`): spawn refuses models above that tier; pass `--allow-tier` only when the task really needs a bigger model, and say why to the user. Prefer the cheapest tier that can do the task. Without `--vendor`, the vendor rotates claude → codex → agy, skipping one at 80% or more of a usage window. `--mode cheapest` or `--mode rule --difficulty easy|normal|hard` pick for you.
 - Add `--test-writer` only for settled areas with a spec (protocol, save format, invariants). The user may override. A test writer (cheapest model of the next vendor unless `--test-writer-vendor/--test-writer-model`) writes spec tests on the task branch first; the implementer then starts from them. You get `[tests-ready]` in between.
 - Effort: each tier has a default reasoning effort (`hauptling models` shows it). Pass `--effort low|medium|high` only when the task clearly needs more or less than its model's default (agy models carry it in their id).
+- agy also runs Claude models on its own plan quota (`--vendor agy --model claude-sonnet-5-5-medium`; see `hauptling models`), separate from the claude vendor's and from agy's Gemini quota: use them when claude is short on headroom. Those workers are named `agy_<model>_…`.
 - `hauptling spawn --delegator <id> --brief <file> [--vendor V] --model M [--effort E] [--test-writer]`
 
 ## Loop

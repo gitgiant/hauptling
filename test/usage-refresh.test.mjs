@@ -20,12 +20,20 @@ const AGY = JSON.stringify({ quota: { groups: [
   { name: 'Gemini', buckets: [{ id: 'gemini-5h', window: '5h', remaining_fraction: 0.75, reset_time: '2026-11-27T11:00:00Z' }, { id: 'gemini-weekly', window: 'weekly', remaining_fraction: 0.5 }] },
   { name: 'Other', buckets: [{ id: '3p-5h', window: '5h', remaining_fraction: 0.4, reset_time: '2026-11-27T12:00:00Z' }, { id: 'off-5h', disabled: true, remaining_fraction: 0 }] },
 ] } });
+// agy 1.5.16, `agy --output-format json --print /usage` (seen 2026-11-27; descriptions cut).
+const AGY_REAL = JSON.stringify({ conversation_id: '', status: 'SUCCESS', response: 'Gemini Models\tWeekly Limit Remaining\t51%\n', num_turns: 0, command: { name: 'usage', data: { groups: [
+  { name: 'Gemini Models', buckets: [{ id: 'gemini-weekly', name: 'Weekly Limit Remaining', window: 'weekly', remaining_fraction: 0.5134958624839783, reset_time: '2026-12-03T07:45:43Z' },
+    { id: 'gemini-5h', name: 'Five Hour Limit Remaining', window: '5h', remaining_fraction: 0.8666097521781921, reset_time: '2026-11-28T00:32:53Z' }] },
+  { name: 'Claude and GPT models', buckets: [{ id: '3p-weekly', name: 'Weekly Limit Remaining', window: 'weekly', remaining_fraction: 1, reset_time: '1970-01-01T00:00:00Z' },
+    { id: '3p-5h', name: 'Five Hour Limit Remaining', window: '5h', remaining_fraction: 1, reset_time: '1970-01-01T00:00:00Z' }] }] } } });
 const OUTPUT = { claude: CLAUDE, codex: CODEX, agy: AGY };
 
 test('probe parsers: each vendor answer → 5h and week windows', () => {
   assert.deepEqual(parseProbe('claude', CLAUDE, NOW), [{ window: '5h', used_pct: 35, resets_at: '2026-11-27T10:40:00.000Z' }, { window: 'week', used_pct: 91, resets_at: '2026-11-28T03:00:00.000Z' }]);
   assert.deepEqual(parseProbe('codex', CODEX).map(l => [l.window, l.used_pct]), [['5h', 12], ['week', 40]]);
-  assert.deepEqual(parseProbe('agy', AGY), [{ window: '5h', used_pct: 60, resets_at: '2026-11-27T12:00:00Z' }, { window: 'week', used_pct: 50, resets_at: null }]);
+  assert.deepEqual(parseProbe('agy', AGY), [{ window: '5h', used_pct: 25, resets_at: '2026-11-27T11:00:00Z' }, { window: 'week', used_pct: 50, resets_at: null }, { window: '3p-5h', used_pct: 60, resets_at: '2026-11-27T12:00:00Z' }]);
+  assert.deepEqual(parseProbe('agy', AGY_REAL), [{ window: 'week', used_pct: 48.7, resets_at: '2026-12-03T07:45:43Z' }, { window: '5h', used_pct: 13.3, resets_at: '2026-11-28T00:32:53Z' },
+    { window: '3p-week', used_pct: 0, resets_at: null }, { window: '3p-5h', used_pct: 0, resets_at: null }], 'Gemini and Claude/GPT are separate windows');
   assert.equal(claudeReset('3:05pm (UTC)', NOW), '2026-11-27T15:05:00.000Z');
   assert.equal(claudeReset('1am (UTC)', NOW), '2026-11-28T01:00:00.000Z');
   assert.equal(claudeReset('Jan 2, 3am (UTC)', Date.parse('2026-12-30T00:00:00Z')), '2027-01-02T03:00:00.000Z');
@@ -59,18 +67,19 @@ async function setup({ probe = async (_s, v) => OUTPUT[v], signingIn = async () 
   const dir = mkdtempSync(join(tmpdir(), 'hl-refresh-'));
   const dbPath = join(dir, 'hauptling.db');
   const db = openDb(dbPath);
-  const probes = [];
+  const probes = [], signedOut = [];
   const host = {
     workRoot: '/hl/work', async run() { return { stdout: '' }; }, async startWorker() {}, async stopWorker() {}, async tmuxType() {}, async hostGit() { return 'main'; },
     signedIn: async (slots) => slots,
     signingIn,
+    signOut: (slot, vendor) => { signedOut.push(`${slot}:${vendor}`); return true; },
     usageProbe: (slot, vendor, o) => { probes.push(`${slot}:${vendor}`); return probe(slot, vendor, o); },
   };
   const core = createCore({ db, host, github: { gitAuthEnv: async () => ({}) }, keys: { ...keyStore, getKey: () => null, getBudget: () => null }, notify: () => true, models: () => loadModels(join(tmpdir(), 'none.json')), workerUrl: 'http://w', publicUrl: 'http://127.0.0.1:47800' });
   const dash = createDashboard({ db, dbPath, core, host });
   const { delegator } = await core.call('delegator.start', { repo: 'gitgiant/demo' });
   const readings = () => db.prepare('SELECT slot, vendor, window, used_pct FROM slot_usage ORDER BY vendor, window').all().map(r => `${r.slot} ${r.vendor} ${r.window} ${r.used_pct}`);
-  return { db, core, dash, probes, delegator, readings, done: () => { db.close(); rmSync(dir, { recursive: true, force: true }); } };
+  return { db, core, dash, probes, signedOut, delegator, readings, done: () => { db.close(); rmSync(dir, { recursive: true, force: true }); } };
 }
 const byVendor = (r) => Object.fromEntries(r.vendors.map(v => [v.vendor, v]));
 const tick = () => new Promise(r => setTimeout(r, 20));
@@ -80,7 +89,7 @@ test('refresh records readings per vendor, warns at 90%, and is rate limited', a
   const s = await setup();
   const r = byVendor(await s.core.call('usage.refresh'));
   assert.deepEqual(Object.values(r).map(v => v.status), ['ok', 'ok', 'ok']);
-  assert.deepEqual(s.readings(), ['hl-w1 agy 5h 60', 'hl-w1 agy week 50', 'hl-w1 claude 5h 35', 'hl-w1 claude week 91', 'hl-w1 codex 5h 12', 'hl-w1 codex week 40']);
+  assert.deepEqual(s.readings(), ['hl-w1 agy 3p-5h 60', 'hl-w1 agy 5h 25', 'hl-w1 agy week 50', 'hl-w1 claude 5h 35', 'hl-w1 claude week 91', 'hl-w1 codex 5h 12', 'hl-w1 codex week 40']);
   const warned = s.db.prepare("SELECT text FROM events WHERE kind = 'usage-high'").all();
   assert.equal(warned.length, 1);
   assert.match(warned[0].text, /^claude week window at 91%/);
@@ -156,4 +165,43 @@ test('POST /dash/usage/refresh: cookie and X-Hauptling required; 429 when repeat
   assert.equal((await post()).code, 429);
   await assert.rejects(s.core.call('usage.refresh', {}, { role: 'agent', agent: 'x' }), /not allowed for workers/);
   s.done();
+});
+
+test('sign out: removes the sign-in of a slot and its readings; refused while a refresh or sign-in uses it', async () => {
+  const s = await setup({ signingIn: async (slot) => slot === 'hl-w3' });
+  await s.core.call('usage.refresh');
+  assert.ok(s.readings().some(r => r.startsWith('hl-w1 agy')));
+  assert.deepEqual(await s.core.call('signin.out', { slot: 'hl-w1', vendor: 'agy' }), { slot: 'hl-w1', vendor: 'agy', was_signed_in: true });
+  assert.deepEqual(s.signedOut, ['hl-w1:agy']);
+  assert.ok(!s.readings().some(r => r.startsWith('hl-w1 agy')), 'the old account\'s windows are gone');
+  assert.ok(s.readings().some(r => r.startsWith('hl-w1 claude')), 'other vendors keep theirs');
+  await assert.rejects(s.core.call('signin.out', { slot: 'hl-w3', vendor: 'agy' }), /signing in/);
+  await assert.rejects(s.core.call('signin.out', { slot: 'hl-w9', vendor: 'agy' }), /slot .* and a vendor/);
+  await s.core.call('signin.begin', { slot: 'hl-w2', vendor: 'agy' });
+  await assert.rejects(s.core.call('signin.out', { slot: 'hl-w2', vendor: 'agy' }), /signing in/);
+  assert.deepEqual(s.signedOut, ['hl-w1:agy']);
+  s.done();
+});
+
+test('signOutSlot removes only the credential file; dashboard sign-in builds the slot paths', async () => {
+  const { signOutSlot, CREDS } = await import('../src/docker.mjs');
+  const { createTerminals } = await import('../src/terminal.mjs');
+  const { mkdirSync, writeFileSync, existsSync, lstatSync } = await import('node:fs');
+  const dir = mkdtempSync(join(tmpdir(), 'hl-signout-'));
+  mkdirSync(join(dir, 'gemini/antigravity-cli'), { recursive: true });
+  writeFileSync(join(dir, CREDS.agy), 'token');
+  writeFileSync(join(dir, 'gemini/antigravity-cli/settings.json'), '{}');
+  assert.equal(signOutSlot('hl-w1', 'agy', dir), true);
+  assert.equal(signOutSlot('hl-w1', 'agy', dir), false);
+  assert.ok(!existsSync(join(dir, CREDS.agy)) && existsSync(join(dir, 'gemini/antigravity-cli/settings.json')));
+  const db = openDb(':memory:');
+  const ran = [];
+  const terms = createTerminals({ db, host: {}, slotDir: () => dir, loginTmux: async (args) => { ran.push(args); return ''; } });
+  assert.deepEqual(await terms.startLogin('hl-w1', 'agy'), { sid: 'login-hl-w1-agy' });
+  assert.ok(lstatSync(join(dir, 'agy-home/.gemini')).isSymbolicLink());
+  assert.match(ran.find(a => a[0] === 'new-session').at(-1), new RegExp(`HOME=${join(dir, 'agy-home')}.* 'agy'$`));
+  await terms.startLogin('hl-w1', 'claude');
+  assert.match(ran.filter(a => a[0] === 'new-session')[1].at(-1), new RegExp(`CLAUDE_CONFIG_DIR=${join(dir, 'claude')}`));
+  db.close();
+  rmSync(dir, { recursive: true, force: true });
 });

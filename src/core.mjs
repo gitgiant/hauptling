@@ -5,7 +5,7 @@ import * as codegraph from './codegraph.mjs';
 import { checkTier, effortFor, enabledVendors, findModel, launchArgv, loadModels, nextVendor, pick, preferOf, setPrefer, shortModel, tierName } from './models.mjs';
 import { canInject } from './vendors.mjs';
 import { readFileSync } from 'node:fs';
-import { normalizeUsage, scrub, spendLine, statusText, windowSnapshot, accumulate, outOfCredit, reportedCost } from './usage.mjs';
+import { normalizeUsage, scrub, spendLine, statusText, windowSnapshot, accumulate, outOfCredit, reportedCost, poolOf, windowPool, windowLabel, poolLabel } from './usage.mjs';
 import { parseProbe, shortError } from './usage-refresh.mjs';
 import { dashToken } from './dashboard.mjs';
 import { checkKeys } from './terminal.mjs';
@@ -401,7 +401,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   /** Per-task totals line (token economy): tokens, cost, window points since launch, test rounds. */
   function spend(a) {
     const rounds = db.prepare("SELECT COUNT(*) n FROM tests WHERE agent = ? AND purpose = 'agent'").get(a.id).n;
-    return spendLine({ usage: a.usage ? JSON.parse(a.usage) : null, start: a.usage_start ? JSON.parse(a.usage_start) : null, now: windowSnapshot(db, a.vendor), rounds });
+    return spendLine({ usage: a.usage ? JSON.parse(a.usage) : null, start: a.usage_start ? JSON.parse(a.usage_start) : null, now: windowSnapshot(db, a.vendor, a.model), rounds });
   }
   const live = (at) => !at || Date.parse(at) > Date.now();
   /**
@@ -409,16 +409,16 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
    * API key): the newest reading from any slot speaks for all of them.
    */
   const readings = (vendor) => [...new Map(db.prepare('SELECT window, used_pct, resets_at FROM slot_usage WHERE vendor = ? ORDER BY at, used_pct').all(vendor).map(r => [r.window, r])).values()];
-  /** The windows at `pct` or more that haven't reset yet. */
-  const over = (vendor, pct) => readings(vendor).filter(r => r.used_pct >= pct && live(r.resets_at));
-  /** The vendor's account is at 100% of some window (until it resets). */
-  const exhausted = (vendor) => over(vendor, 100).length > 0;
+  /** The windows `model` draws from (agy's Claude/GPT models have their own) at `pct` or more that haven't reset yet. */
+  const over = (vendor, model, pct) => readings(vendor).filter(r => windowPool(r.window) === poolOf(vendor, model) && r.used_pct >= pct && live(r.resets_at));
+  /** The vendor's account is at 100% of one of the model's windows (until it resets). */
+  const exhausted = (vendor, model) => over(vendor, model, 100).length > 0;
 
   // ---------- headroom (PRD "Token economy", stage 3; this host's readings only) ----------
   const headroomPct = () => Math.min(100, Number(host.headroomPct?.() ?? HEADROOM_PCT) || HEADROOM_PCT);
-  const headroom = (vendor) => !over(vendor, headroomPct()).length;
+  const headroom = (vendor, model) => !over(vendor, model, headroomPct()).length;
   /** May the rotation give this vendor a worker (running `model`) now? API billing ignores the windows. */
-  const roomy = (vendor, model) => !refused(vendor, model) && (billingFor(vendor, model) === 'api' || (headroom(vendor) && planSignedIn(vendor, model)));
+  const roomy = (vendor, model) => !refused(vendor, model) && (billingFor(vendor, model) === 'api' || (headroom(vendor, model) && planSignedIn(vendor, model)));
   /** Only a vendor the rotation chose is held below 100%; an unparking agent was already running. */
   const headroomGated = (a) => Boolean(a.auto) && !a.unpark;
   /** The model each vendor would run for queued agent `a`: its own, or what the rotation would pick elsewhere. */
@@ -442,10 +442,10 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   /** "claude 91% 5h, codex 84% week; next reset 14:20": each full vendor, and when the first one has headroom again. */
   function headroomSummary(a = null) {
     const modelOf = modelsFor(a);
-    const full = enabledVendors(models()).filter(v => !refused(v, modelOf(v))).map(v => [v, over(v, headroomPct())]).filter(([, rows]) => rows.length);
+    const full = enabledVendors(models()).filter(v => !refused(v, modelOf(v))).map(v => [v, over(v, modelOf(v), headroomPct())]).filter(([, rows]) => rows.length);
     // A vendor is free again when the last of its full windows resets.
     const free = full.filter(([, rows]) => rows.every(r => r.resets_at)).map(([, rows]) => Math.max(...rows.map(r => Date.parse(r.resets_at))));
-    return `${full.map(([v, rows]) => `${v} ${Math.round(fullest(rows).used_pct)}% ${fullest(rows).window}`).join(', ')}; ${free.length ? `next reset ${clock(Math.min(...free))}` : 'reset time unknown'}`;
+    return `${full.map(([v, rows]) => `${v} ${Math.round(fullest(rows).used_pct)}% ${windowPool(fullest(rows).window) ? windowLabel(fullest(rows).window) : fullest(rows).window}`).join(', ')}; ${free.length ? `next reset ${clock(Math.min(...free))}` : 'reset time unknown'}`;
   }
   /**
    * Why a queued agent is held back on this host, else null: "waiting for plan (…)" when its model is above the
@@ -457,7 +457,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     if (pin && pin !== 'hub') return null;
     const gated = headroomGated(a);
     if (gated && !allFull(a)) return null;
-    if (aboveCeiling(a.vendor, a.model) && (gated || exhausted(a.vendor) || !planSignedIn(a.vendor, a.model))) {
+    if (aboveCeiling(a.vendor, a.model) && (gated || exhausted(a.vendor, a.model) || !planSignedIn(a.vendor, a.model))) {
       const cfg = models();
       return `waiting for plan (${shortModel(a.model)} above API ceiling ${tierName(cfg, a.vendor, getUpTo(a.vendor))})`;
     }
@@ -465,9 +465,9 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   }
   /** The warning for a spawn whose caller chose a vendor that is short on headroom. */
   function headroomWarning(vendor, model) {
-    if (billingFor(vendor, model) === 'api' || headroom(vendor)) return null;
-    const r = fullest(over(vendor, headroomPct()));
-    return `warning: ${vendor} is at ${Math.round(r.used_pct)}% of its ${r.window} window${r.resets_at ? ` (resets ${clock(Date.parse(r.resets_at))})` : ''}; ${exhausted(vendor) ? 'the spawn waits for the reset' : 'starting there anyway, as you chose it'}`;
+    if (billingFor(vendor, model) === 'api' || headroom(vendor, model)) return null;
+    const r = fullest(over(vendor, model, headroomPct()));
+    return `warning: ${vendor} is at ${Math.round(r.used_pct)}% of its ${windowPool(r.window) ? windowLabel(r.window) : r.window} window${r.resets_at ? ` (resets ${clock(Date.parse(r.resets_at))})` : ''}; ${exhausted(vendor, model) ? 'the spawn waits for the reset' : 'starting there anyway, as you chose it'}`;
   }
   /** The other vendors' versions of a rotation-chosen agent, in rotation order. */
   function* alternatives(a) {
@@ -581,7 +581,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
       const busy = [...holders(a.vendor).map(w => `${w.slot} busy: ${w.id}`), ...slots().filter(s => held.get(`${s}:${a.vendor}`) === 'refreshing usage').map(s => `${s} refreshing usage`)];
       return `waiting for a free ${a.vendor} slot${busy.length ? ` (${busy.join(', ')})` : ''}`;
     }
-    if (!startable(a.vendor, a.model)) return refused(a.vendor, a.model) ? `waiting: ${a.vendor} API credit ran out` : `waiting for the ${a.vendor} plan to reset`;
+    if (!startable(a.vendor, a.model)) return refused(a.vendor, a.model) ? `waiting: ${a.vendor} API credit ran out` : `waiting for the ${poolLabel(a.vendor, poolOf(a.vendor, a.model))} plan to reset`;
     return null;
   }
 
@@ -660,18 +660,19 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
    * Out of credit and no budget, so no plan to fall back to: nothing of this vendor starts here, except models
    * above the ceiling, which never use the key.
    */
-  const refused = (vendor, model) => Boolean(keyOut(vendor)) && !getBudget(vendor) && !aboveCeiling(vendor, model);
+  const refused = (vendor, model) => Boolean(keyOut(vendor)) && !getBudget(vendor) && !aboveCeiling(vendor, model) && !poolOf(vendor, model);
   const refusal = (vendor) => `${vendor}: the API credit ran out and the key has no budget, so there is no plan fallback. Add funds, then \`hauptling key set ${vendor}\` (or give it a budget: \`hauptling key budget ${vendor} USD\`)`;
   /**
    * 'api' or 'plan' for a worker of `model` starting now: a model above the key's ceiling is always 'plan'. Else
    * a key without budget covers every spawn; with a budget, until STOP_AT of it is spent or the credit ran out.
    */
   function billingFor(vendor, model) {
-    if (!getKey(vendor) || aboveCeiling(vendor, model)) return 'plan';
+    // agy's key is a Gemini key: its Claude and GPT models only run on the plan.
+    if (!getKey(vendor) || aboveCeiling(vendor, model) || poolOf(vendor, model)) return 'plan';
     const b = budgetState(vendor);
     return !b || (b.spent < b.stop_at && !keyOut(vendor)) ? 'api' : 'plan';
   }
-  const startable = (vendor, model) => !refused(vendor, model) && (billingFor(vendor, model) === 'api' || !exhausted(vendor));
+  const startable = (vendor, model) => !refused(vendor, model) && (billingFor(vendor, model) === 'api' || !exhausted(vendor, model));
   /** { tier, name } of the vendor's API ceiling, else null. */
   function ceiling(vendor) {
     const tier = getKey(vendor) && getUpTo(vendor);
@@ -689,7 +690,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
       if (kvGet(db, key)) continue;
       kvSet(db, key, now());
       const when = l.resets_at ? `resets ${new Date(l.resets_at).toLocaleString()}` : 'reset time unknown';
-      emit(d.id, null, 'handoff-due', `${vendor} ${l.window} window at ${Math.round(l.used_pct)}% (${when}): write the handoff now (hauptling handoff --delegator ${d.id} --file <note>) and tell the user to start the next CLI`);
+      emit(d.id, null, 'handoff-due', `${vendor} ${windowLabel(l.window, vendor)} window at ${Math.round(l.used_pct)}% (${when}): write the handoff now (hauptling handoff --delegator ${d.id} --file <note>) and tell the user to start the next CLI`);
     }
   }
 
@@ -700,7 +701,8 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     for (const l of u.limits) {
       db.prepare(`INSERT INTO host_usage (vendor, window, used_pct, resets_at, at) VALUES (?, ?, ?, ?, ?)
         ON CONFLICT (vendor, window) DO UPDATE SET used_pct = excluded.used_pct, resets_at = excluded.resets_at, at = excluded.at`).run(vendor, l.window, l.used_pct, l.resets_at, now());
-      if (l.used_pct >= HANDOFF_PCT) handoffDue(vendor, l);
+      // Only the windows the delegator's own model draws from (agy's Claude/GPT models have their own).
+      if (l.used_pct >= HANDOFF_PCT && windowPool(l.window) === poolOf(vendor, u.model)) handoffDue(vendor, l);
     }
     return u;
   }
@@ -735,14 +737,15 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
         // Codex readings are re-read from a log: an unchanged one isn't news, and mustn't outdate a refresh on another slot.
         a?.vendor === 'codex' ? ' WHERE used_pct IS NOT excluded.used_pct OR resets_at IS NOT excluded.resets_at' : ''}`).run(slot, vendor, l.window, l.used_pct, l.resets_at, now());
       // Slot readings stand in for the delegator's own only until its host CLI reports (same-account assumption).
-      if (l.used_pct >= HANDOFF_PCT && !hostReports(vendor)) handoffDue(vendor, l);
+      // Its model is unknown here, so agy's Claude/GPT windows are left to that report.
+      if (l.used_pct >= HANDOFF_PCT && !hostReports(vendor) && !windowPool(l.window)) handoffDue(vendor, l);
       if (l.used_pct < 90) continue;
       const key = `usage:warn:${vendor}:${l.window}:${l.resets_at || 'unknown'}`; // once per account window, whichever slot reports it
       if (kvGet(db, key)) continue;
       kvSet(db, key, now());
       const when = l.resets_at ? `resets ${new Date(l.resets_at).toLocaleString()}` : 'reset time unknown';
       const full = l.used_pct >= 100;
-      const text = `${vendor} ${l.window} window at ${Math.round(l.used_pct)}% (${when})${full ? `; new ${vendor} spawns wait until then` : ''}`;
+      const text = `${vendor} ${windowLabel(l.window, vendor)} window at ${Math.round(l.used_pct)}% (${when})${full ? `; new ${poolLabel(vendor, windowPool(l.window))} spawns wait until then` : ''}`;
       const to = a ? [a.delegator] : db.prepare('SELECT id FROM delegators WHERE active = 1').all().map(d => d.id);
       for (const d of to) emit(d, a?.id ?? null, 'usage-high', text);
       toast(a?.id ?? null, { title: `${vendor} usage ${Math.round(l.used_pct)}%`, body: text, choices: [], links: null, dashboard: `${publicUrl}/#usage` });
@@ -839,6 +842,23 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     if (w) return `${w.id} is running`;
     if (held.has(`${slot}:${vendor}`)) return held.get(`${slot}:${vendor}`);
     return cliSignin(slot, vendor) ? 'signing in' : null;
+  }
+
+  /**
+   * Signs a slot out of a vendor (PRD "Sign out"), to sign in with another account. Refused while a worker, a
+   * usage refresh or a sign-in uses it. The slot's readings go too: they are the old account's.
+   */
+  async function signOut({ slot, vendor }) {
+    if (!slots().includes(slot) || !isFamily(vendor)) throw new Error('sign out: a slot (hl-wN) and a vendor (claude, codex, agy) are required');
+    const busy = signinBusy(slot, vendor) || (await host.signingIn?.(slot, vendor) ? 'signing in' : null);
+    if (busy) throw new Error(`${slot} ${vendor}: ${busy}; sign out when it has ended`);
+    const release = holdSignin(slot, vendor, 'signing out');
+    try {
+      const was = Boolean(await host.signOut(slot, vendor));
+      db.prepare('DELETE FROM slot_usage WHERE slot = ? AND vendor = ?').run(slot, vendor);
+      log(`signed out ${slot} ${vendor}`);
+      return { slot, vendor, was_signed_in: was };
+    } finally { release(); }
   }
 
   /** One vendor: the first signed-in slot nobody else is using, its CLI asked once, the windows stored on that slot. */
@@ -942,7 +962,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   async function launch(a) {
     a = await cloneWorker(a);
     await host.startWorker(await workerOptions(a));
-    update(a.id, { ...STARTED, state: 'working', base: a.base, idle: 0, usage_start: JSON.stringify(windowSnapshot(db, a.vendor)) });
+    update(a.id, { ...STARTED, state: 'working', base: a.base, idle: 0, usage_start: JSON.stringify(windowSnapshot(db, a.vendor, a.model)) });
     setStatus(a.id, `working: ${a.title}`.slice(0, STATUS_MAX));
   }
 
@@ -1025,7 +1045,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     const why = agentRow(a.id).unpark || 'needed again';
     // One paused while it waited for your answer still does.
     const state = a.parked && db.prepare('SELECT 1 FROM asks WHERE agent = ? AND answered_at IS NULL').get(a.id) ? 'blocked' : 'working';
-    update(a.id, { ...STARTED, state, unpark: null, parked: 0, base: a.base, idle: 0, usage_start: a.usage_start ?? JSON.stringify(windowSnapshot(db, a.vendor)) });
+    update(a.id, { ...STARTED, state, unpark: null, parked: 0, base: a.base, idle: 0, usage_start: a.usage_start ?? JSON.stringify(windowSnapshot(db, a.vendor, a.model)) });
     setStatus(a.id, `${state}: ${a.title}`.slice(0, STATUS_MAX));
     emit(a.delegator, a.id, 'unparked', `${a.id} unparked on ${a.slot} (${options.resumeArgv ? 'session resumed' : 'fresh launch: no saved session'}): ${why}`);
   }
@@ -2379,6 +2399,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     'usage.refresh': () => refreshAllUsage(),
     // `hauptling login` runs in the user's terminal: it says so, so no refresh touches that sign-in meanwhile.
     'signin.begin': ({ slot, vendor }) => { const release = holdSignin(slot, vendor); kvSet(db, `signin:${slot}:${vendor}`, now()); release(); return { ok: true }; },
+    'signin.out': signOut,
     'signin.end': ({ slot, vendor }) => { kvDel(db, `signin:${slot}:${vendor}`); return { ok: true }; },
     'dashboard.token': ({ rotate = false }) => ({ token: dashToken(db, { rotate }), url: publicUrl }),
     'gpu.pause': gpuPause, 'gpu.resume': gpuResume, 'gpu.status': gpuStatus,

@@ -140,6 +140,38 @@
           "tier": 3,
           "usd_in": 3,
           "usd_out": 15
+        },
+        {
+          "id": "claude-sonnet-5-5-medium",
+          "model": "claude-sonnet-5-5-medium",
+          "tier": 2,
+          "usd_in": 2,
+          "usd_out": 10,
+          "notes": "Claude on the agy plan (its Claude/GPT quota, apart from Gemini and from the claude vendor)"
+        },
+        {
+          "id": "claude-sonnet-5-5-high",
+          "model": "claude-sonnet-5-5-high",
+          "tier": 2,
+          "usd_in": 2,
+          "usd_out": 10,
+          "notes": "Claude on the agy plan (its Claude/GPT quota, apart from Gemini and from the claude vendor)"
+        },
+        {
+          "id": "claude-opus-5-5-medium",
+          "model": "claude-opus-5-5-medium",
+          "tier": 3,
+          "usd_in": 4,
+          "usd_out": 20,
+          "notes": "Claude on the agy plan (its Claude/GPT quota, apart from Gemini and from the claude vendor)"
+        },
+        {
+          "id": "claude-opus-5-5-high",
+          "model": "claude-opus-5-5-high",
+          "tier": 3,
+          "usd_in": 4,
+          "usd_out": 20,
+          "notes": "Claude on the agy plan (its Claude/GPT quota, apart from Gemini and from the claude vendor)"
         }
       ]
     }

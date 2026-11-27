@@ -56,7 +56,11 @@ function codex(result) {
   return normalizeUsage('codex', { rate_limits: { primary: win(r?.primary), secondary: win(r?.secondary) } }).limits;
 }
 
-/** Every quota bucket (`{ window, remaining_fraction, reset_time }`) anywhere in agy's answer, per window the fullest. */
+/**
+ * Every quota bucket (`{ id, window, remaining_fraction, reset_time }`) anywhere in agy's answer. Seen on 1.5.16:
+ * `command.data.groups[]`, "Gemini Models" with buckets `gemini-weekly`/`gemini-5h` and "Claude and GPT models"
+ * with `3p-weekly`/`3p-5h`. The 3p buckets become their own windows (src/usage.mjs "Quota pools").
+ */
 function agy(stdout) {
   let j;
   try { j = JSON.parse(stdout.slice(stdout.indexOf('{'))); } catch { throw new Error('agy /usage gave no JSON'); }
@@ -69,7 +73,7 @@ function agy(stdout) {
     if (typeof v.remaining_fraction === 'number' && !v.disabled) {
       const name = [v.window, v.id, v.name].filter(Boolean).join(' ');
       const window = /(^|[^\d])5[ _-]?h|five.?hour/i.test(name) ? '5h' : /week|(^|[^\d])7[ _-]?d/i.test(name) ? 'week' : null;
-      if (window) quota[`${n++}-${window === 'week' ? 'weekly' : '5h'}`] = { remaining_fraction: v.remaining_fraction, reset_time: v.reset_time, reset_in_seconds: v.reset_in_seconds };
+      if (window) quota[`${/^3p\b/i.test(v.id || '') ? '3p' : 'own'}-${n++}-${window === 'week' ? 'weekly' : '5h'}`] = { remaining_fraction: v.remaining_fraction, reset_time: v.reset_time, reset_in_seconds: v.reset_in_seconds };
     }
     Object.values(v).forEach(walk);
   };

@@ -11,7 +11,7 @@ import { isHeld } from './db.mjs';
 import { platform } from './platform/index.mjs';
 import { getBudget, getUpTo, keyHints } from './keys.mjs';
 import { loadModels, tierName } from './models.mjs';
-import { NET, PROXY, WORKER_BROKER_URL, baseImageTag, docker, proxyEnv, dockerReady, ensureBaseImage, ensureNetwork, slotDir, config, hasGpu, gpuAvailable } from './docker.mjs';
+import { NET, PROXY, WORKER_BROKER_URL, baseImageTag, docker, proxyEnv, dockerReady, ensureBaseImage, ensureNetwork, slotDir, CREDS, config, hasGpu, gpuAvailable } from './docker.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const step = (m) => console.log(`\n▶ ${m}`);
@@ -19,8 +19,6 @@ const ok = (m) => console.log(`  ✓ ${m}`);
 const bad = (m) => console.log(`  ✗ ${m}`);
 const slotNames = (n) => Array.from({ length: n }, (_, i) => `hl-w${i + 1}`);
 
-/** Credential file per vendor inside a slot dir: present and non-empty means signed in. */
-const CREDS = { claude: 'claude/.credentials.json', codex: 'codex/auth.json', agy: 'gemini/antigravity-cli/antigravity-oauth-token' };
 const LOGIN = { claude: ['claude'], codex: ['codex', 'login'], agy: ['agy'] };
 const LOGIN_HINT = {
   claude: 'Claude starts; sign in when it asks (or type /login), then type /exit.',

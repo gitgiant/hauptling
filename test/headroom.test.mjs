@@ -184,3 +184,22 @@ test('no rename when vendor and model stay the same', async () => {
   assert.equal(db.prepare("SELECT COUNT(*) n FROM events WHERE kind = 'renamed'").get().n, 0);
   assert.equal(db.prepare('SELECT COUNT(*) n FROM aliases').get().n, 0);
 });
+
+test('agy: Claude models draw from their own windows, and are named agy_<claude model>', async () => {
+  const { reading, spawn, row } = await setup();
+  reading('agy', 100);
+  reading('agy', 100, { window: 'week' });
+  const c = await spawn({ vendor: 'agy', model: 'claude-sonnet-5-5-medium' });
+  assert.match(c.id, /^agy_sonnet-5-5-medium_[0-9a-f]{5}$/);
+  assert.deepEqual([c.state, c.warning ?? null], ['spawning', null], 'a full Gemini pool does not hold a Claude model back');
+  const g = await spawn({ vendor: 'agy', model: 'gemini-4-neon-medium' });
+  assert.equal(row(g.id).state, 'queued');
+  reading('agy', 100, { window: '3p-5h' });
+  const c2 = await spawn({ vendor: 'agy', model: 'claude-opus-5-5-high' });
+  assert.equal(row(c2.id).state, 'queued');
+  assert.match(c2.warning, /agy is at 100% of its Claude\/GPT 5h window/);
+  reading('agy', 0);
+  reading('agy', 0, { window: 'week' });
+  assert.equal((await spawn({ vendor: 'agy', model: 'gemini-4-neon-medium' })).state, 'spawning', 'nor does a full Claude/GPT pool hold Gemini back');
+  assert.equal((await spawn({ model: 'claude-sonnet-5-5' })).vendor, 'claude', 'the claude vendor keeps its own model ids');
+});
