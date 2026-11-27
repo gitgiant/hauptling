@@ -30,7 +30,7 @@ const RESTORE_TRIES = 5;
 const SOCKET = ['-L', 'hauptling'];
 const KEYS = new Set(['Enter', 'BSpace', 'Tab', 'BTab', 'Escape', 'Up', 'Down', 'Left', 'Right', 'Home', 'End', 'PPage', 'NPage', 'DC', 'IC', 'Space',
   ...'abcdefghijklmnopqrstuvwxyz'.split('').map(c => `C-${c}`)]);
-const LOGIN = { claude: ['claude'], codex: ['codex', 'login'], agy: ['agy'] };
+const LOGIN = { claude: ['claude', '/login'], codex: ['codex', 'login'], agy: ['agy'] };
 const LOGIN_RE = /^login-(hl-[\w-]+)-(claude|codex|agy)$/;
 const LIVE = ['spawning', 'restarting', 'paused', 'working', 'blocked', 'done'];
 /** A relayed screen is cut to this (a tmux screen is a few KB; this only guards against a runaway pane). */

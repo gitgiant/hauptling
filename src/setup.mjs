@@ -19,9 +19,9 @@ const ok = (m) => console.log(`  ✓ ${m}`);
 const bad = (m) => console.log(`  ✗ ${m}`);
 const slotNames = (n) => Array.from({ length: n }, (_, i) => `hl-w${i + 1}`);
 
-const LOGIN = { claude: ['claude'], codex: ['codex', 'login'], agy: ['agy'] };
+const LOGIN = { claude: ['claude', '/login'], codex: ['codex', 'login'], agy: ['agy'] };
 const LOGIN_HINT = {
-  claude: 'Claude starts; sign in when it asks (or type /login), then type /exit.',
+  claude: 'Claude opens at its sign-in choice; sign in, then type /exit.',
   codex: 'Codex opens a sign-in page in your browser and exits by itself when done.',
   agy: 'agy starts; sign in when it asks, then exit it (/exit).',
 };
