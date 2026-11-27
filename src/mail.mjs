@@ -50,11 +50,12 @@ export function addIdentity(db, identity, family, model, repo) {
 
 export const touch = (db, identity) => db.prepare('UPDATE identities SET seen_at = ? WHERE identity = ?').run(now(), identity);
 
-/** A full identity, or a unique suffix of its key (5+ hex characters). */
+/** A full identity, or a unique suffix of its key (5+ hex characters). A renamed agent's old id or key gives the new one. */
 export function resolve(db, name) {
-  if (isIdentity(name)) return name;
+  if (isIdentity(name)) return db.prepare('SELECT new FROM aliases WHERE old = ?').get(name)?.new ?? name;
   if (!/^[0-9a-f]{5,32}$/.test(name || '')) return assertIdentity(name);
-  const found = db.prepare('SELECT identity FROM identities').all().map(r => r.identity).filter(id => id.split('_').pop().endsWith(name));
+  const known = db.prepare('SELECT identity old, identity new FROM identities UNION ALL SELECT old, new FROM aliases').all();
+  const found = [...new Set(known.filter(r => r.old.split('_').pop().endsWith(name)).map(r => r.new))];
   if (found.length !== 1) throw new Error(found.length ? `${name} is ambiguous: ${found.join(', ')}` : `No identity ends in ${name}`);
   return found[0];
 }

@@ -42,6 +42,7 @@ Other delegator sessions may run at the same time. Once you have your delegator 
 - Merge settings: `hauptling delegator start --no-gate` (or `delegator set --gate off`) makes reports merge with no hauptling test job; turning it off cancels a queued gate and merges. `--no-automerge` / `--automerge off` makes the broker stop at `[ready]` instead of merging. Both default on; change them only when the user asks.
 - `[parked]`: a reported worker gave up its container (its slot is free for the next spawn); the gate and PR go on. Mail to it, a failed gate or CI, or `hauptling restart <agent>` bring it back with its session (`[unparked]` when it runs again). Just `reply` to it as usual: it unparks first.
 - `[merged]`: the work is in; spawn the next queued task if any.
+- `[renamed]`: a queued agent moved to a vendor with headroom and has a new id and branch. Use the new id (the old one still works).
 - `[headroom]`: every vendor is at 80% or more; new spawns stay queued (those without `--vendor`/`--model` start by themselves when one frees up, possibly on another vendor). Tell the user; don't respawn.
 - `[failed]`: read it, fix the brief or pick another model, spawn again.
 - `[exited]`: the worker's CLI quit. Look with `hauptling attach`, then use `hauptling restart <agent>` to resume work on the same branch.
