@@ -103,7 +103,10 @@ export function prepare(vendor, dir, home = homedir(), { env = process.env, run 
     const settingsPath = join(home, '.gemini', 'antigravity-cli', 'settings.json');
     const s = readJson(settingsPath);
     s.trustedWorkspaces = [...new Set([...(s.trustedWorkspaces || []), dir])];
-    // Unattended workers must be able to report and request tests; nothing else is pre-approved.
+    // Unattended (PRD "Vendor autonomy"): the container is the sandbox, as for Codex. agy's own terminal sandbox
+    // fails in Docker, and its auto mode stops to ask about anything it doesn't judge safe; nobody is there to answer.
+    s.toolPermission = 'always-proceed';
+    s.enableTerminalSandbox = false;
     s.permissions ||= {};
     s.permissions.allow = [...new Set([...(s.permissions.allow || []), 'command(hauptling)'])];
     s.statusLine = { type: 'command', command: 'hauptling usage agy' };

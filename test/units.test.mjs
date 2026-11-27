@@ -111,7 +111,9 @@ test('vendors: hook output shapes and prepare is idempotent', (t) => {
   assert.match(m['/etc/codex/requirements.toml'], /^allow_managed_hooks_only = true$/m);
   const agy = JSON.parse(readFileSync(join(home, '.gemini', 'config', 'hooks.json'), 'utf8'));
   assert.equal(agy['hauptling-Stop'].Stop[0].command, 'hauptling hook agy Stop');
-  assert.deepEqual(JSON.parse(readFileSync(join(home, '.gemini', 'antigravity-cli', 'settings.json'), 'utf8')).permissions.allow, ['command(hauptling)']);
+  const agySettings = JSON.parse(readFileSync(join(home, '.gemini', 'antigravity-cli', 'settings.json'), 'utf8'));
+  assert.deepEqual(agySettings.permissions.allow, ['command(hauptling)']);
+  assert.deepEqual([agySettings.toolPermission, agySettings.enableTerminalSandbox], ['always-proceed', false], 'agy never stops to ask inside the container');
 });
 
 test('toast xml: up to 4 choices plus Other, buttons open answer-page links', () => {
