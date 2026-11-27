@@ -207,3 +207,12 @@ test('signOutSlot removes only the credential file; dashboard sign-in builds the
   db.close();
   rmSync(dir, { recursive: true, force: true });
 });
+
+test('a sign-in session is over once its credentials were written after it opened, two minutes ago or more', async () => {
+  const { signinDone, SIGNIN_DONE_MS } = await import('../src/terminal.mjs');
+  const createdAt = 1e12, now = createdAt + 3600e3;
+  assert.equal(signinDone({ createdAt, writtenAt: null, now }), false, 'not signed in yet');
+  assert.equal(signinDone({ createdAt, writtenAt: createdAt - 5000, now }), false, 'an older sign-in: this one is still under way');
+  assert.equal(signinDone({ createdAt, writtenAt: now - SIGNIN_DONE_MS + 1000, now }), false, 'just written: the CLI may still be finishing');
+  assert.equal(signinDone({ createdAt, writtenAt: createdAt + 60e3, now }), true);
+});

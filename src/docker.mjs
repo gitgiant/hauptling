@@ -905,8 +905,12 @@ export function dockerHost({ log = () => {}, docker: dockerCmd = docker } = {}) 
      * (one per slot × vendor; removed when done or timed out). Resolves with stdout; codex: the RPC result.
      */
     async usageProbe(slot, vendor, { timeoutMs }) {
-      const tag = baseImageTag();
-      if (!await imageExists(tag)) throw new Error('worker image not built: run `hauptling image`');
+      // The image of this checkout if it is built; else the last one built: the probe only runs the vendor's CLI,
+      // so it must not wait for a spawn or `hauptling image` after every change to Hauptling's own sources.
+      const has = (t) => dockerCmd(['image', 'inspect', t], { timeout: 30e3 }).then(() => true, () => false);
+      let tag = baseImageTag();
+      if (!await has(tag)) tag = 'hauptling-worker:latest';
+      if (!await has(tag)) throw new Error('worker image not built: run `hauptling image`');
       const name = `hauptling-usage-${slot}-${vendor}`;
       const remove = () => dockerCmd(['rm', '-f', name], { timeout: 20e3 }).catch(() => {});
       await remove(); // left over from a broker that stopped mid-refresh

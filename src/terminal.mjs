@@ -314,8 +314,24 @@ export function createTerminals({ db, host, slotDir, signinSlot = (slot) => slot
   return { resolve, screen, input, inputState, keys, relayKeys, join, resize, leave, sync, relayResize, restoreSizes, startLogin, stopLogin, runningOn };
 }
 
-/** Whether a dashboard sign-in for this slot × vendor is still running (tmux on this host). */
-export const signingIn = (slot, vendor) => tmux(['display-message', '-p', '-t', `login-${slot}-${vendor}:`, '#{pane_dead}']).then(o => o.trim() === '0', () => false);
+/** A sign-in session left open this long after its credentials were written is over (PRD "Sign-in sessions end"). */
+export const SIGNIN_DONE_MS = 120e3;
+/** Has the sign-in of a session opened at `createdAt` finished? Its credential file (`writtenAt`, ms or null) was written since, and not just now. */
+export const signinDone = ({ createdAt, writtenAt, now = Date.now() }) => Boolean(writtenAt && createdAt && writtenAt >= createdAt && now - writtenAt >= SIGNIN_DONE_MS);
+/**
+ * Whether a dashboard sign-in for this slot × vendor is still running (tmux on this host). Claude's and agy's
+ * sign-in is their TUI, which never exits on its own: with `writtenAt` (when the slot's credential file was last
+ * written), a session whose sign-in has finished is closed here and no longer counts.
+ */
+export async function signingIn(slot, vendor, { writtenAt = null, now = Date.now() } = {}) {
+  const out = await tmux(['display-message', '-p', '-t', `login-${slot}-${vendor}:`, '#{pane_dead} #{session_created}']).catch(() => null);
+  if (out == null) return false;
+  const [dead, created] = out.trim().split(' ');
+  if (dead !== '0') return false;
+  if (!signinDone({ createdAt: Number(created) * 1000, writtenAt, now })) return true;
+  await stopSignin(slot, vendor);
+  return false;
+}
 /** Ends a dashboard sign-in for this slot × vendor, if one is open. */
 export const stopSignin = (slot, vendor) => tmux(['kill-session', '-t', `login-${slot}-${vendor}`]).then(() => true, () => false);
 

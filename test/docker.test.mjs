@@ -119,3 +119,21 @@ test('host info debug probes: container stats and Docker disk from docker\'s out
   assert.equal(e.running, false);
   assert.equal(e.missing, true);
 });
+
+test('usage probe: runs in the last built worker image when this checkout\'s image is not built yet', async () => {
+  const { dockerHost, baseImageTag } = await import('../src/docker.mjs');
+  const built = new Set(['hauptling-worker:latest']);
+  const ran = [];
+  const docker = async (args) => {
+    if (args[0] === 'image') { if (!built.has(args[2])) throw new Error('No such image'); return { stdout: '' }; }
+    if (args[0] === 'run') { ran.push(args[args.indexOf('claude') - 1]); return { stdout: '{}' }; }
+    return { stdout: '' };
+  };
+  const host = dockerHost({ docker });
+  assert.equal(await host.usageProbe('hl-w1', 'claude', { timeoutMs: 1000 }), '{}');
+  built.add(baseImageTag());
+  await host.usageProbe('hl-w1', 'claude', { timeoutMs: 1000 });
+  assert.deepEqual(ran, ['hauptling-worker:latest', baseImageTag()]);
+  built.clear();
+  await assert.rejects(host.usageProbe('hl-w1', 'claude', { timeoutMs: 1000 }), /worker image not built/);
+});

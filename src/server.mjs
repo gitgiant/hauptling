@@ -105,7 +105,9 @@ export async function runBroker({ port = BROKER_PORT } = {}) {
   const db = openDb(dbPath);
   const plat = await platform();
   const signedIn = (slots, vendor) => logins(slots, [vendor]).filter(l => l.ok).map(l => l.slot);
-  const host = { ...dockerHost({ log }), hostGit, signingIn, signedIn, signOut: signOutSlot, stopSignin };
+  const docker = dockerHost({ log });
+  // A sign-in session left open after it signed in is closed, so it doesn't hold the sign-in for good.
+  const host = { ...docker, hostGit, signingIn: (slot, vendor) => signingIn(slot, vendor, { writtenAt: docker.signinStamp(slot, vendor) }), signedIn, signOut: signOutSlot, stopSignin };
   const base = `http://127.0.0.1:${port}`;
   const hub = createHub({ db, log, emit: (...a) => core.emit(...a) });
   // Satellite mode (PRD "Several hosts"): `hauptling satellite join` left a key, so dial the hub, run the agents it
