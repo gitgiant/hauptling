@@ -109,7 +109,20 @@ export async function execTests(dir, opts, out, { onProgress } = {}) {
   mkdirSync(out, { recursive: true });
   const stop = heartbeat(out);
   const progress = progressTracker(out, { onProgress });
-  try { return await runTests(dir, opts, out, progress); } finally { stop(); progress.flush(); }
+  try { return { ...await runTests(dir, opts, out, progress), ...cgroupUsage() }; } finally { stop(); progress.flush(); }
+}
+
+/**
+ * What this job's container used, from its cgroup (v2): `{ resources: { mem_peak_mb, cpu_s } }`, or nothing
+ * outside a container. The broker sizes the repo's next jobs from it (PRD "Tests scale with the host").
+ */
+export function cgroupUsage(root = '/sys/fs/cgroup') {
+  try {
+    const peak = Number(readFileSync(join(root, 'memory.peak'), 'utf8'));
+    const usec = Number(/^usage_usec (\d+)/m.exec(readFileSync(join(root, 'cpu.stat'), 'utf8'))?.[1]);
+    if (!(peak > 0) || !(usec >= 0)) return {};
+    return { resources: { mem_peak_mb: Math.ceil(peak / 2 ** 20), cpu_s: Math.round(usec / 1e4) / 100 } };
+  } catch { return {}; }
 }
 
 async function runTests(dir, { selector = '', timeout_s = 1800, artifacts = [], gpu = false }, out, progress) {

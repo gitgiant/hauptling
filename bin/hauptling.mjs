@@ -28,6 +28,7 @@ Delegator (host): pass --delegator ID on spawn, wait, status, handoff and resume
   queue move AGENT --before OTHER | --after OTHER | --top | --bottom
   attach AGENT | reply AGENT <text> | kill AGENT | merge AGENT   (merge: local repos, or when automerge is off)
   test request --sha S [--selector X] [--gpu] [--timeout S] | test wait ID | test get ID | test report ID FILE
+  test scale                               what the host has free and what each repo's test jobs are counted as
   dashboard [--print] [--host H] [--new-token]  open the dashboard (--print: show the sign-in link; --host: link via H, e.g. your Tailscale name)
   usage refresh                            read every vendor's current 5h/week usage now (no model tokens; once per 30 s)
   gpu status | gpu pause [--now] | gpu resume   hold the GPU test queue (--now kills and requeues the running job)
@@ -244,6 +245,15 @@ async function main() {
     }
     case 'test': {
       const [sub, id, file] = args._;
+      if (sub === 'scale') {
+        const s = await call('test.scale');
+        const h = s.host;
+        const lines = [s.scaling ? `Test jobs start when they fit: ${h.memFreeMB} of ${h.memTotalMB} MiB RAM free, ${h.cores} cores at load ${Number(h.load1).toFixed(1)}; ${s.running} running (CPU at most ${s.cpuLimit}, GPU ${s.gpuLimit ?? 'as many as fit'})`
+          : `Fixed limits: ${s.cpuLimit} CPU jobs, one per repo, ${s.gpuLimit ?? 1} GPU job ("testScaling": "fixed", or this host can't report its resources)`];
+        for (const r of s.repos) lines.push(`${r.gpu ? 'gpu' : 'cpu'} ${r.repo}: counted as ${r.memMB} MiB RAM, ${r.cores} cores${r.vramMB ? `, ${r.vramMB} MiB VRAM` : ''} (from ${r.runs} run${r.runs === 1 ? '' : 's'})`);
+        if (!s.repos.length) lines.push('No measured runs yet: a repo counts as its container limits until one finishes.');
+        return out(lines.join('\n'));
+      }
       if (sub === 'request') {
         if (!/^[0-9a-f]{4,40}$/i.test(args.sha || '')) throw new Error(`test request needs --sha <commit> (got ${JSON.stringify(args.sha ?? '')})`);
         const r = await call('test.request', { sha: args.sha, selector: args.selector || '', gpu: Boolean(args.gpu), artifacts: args.artifacts || [], timeout_s: Number(args.timeout || 1800), repo: args.repo && normalizeRepo(args.repo) });
@@ -270,9 +280,10 @@ async function main() {
       if (sub === 'resume') { await call('gpu.resume'); return out('GPU queue resumed'); }
       if (sub === 'status' || !sub) {
         const g = await call('gpu.status');
-        const lines = [`GPU: ${g.available ? 'available' : 'none/disabled'}${g.paused ? ', PAUSED' : ''}; free ${g.freeMB ?? '?'} MiB (jobs need ${g.needMB} MiB)`];
-        for (const t of g.running) lines.push(`running ${t.id} ${t.purpose} ${t.agent || ''} since ${t.claimed_at} (timeout ${t.timeout_s}s)`);
-        for (const t of g.queued) lines.push(`queued  ${t.id} ${t.purpose} ${t.agent || ''}${t.waiting_since ? ` (waiting for VRAM since ${t.waiting_since})` : ''}`);
+        const lines = [`GPU: ${g.available ? 'available' : 'none/disabled'}${g.paused ? ', PAUSED' : ''}; free ${g.freeMB ?? '?'} MiB; ${g.concurrency ? `up to ${g.concurrency} job${g.concurrency === 1 ? '' : 's'} at once` : 'as many jobs as fit'} (unmeasured repos count as ${g.needMB} MiB)`];
+        for (const m of g.measured || []) lines.push(`measured ${m.repo}: peaks ${m.peaksMB.join(', ')} MiB → counted as ${m.needMB} MiB`);
+        for (const t of g.running) lines.push(`running ${t.id} ${t.purpose} ${t.agent || ''} (${t.needMB} MiB) since ${t.claimed_at} (timeout ${t.timeout_s}s)`);
+        for (const t of g.queued) lines.push(`queued  ${t.id} ${t.purpose} ${t.agent || ''} (${t.needMB} MiB)${t.waiting_since ? ` (waiting for VRAM since ${t.waiting_since})` : ''}`);
         return out(lines.join('\n'));
       }
       throw new Error('gpu pause [--now]|resume|status');

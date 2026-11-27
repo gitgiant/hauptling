@@ -202,3 +202,15 @@ test('runner heartbeat: touched at once and on every beat until stopped; execTes
   assert.equal(r.status, 'error');
   assert.ok(Number(readFileSync(join(art, 'heartbeat'), 'utf8')) > 0);
 });
+
+test('runner: a job reports what its container used, from the cgroup', async () => {
+  const { cgroupUsage } = await import('../src/runner.mjs');
+  const { mkdtempSync, writeFileSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const root = mkdtempSync(join(tmpdir(), 'hl-cg-'));
+  assert.deepEqual(cgroupUsage(root), {}, 'outside a container: nothing');
+  writeFileSync(join(root, 'memory.peak'), '419430400\n');
+  writeFileSync(join(root, 'cpu.stat'), 'usage_usec 12345678\nuser_usec 1\n');
+  assert.deepEqual(cgroupUsage(root), { resources: { mem_peak_mb: 400, cpu_s: 12.35 } });
+});

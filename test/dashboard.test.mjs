@@ -269,7 +269,7 @@ test('dashboard: CPU test queue in the header, queue position in the headline, R
   const ahead = (await s.core.call('test.request', { repo: 'gitgiant/other', sha: 'o1' })).id;
   const gate = (await s.core.call('test.request', { agent: s.id, sha: 'abc', purpose: 'gate' })).id;
   let b = (await s.req('/dash/board')).json;
-  assert.deepEqual(b.tests, { running: [], queued: 2, retrying: [], limit: 3 });
+  assert.deepEqual(b.tests, { running: [], queued: 2, retrying: [], limit: 3, auto: false });
   let a = b.agents.find(x => x.id === s.id);
   assert.equal(a.test.position, 2);
   assert.match(a.headline, /queued, 2nd in line/);

@@ -439,9 +439,9 @@ function renderSys() {
 /** CPU test jobs: how many run of the limit; what runs now (agent, repo, elapsed) and how many wait go in `.more`. */
 function cpuTests(q) {
   if (!q) return null;
-  return h('span', { class: 'cputests', title: testsTip(q) }, 'Tests ', h('b', { text: `${q.running.length}/${q.limit}` }), h('span', { class: 'more' }, testDetails(q)));
+  return h('span', { class: 'cputests', title: testsTip(q) }, 'Tests ', h('b', { text: q.auto ? `${q.running.length}` : `${q.running.length}/${q.limit}` }), h('span', { class: 'more' }, testDetails(q)));
 }
-const testsTip = (q) => `CPU test jobs, up to ${q.limit} at once, one per repo${[...q.running, ...(q.retrying || [])].length ? `\n${[
+const testsTip = (q) => `CPU test jobs${q.auto ? `: as many as the host's free RAM and cores fit (at most ${q.limit}), sized by each repo's measured runs` : `, up to ${q.limit} at once, one per repo`}${[...q.running, ...(q.retrying || [])].length ? `\n${[
   ...q.running.map(r => `${r.id} ${r.purpose}${r.agent ? ` · ${r.agent}` : ''} · ${r.repo} · ${ago(r.claimed_at)}${r.retry ? ` · ${r.retry}` : ''}`),
   ...(q.retrying || []).map(r => `${r.id} ${r.purpose}${r.agent ? ` · ${r.agent}` : ''} · ${r.repo} · ${r.retry}`)].join('\n')}` : ''}`;
 function testDetails(q) {
@@ -473,7 +473,7 @@ function renderGpu(g, tq) {
   const el = $('#gpu');
   const cpu = cpuTests(tq);
   const open = el.classList.contains('open');
-  const testSection = () => (tq ? h('div', {}, h('b', { text: `Tests ${tq.running.length}/${tq.limit}` }), testDetails(tq)) : null);
+  const testSection = () => (tq ? h('div', {}, h('b', { text: tq.auto ? `Tests ${tq.running.length} running` : `Tests ${tq.running.length}/${tq.limit}` }), testDetails(tq)) : null);
   if (!g?.available) { put(el, cpu, h('span', { text: g ? 'GPU: none' : 'GPU: ?' }), moreMenu(open, 'Views', 'Views and test job details', testSection())); return; }
   const running = g.running[0];
   const details = () => [

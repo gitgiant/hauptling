@@ -1445,13 +1445,74 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   const errorReport = (job, notes) => ({ id: job.id, sha: job.sha, status: 'error', passed: 0, failed: 0, skipped: 0, failures: [], duration_s: 0, notes: String(notes).slice(0, 300) });
 
   /**
-   * Two queues, each job in a fresh container. CPU jobs: up to `testConcurrency` at once (host
-   * setting, default 3), per repo up to its hauptling.json "testConcurrency" on the base branch (default 1),
-   * FIFO otherwise. GPU jobs (`--gpus all`): one at a time. External runners use test.claim (CPU: same
-   * per-repo limit; GPU: `hauptling runner --gpu`, behind pause and the VRAM wait). With `"gpuRunner": "host"`
+   * Two queues, each job in a fresh container. A job starts when the host has room for what its repo's runs
+   * were measured to use (PRD "Tests scale with the host"): RAM and cores for both queues, VRAM for GPU jobs
+   * (`--gpus all`). `testConcurrency` (host, and per repo in hauptling.json on the base branch) and
+   * `gpuConcurrency` are upper limits when set. With `"testScaling": "fixed"`: 3 CPU jobs, one per repo, one GPU
+   * job. External runners use test.claim (the same rules; GPU: `hauptling runner --gpu`). With `"gpuRunner": "host"`
    * in config.json the broker starts no GPU containers and leaves GPU jobs to that runner.
    */
-  const concurrency = () => Math.max(1, Number(host.testConcurrency?.() ?? 3) || 3);
+  /** Resource-based admission (PRD "Tests scale with the host"): on unless the host can't say what it has, or `"testScaling": "fixed"`. */
+  const scaling = () => Boolean(host.resources) && host.testScaling?.() !== 'fixed';
+  /** Most CPU jobs at once: the host's `testConcurrency` if set; else one per core when scaling, 3 when fixed. */
+  const concurrency = () => {
+    const set = Math.floor(Number(host.testConcurrency?.()));
+    if (set >= 1) return set;
+    return scaling() ? Math.max(1, Number(host.resources().cores) || 1) : 3;
+  };
+
+  // ----- measured test cost and admission (PRD "Tests scale with the host") -----
+  const COST_RUNS = 5;
+  /** A job that started less than this ago hasn't claimed its memory yet: its whole estimate stays reserved. */
+  const SETTLE_MS = 120e3;
+  /** A job that has waited this long for room stops younger ones from starting ahead of it. */
+  const STARVE_MS = 300e3;
+  const costKey = (t) => `test:cost:${t.gpu ? 'gpu' : 'cpu'}:${t.repo}`;
+  const costRuns = (t) => { try { return JSON.parse(kvGet(db, costKey(t)) || '[]'); } catch { return []; } };
+  /** A finished run's own numbers (the runner reads its container's cgroup) join the repo's last few. */
+  function recordCost(t, report) {
+    const r = report.resources;
+    if (!r || !['pass', 'fail'].includes(report.status)) return;
+    const mem = Number(r.mem_peak_mb), secs = Number(report.duration_s);
+    if (!(mem > 0 && mem < 1e6)) return;
+    const cores = secs > 1 && Number(r.cpu_s) >= 0 ? Math.round((Number(r.cpu_s) / secs) * 100) / 100 : null;
+    kvSet(db, costKey(t), JSON.stringify([...costRuns(t), { mem, cores }].slice(-COST_RUNS)));
+  }
+  /**
+   * RAM (MiB) and cores a job is counted as: the highest of the repo's last measured runs plus a fifth, never
+   * above its container's limits; a repo with no measured run counts as those limits.
+   */
+  function estimate(t) {
+    const lim = host.testLimits?.(Boolean(t.gpu)) || {};
+    const memMax = lim.memMB || (t.gpu ? 6144 : 2560), cpuMax = lim.cpus || (t.gpu ? 4 : 3);
+    const runs = costRuns(t);
+    if (!runs.length) return { memMB: memMax, cores: cpuMax, measured: false };
+    const cores = Math.max(...runs.map(r => r.cores ?? cpuMax));
+    return { memMB: Math.min(memMax, Math.ceil(Math.max(...runs.map(r => r.mem)) * 1.2) + 128), cores: Math.min(cpuMax, Math.max(0.5, Math.round(cores * 12) / 10)), measured: true };
+  }
+  const localTests = () => db.prepare("SELECT id, repo, gpu, claimed_at FROM tests WHERE state = 'running' AND host = 'hub'").all();
+  /**
+   * Does the host have room for this job beside the running ones? Always for the first job. RAM: what is free
+   * now, less a margin and the estimates of jobs too young to have claimed theirs. CPU: cores less the higher of
+   * the load and the running jobs' estimates.
+   */
+  function fits(t, at = Date.now()) {
+    if (!scaling()) return true;
+    const running = localTests();
+    if (!running.length) return true;
+    const res = host.resources(), e = estimate(t);
+    const young = running.filter(r => at - Date.parse(r.claimed_at) < SETTLE_MS).reduce((n, r) => n + estimate(r).memMB, 0);
+    const margin = Math.max(1024, res.memTotalMB * 0.1);
+    if (res.memFreeMB - young - margin < e.memMB) return false;
+    const busy = Math.max(Number(res.load1) || 0, running.reduce((n, r) => n + estimate(r).cores, 0));
+    return res.cores - busy >= e.cores;
+  }
+  /** What the queues are working from, for `hauptling test scale` and the dashboard. */
+  function testScale() {
+    const repos = db.prepare("SELECT key FROM kv WHERE key LIKE 'test:cost:%'").all().map(r => { const [, , kind, ...rest] = r.key.split(':'); return { repo: rest.join(':'), gpu: kind === 'gpu' ? 1 : 0 }; })
+      .map(t => ({ repo: t.repo, gpu: Boolean(t.gpu), runs: costRuns(t).length, ...estimate(t), ...(t.gpu ? { vramMB: measuredNeed(t.repo) } : {}) }));
+    return { scaling: scaling(), host: host.resources?.() ?? null, cpuLimit: concurrency(), gpuLimit: gpuLimit() === Infinity ? null : gpuLimit(), running: localTests().length, repos };
+  }
   const pumping = { gpu: false };
   async function pump() { await Promise.all([pumpCpu(), pumpGpu()]); }
   async function pumpCpu() {
@@ -1468,11 +1529,12 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     if (pumping.gpu || !host.runTestJob || host.gpuRunner?.() === 'host') return;
     pumping.gpu = true;
     try {
+      // Up to `gpuConcurrency` at once (default 1), each only when its VRAM fits beside the running ones.
       for (;;) {
         if (!(await gpuReady())) break;
         const t = grab(true);
         if (!t) break;
-        await runJob(jobFor(t));
+        runJob(jobFor(t)).catch(e => log(`test run ${t.id}: ${e.message}`));
       }
     } finally { pumping.gpu = false; }
   }
@@ -1497,7 +1559,8 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
       if (report.lost) await runnerLost(job.id, job.claimed_at, report.lost).catch(e => log(`test watchdog ${job.id}: ${e.message}`));
       else await testReport({ id: job.id, report }).catch(e => log(`test report ${job.id}: ${e.message}`));
     }
-    if (!job.gpu) pumpCpu().catch(e => log(`test pump: ${e.message}`));
+    // A finished job frees RAM and cores for either queue.
+    pump().catch(e => log(`test pump: ${e.message}`));
   }
 
   // ---------- per-repo test limit ----------
@@ -1505,11 +1568,12 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   const limits = new Map();
   const LIMIT_TTL_MS = 60e3;
   const limitKey = (repo, base) => `${repo}\0${base}`;
-  const repoLimit = (t) => limits.get(limitKey(t.repo, t.base || ''))?.limit ?? 1;
+  /** The repo's own `testConcurrency`; unset: no limit of its own when scaling (the host's resources decide), else 1. */
+  const repoLimit = (t) => limits.get(limitKey(t.repo, t.base || ''))?.limit ?? (scaling() ? Infinity : 1);
 
   /**
    * "testConcurrency" in hauptling.json on the base branch, read host-side: a worker controls its clone (refs
-   * included), so that is never asked. Missing or invalid: 1.
+   * included), so that is never asked. Missing or invalid: null (the default applies).
    */
   async function readLimit(repo, base) {
     const slug = githubSlug(repo);
@@ -1517,12 +1581,12 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     try {
       text = slug ? await github.fileAt(slug, 'hauptling.json', base) : await host.hostGit(repo, ['show', `${base || 'HEAD'}:hauptling.json`]);
     } catch (e) {
-      if (/404|does not exist|exists on disk, but not in/i.test(e.message)) return 1;
+      if (/404|does not exist|exists on disk, but not in/i.test(e.message)) return null;
       throw e;
     }
     let n;
-    try { n = JSON.parse(text).testConcurrency; } catch { return 1; }
-    return Number.isInteger(n) && n >= 1 ? n : 1;
+    try { n = JSON.parse(text).testConcurrency; } catch { return null; }
+    return Number.isInteger(n) && n >= 1 ? n : null;
   }
 
   /**
@@ -1628,6 +1692,51 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
 
   // ---------- GPU queue ----------
   const gpuCfg = () => ({ memMB: 6144, waitMinutes: 30, ...host.gpuConfig?.() });
+  /** Most GPU jobs at once: `gpuConcurrency` if set; else as many as fit when scaling, 1 when fixed. */
+  const gpuLimit = () => { const set = Math.floor(Number(gpuCfg().concurrency)); return set >= 1 ? set : scaling() ? Infinity : 1; };
+  const gpuRunning = () => db.prepare("SELECT id, repo FROM tests WHERE state = 'running' AND gpu = 1 AND host = 'hub'").all();
+
+  // ----- measured VRAM per repo (PRD "GPU jobs in parallel") -----
+  /** Peaks kept per repo; the need is taken from the highest of them. */
+  const GPU_PEAKS = 5;
+  const GPU_SAMPLE_MS = 5000;
+  /** The repo's measured peaks in MiB, newest last. */
+  const gpuPeaks = (repo) => { try { return JSON.parse(kvGet(db, `gpu:measured:${repo}`) || '[]'); } catch { return []; } };
+  /** A measured peak plus headroom: a fifth and 256 MiB, since the desktop's own use moves during a run. */
+  const measuredNeed = (repo) => { const p = gpuPeaks(repo); return p.length ? Math.ceil(Math.max(...p) * 1.2) + 256 : null; };
+  /** MiB a job is counted as: the repo's `"gpuMemMB"`, else what its runs were measured to use, else the default. */
+  const gpuNeed = (t) => Number(kvGet(db, `gpu:need:${t.id}`)) || measuredNeed(t.repo) || gpuCfg().memMB;
+  /** job id → { repo, startFree, minFree, shared } for running GPU jobs started by this broker process. */
+  const gpuRuns = new Map();
+  let gpuTimer = null;
+  /** A GPU job was just claimed, `free` MiB having been free: start measuring it. */
+  function gpuStarted(t, free) {
+    const others = gpuRunning().filter(r => r.id !== t.id);
+    // Beside another job the two can't be told apart: neither is measured.
+    for (const r of others) if (gpuRuns.has(r.id)) gpuRuns.get(r.id).shared = true;
+    gpuRuns.set(t.id, { repo: t.repo, startFree: free, minFree: free, shared: others.length > 0 });
+    if (!others.length && free != null) kvSet(db, 'gpu:baseline', free); // free VRAM before the batch: what it has claimed since is the difference
+    if (!gpuTimer && host.gpuFreeMB) { gpuTimer = setInterval(() => gpuSample().catch(() => {}), GPU_SAMPLE_MS); gpuTimer.unref?.(); }
+  }
+  /** One reading of free VRAM, kept as each running job's lowest. */
+  async function gpuSample() {
+    const live = new Set(gpuRunning().map(r => r.id));
+    for (const id of gpuRuns.keys()) if (!live.has(id)) gpuRuns.delete(id);
+    if (!gpuRuns.size) { clearInterval(gpuTimer); gpuTimer = null; return; }
+    const free = await host.gpuFreeMB?.().catch(() => null);
+    if (free == null) return;
+    for (const r of gpuRuns.values()) if (r.minFree == null || free < r.minFree) r.minFree = free;
+  }
+  /** A GPU job ended: a run that had the GPU to itself and finished its tests adds its peak to the repo's. */
+  function gpuEnded(id, status) {
+    const r = gpuRuns.get(id);
+    gpuRuns.delete(id);
+    if (!r || r.shared || r.startFree == null || !['pass', 'fail'].includes(status)) return;
+    const peak = r.startFree - r.minFree;
+    if (!(peak > 0)) return;
+    kvSet(db, `gpu:measured:${r.repo}`, JSON.stringify([...gpuPeaks(r.repo), peak].slice(-GPU_PEAKS)));
+    log(`gpu measured ${r.repo}: ${peak} MiB (job ${id}); need now ${measuredNeed(r.repo)} MiB`);
+  }
   const nextGpuJob = () => db.prepare(`SELECT q.* FROM tests q WHERE q.state = 'queued' AND q.gpu = 1 AND q.host = 'hub' AND ${TEST_ELIGIBLE} ORDER BY q.created_at, q.rowid LIMIT 1`).get();
 
   /**
@@ -1635,16 +1744,32 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
    * shares the GPU): short → wait (rechecked each minute by poll); waiting past `waitMinutes` →
    * `error: GPU busy`. Waiting doesn't count toward the job's timeout_s (that starts in the container).
    */
+  /** The job the last successful `gpuReady` was for, and the free VRAM it saw. */
+  let gpuCheck = null;
   async function gpuReady(at = Date.now()) {
     if (kvGet(db, 'gpu:paused')) return false;
     for (;;) {
       const t = nextGpuJob();
       if (!t) return true;
-      const need = Number(kvGet(db, `gpu:need:${t.id}`) || gpuCfg().memMB);
+      if (gpuRunning().length >= gpuLimit()) return false;
+      const need = gpuNeed(t);
       const free = await host.gpuFreeMB?.().catch(() => null);
       if (kvGet(db, 'gpu:paused')) return false;
       if (nextGpuJob()?.id !== t.id) continue;
-      if (free == null || free >= need) { kvDel(db, `gpu:wait:${t.id}`); return true; }
+      const running = gpuRunning();
+      if (running.length >= gpuLimit() || !fits(t, at)) return false; // RAM and CPU, beside every running test job
+      if (running.length) {
+        // Beside running jobs: what they are counted as but haven't claimed yet stays reserved for them. Our own
+        // jobs holding the memory is not "GPU busy": no wait clock.
+        if (free == null) return false;
+        const claimed = Math.max(0, Number(kvGet(db, 'gpu:baseline') || 0) - free);
+        const reserved = Math.max(0, running.reduce((n, r) => n + gpuNeed(r), 0) - claimed);
+        if (free - reserved < need) return false;
+        kvDel(db, `gpu:wait:${t.id}`);
+        gpuCheck = { id: t.id, free };
+        return true;
+      }
+      if (free == null || free >= need) { kvDel(db, `gpu:wait:${t.id}`); gpuCheck = { id: t.id, free }; return true; }
       const since = Number(kvGet(db, `gpu:wait:${t.id}`) || 0);
       if (!since) { kvSet(db, `gpu:wait:${t.id}`, at); log(`gpu busy: ${free} MiB free, ${t.id} needs ${need}`); return false; }
       if (at - since < gpuCfg().waitMinutes * 60e3) return false;
@@ -1694,10 +1819,12 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
 
   async function gpuStatus() {
     const c = gpuCfg();
-    const running = db.prepare("SELECT id, agent, purpose, claimed_at, timeout_s FROM tests WHERE state = 'running' AND gpu = 1 AND host = 'hub'").all();
-    const queued = db.prepare("SELECT id, agent, purpose, created_at FROM tests WHERE state = 'queued' AND gpu = 1 AND host = 'hub' ORDER BY created_at").all()
+    const running = db.prepare("SELECT id, repo, agent, purpose, claimed_at, timeout_s FROM tests WHERE state = 'running' AND gpu = 1 AND host = 'hub'").all();
+    const queued = db.prepare("SELECT id, repo, agent, purpose, created_at FROM tests WHERE state = 'queued' AND gpu = 1 AND host = 'hub' ORDER BY created_at").all()
       .map(t => ({ ...t, waiting_since: kvGet(db, `gpu:wait:${t.id}`) ? new Date(Number(kvGet(db, `gpu:wait:${t.id}`))).toISOString() : null }));
-    return { available: Boolean(await host.gpuAvailable?.()), paused: Boolean(kvGet(db, 'gpu:paused')), freeMB: await host.gpuFreeMB?.().catch(() => null) ?? null, needMB: c.memMB, running, queued };
+    const measured = db.prepare("SELECT key, value FROM kv WHERE key LIKE 'gpu:measured:%'").all().map(r => ({ repo: r.key.slice('gpu:measured:'.length), peaksMB: gpuPeaks(r.key.slice('gpu:measured:'.length)), needMB: measuredNeed(r.key.slice('gpu:measured:'.length)) }));
+    const need = (t) => ({ ...t, needMB: gpuNeed(t) });
+    return { available: Boolean(await host.gpuAvailable?.()), paused: Boolean(kvGet(db, 'gpu:paused')), freeMB: await host.gpuFreeMB?.().catch(() => null) ?? null, needMB: c.memMB, concurrency: gpuLimit() === Infinity ? null : gpuLimit(), measured, running: running.map(need), queued: queued.map(need) };
   }
 
   /** Checks a GPU request before it is queued: a GPU on this host and a "gpu" command in hauptling.json. */
@@ -1756,8 +1883,15 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   /** The oldest queued CPU job whose repo runs fewer CPU jobs than its limit. */
   function nextCpuJob() {
     const running = db.prepare("SELECT COUNT(*) n FROM tests WHERE state = 'running' AND gpu = 0 AND host = 'hub' AND repo = ?");
-    return db.prepare(`SELECT q.*, a.base FROM tests q LEFT JOIN agents a ON a.id = q.agent WHERE q.state = 'queued' AND q.gpu = 0 AND q.host = 'hub' AND ${TEST_ELIGIBLE} ORDER BY q.created_at, q.rowid`).all()
-      .find(t => running.get(t.repo).n < repoLimit(t));
+    const queue = db.prepare(`SELECT q.*, a.base FROM tests q LEFT JOIN agents a ON a.id = q.agent WHERE q.state = 'queued' AND q.gpu = 0 AND q.host = 'hub' AND ${TEST_ELIGIBLE} ORDER BY q.created_at, q.rowid`).all();
+    const at = Date.now();
+    for (const t of queue) {
+      if (running.get(t.repo).n >= repoLimit(t)) continue;
+      if (fits(t, at)) return t;
+      // No room for it: smaller jobs behind it may go first, until it has waited long enough.
+      if (at - Date.parse(t.created_at) >= STARVE_MS) return undefined;
+    }
+    return undefined;
   }
 
   /** Claims the oldest queued job of a queue (CPU: skipping repos at their limit). */
@@ -1766,6 +1900,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     if (!t) return null;
     t.claimed_at = now();
     db.prepare("UPDATE tests SET state = 'running', claimed_at = ? WHERE id = ?").run(t.claimed_at, t.id);
+    if (gpu) gpuStarted(t, gpuCheck?.id === t.id ? gpuCheck.free : null);
     testSynced(t.id);
     return t;
   });
@@ -1779,8 +1914,8 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     const next = async () => {
       const loading = !gpu && loadLimits();
       if (loading) await loading;
-      // GPU: the same gate as the broker's own queue (gpu pause, free VRAM), and one job at a time.
-      if (gpu && (!(await gpuReady()) || db.prepare("SELECT 1 FROM tests WHERE state = 'running' AND gpu = 1 AND host = 'hub'").get())) return null;
+      // GPU: the same gate as the broker's own queue (gpu pause, `gpuConcurrency`, free VRAM).
+      if (gpu && !(await gpuReady())) return null;
       return grab(gpu);
     };
     let t = await next();
@@ -1800,6 +1935,8 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     report = { ...report, id, notes: report.notes?.slice(0, 300), failures: (report.failures || []).slice(0, 20).map(f => ({ ...f, message: String(f.message || '').slice(0, 300), excerpt: String(f.excerpt || '').split('\n').slice(0, 20).join('\n') })) };
     db.prepare("UPDATE tests SET state = 'done', report = ?, done_at = ? WHERE id = ?").run(JSON.stringify(report), now(), id);
     testSynced(id);
+    recordCost(t, report);
+    if (t.gpu) gpuEnded(id, report.status);
     kvDel(db, `gpu:need:${id}`);
     kvDel(db, `gpu:wait:${id}`);
     kvDel(db, `test:progress:${id}`);
@@ -2471,7 +2608,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     'signin.count': signinCount,
     'signin.end': ({ slot, vendor }) => { kvDel(db, `signin:${signinOf(slot, vendor)}:${vendor}`); return { ok: true }; },
     'dashboard.token': ({ rotate = false }) => ({ token: dashToken(db, { rotate }), url: publicUrl }),
-    'gpu.pause': gpuPause, 'gpu.resume': gpuResume, 'gpu.status': gpuStatus,
+    'gpu.pause': gpuPause, 'gpu.resume': gpuResume, 'gpu.status': gpuStatus, 'test.scale': testScale,
     'models.prefer': ({ value }) => (value ? savePrefer(value) : preferOf(models())),
     'slots.get': () => slots(),
     // `src/update.mjs`, just before it restarts the broker (the events are stored, so they outlive it).
@@ -2519,5 +2656,5 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   hub?.bind({ receive, onState: placeSoon, onResult: commandDone });
   if (satellite) syncTests();
 
-  return { call, authenticate, emit, keyOut, ceiling, command, startAll, syncTests, freeSlots, headroomNote, blockerNote, spend, testProgress, poll, watch, watchTests, startQueued, bus, askForPage, answer, pump, recover, gpuReady, refreshUsage, refreshAllUsage, lastRefresh, holdSignin, recordUsage, budgetState, billingFor };
+  return { call, authenticate, emit, keyOut, ceiling, command, startAll, syncTests, freeSlots, headroomNote, blockerNote, spend, testProgress, testScale, gpuSample, poll, watch, watchTests, startQueued, bus, askForPage, answer, pump, recover, gpuReady, refreshUsage, refreshAllUsage, lastRefresh, holdSignin, recordUsage, budgetState, billingFor };
 }

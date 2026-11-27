@@ -1194,3 +1194,68 @@ test('per-repo testConcurrency: a local-path repo is read from the host checkout
   assert.deepEqual(states(db, ids), ['running', 'running', 'queued']);
   assert.deepEqual(shown, [['/tmp/demo', 'show', 'HEAD:hauptling.json']]);
 });
+
+test('tests scale with the host: jobs start while measured RAM and cores fit; unmeasured repos count as their limits', async () => {
+  const g = await gpuSetup({ gpu: ['run-gpu'] });
+  const res = { memFreeMB: 6200, memTotalMB: 8000, cores: 8, load1: 0 };
+  g.host.resources = () => res;
+  g.host.testLimits = (gpu) => (gpu ? { memMB: 6144, cpus: 4 } : { memMB: 2560, cpus: 3 });
+  const done = (id, extra = {}) => { const r = g.host.gpu.runs.find(x => x.job.id === id); r.done({ ...g.pass(r.job), duration_s: 100, ...extra }); };
+  // Unmeasured: 2560 MiB each; 6200 free less a 1024 margin fits one beside the first, not two.
+  const a = await g.core.call('test.request', {}, g.who), b = await g.core.call('test.request', {}, g.who), c = await g.core.call('test.request', {}, g.who);
+  await settle();
+  assert.deepEqual([a, b, c].map(t => g.state(t.id).state), ['running', 'running', 'queued'], 'no one-per-repo rule; the third has no room');
+  done(a.id, { resources: { mem_peak_mb: 400, cpu_s: 150 } });
+  await settle();
+  const scale = g.core.testScale();
+  assert.deepEqual(scale.repos, [{ repo: 'gitgiant/demo', gpu: false, runs: 1, memMB: 608, cores: 1.8, measured: true }]);
+  assert.equal(g.state(c.id).state, 'running', 'counted as 608 MiB now');
+  const more = [];
+  for (let i = 0; i < 4; i++) more.push(await g.core.call('test.request', {}, g.who));
+  await settle();
+  // RAM is no issue at 608 MiB each; cores decide: 8 / 1.8.
+  assert.deepEqual(more.map(t => g.state(t.id).state), ['running', 'running', 'queued', 'queued'], 'cores: 4 × 1.8 fit in 8, a fifth does not');
+  res.load1 = 7.5;
+  done(b.id); done(c.id);
+  await settle();
+  assert.equal(g.state(more[2].id).state, 'queued', 'a loaded host holds jobs back');
+  res.load1 = 0; res.memFreeMB = 1200;
+  await g.core.poll();
+  await settle();
+  assert.equal(g.state(more[2].id).state, 'queued', 'so does short RAM');
+  g.host.testScaling = () => 'fixed';
+  assert.equal(g.core.testScale().scaling, false);
+});
+
+test('gpu in parallel: a repo measured alone is counted by its VRAM peak; a second job starts only when it fits beside the first', async () => {
+  const g = await gpuSetup({ gpu: ['run-gpu'] }, { free: 7000 });
+  g.host.resources = () => ({ memFreeMB: 30000, memTotalMB: 32000, cores: 16, load1: 0 });
+  g.host.testLimits = () => ({ memMB: 2000, cpus: 2 });
+  const run = (id) => g.host.gpu.runs.find(x => x.job.id === id);
+  const a = await g.core.call('test.request', { gpu: true }, g.who), b = await g.core.call('test.request', { gpu: true }, g.who);
+  await settle();
+  assert.deepEqual([g.state(a.id).state, g.state(b.id).state], ['running', 'queued'], 'unmeasured: 6144 MiB each, 7000 free');
+  g.host.gpu.free = 5000; await g.core.gpuSample();
+  g.host.gpu.free = 6500; await g.core.gpuSample();
+  g.host.gpu.free = 7000;
+  run(a.id).done(g.pass(run(a.id).job));
+  await settle();
+  const st = await g.core.call('gpu.status');
+  assert.deepEqual(st.measured, [{ repo: 'gitgiant/demo', peaksMB: [2000], needMB: 2656 }], 'peak = free at start − lowest free seen');
+  assert.equal(st.concurrency, null);
+  assert.equal(g.state(b.id).state, 'running');
+  const c = await g.core.call('test.request', { gpu: true }, g.who), d = await g.core.call('test.request', { gpu: true }, g.who);
+  await settle();
+  // b has claimed nothing yet: 7000 − 2656 reserved ≥ 2656 for c; then 7000 − 5312 < 2656 for d.
+  assert.deepEqual([g.state(c.id).state, g.state(d.id).state], ['running', 'queued']);
+  g.host.gpu.free = 3000; await g.core.gpuSample();
+  run(b.id).done(g.pass(run(b.id).job));
+  await settle();
+  assert.deepEqual((await g.core.call('gpu.status')).measured[0].peaksMB, [2000], 'a run that shared the GPU is not measured');
+  assert.equal(g.state(d.id).state, 'running', '3000 free, c counted as claimed: 4000 of its 2656 already taken');
+  g.host.gpuConfig = () => ({ memMB: 6144, waitMinutes: 30, concurrency: 1 });
+  const e = await g.core.call('test.request', { gpu: true }, g.who);
+  g.host.gpu.free = 8000;
+  await g.core.poll(); await settle();
+  assert.equal(g.state(e.id).state, 'queued', 'gpuConcurrency caps it');
+});

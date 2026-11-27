@@ -7,7 +7,7 @@ import { join } from 'node:path';
  *     "testConcurrency": 1 }
  * "gpu" is the command for `test request --gpu` (never auto-detected); "gpuMemMB" the free VRAM a GPU job
  * waits for; "gateGpu" makes the merge gate run "gpu" after "test". "testConcurrency" is how many of the repo's
- * CPU test jobs may run at once (read from the base branch; the host's own testConcurrency still caps the total).
+ * CPU test jobs may run at once at most (read from the base branch; unset: as many as the host has room for).
  * Placeholders in argv: {selector} (dropped when empty), {junit} (absolute report path).
  * Without junit the result comes from the exit code alone.
  */

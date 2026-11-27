@@ -2,7 +2,7 @@ import { execFile, execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { closeSync, cpSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, rmSync, statSync, writeFileSync, realpathSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { homedir } from 'node:os';
+import { homedir, availableParallelism, freemem, loadavg, totalmem } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { BROKER_PORT, home, shellLine } from './util.mjs';
 import { workerKeyEnv } from './keys.mjs';
@@ -56,7 +56,7 @@ export function docker(args, { input, timeout = 120e3 } = {}) {
 export function config() {
   const p = join(home(), 'config.json');
   const c = existsSync(p) ? JSON.parse(readFileSync(p, 'utf8')) : {};
-  return { memory: '2560m', cpus: 3, gpu: true, gpuMemory: '6g', gpuCpus: 4, gpuMemMB: 6144, gpuWaitMinutes: 30, testConcurrency: 3, maxWorkers: 6, testStallSec: 300, testRetries: 2, ...c };
+  return { memory: '2560m', cpus: 3, gpu: true, gpuMemory: '6g', gpuCpus: 4, gpuMemMB: 6144, gpuWaitMinutes: 30, maxWorkers: 6, testStallSec: 300, testRetries: 2, ...c };
 }
 
 /** Scrollback the web terminal shows above the screen (tmux keeps 2000). */
@@ -712,10 +712,24 @@ export function dockerHost({ log = () => {}, docker: dockerCmd = docker } = {}) 
     async hostCodexUsage(since) {
       return codexRollout([join(process.env.CODEX_HOME || join(homedir(), '.codex'), 'sessions')], since);
     },
-    gpuConfig: () => { const c = config(); return { memMB: c.gpuMemMB, waitMinutes: c.gpuWaitMinutes }; },
+    gpuConfig: () => { const c = config(); return { memMB: c.gpuMemMB, waitMinutes: c.gpuWaitMinutes, concurrency: c.gpuConcurrency }; },
     /** "host": GPU jobs wait for `hauptling runner --gpu` (test.claim) instead of a `--gpus all` container. */
     gpuRunner: () => (config().gpuRunner === 'host' ? 'host' : 'container'),
     testConcurrency: () => config().testConcurrency,
+    /** `"testScaling": "fixed"` in config.json turns resource-based admission off (fixed limits as before). */
+    testScaling: () => config().testScaling,
+    /** What the host has now: free and total RAM (MiB), cores, 1-minute load. */
+    resources() {
+      let free = freemem();
+      try { const m = /^MemAvailable:\s+(\d+) kB/m.exec(readFileSync('/proc/meminfo', 'utf8')); if (m) free = Number(m[1]) * 1024; } catch {}
+      return { memFreeMB: Math.floor(free / 2 ** 20), memTotalMB: Math.floor(totalmem() / 2 ** 20), cores: availableParallelism(), load1: loadavg()[0] };
+    },
+    /** A test container's own limits, the cost assumed for a repo nothing was measured for yet. */
+    testLimits(gpu) {
+      const c = config();
+      const mb = (v) => { const m = /^([\d.]+)\s*([kmg]?)b?$/i.exec(String(v)); return m ? Math.round(Number(m[1]) * ({ k: 1 / 1024, m: 1, g: 1024 }[m[2].toLowerCase()] ?? 1 / 2 ** 20)) : null; };
+      return { memMB: mb(gpu ? c.gpuMemory : c.memory), cpus: Number(gpu ? c.gpuCpus : c.cpus) || null };
+    },
     maxWorkers: () => config().maxWorkers,
     testRoundAsk: () => config().testRoundAsk,
 
