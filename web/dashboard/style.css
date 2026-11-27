@@ -118,6 +118,22 @@ code, pre, .mono { font-family: var(--mono); font-size: 12.5px; }
 .splitter:hover::after, .splitter.dragging::after, .splitter:focus-visible::after { background: var(--accent); }
 .splitter:focus-visible { box-shadow: 0 0 0 2px var(--accent) inset; }
 body.resizing { user-select: none; }
+/* A first pane collapsed to its strip (44px = STRIP_PX in layout.js): only the strip's own controls show. */
+.split.mini { grid-template-columns: 44px 1rem minmax(0, 1fr); }
+.split.mini > .board { overflow: hidden; }
+.split.mini > .board > :not(.mini-list, .mini-search) { display: none; }
+.mini-list, .board > .mini-search { display: none; }
+.split.mini .mini-list { display: flex; flex-direction: column; align-items: center; gap: .25rem; height: 100%; }
+.mini-scroll { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; align-items: center; gap: .4rem; overflow: hidden auto; scrollbar-width: none; overscroll-behavior: contain; }
+.mini-group { display: flex; flex-direction: column; gap: .25rem; padding: 2px; }
+.mini-group + .mini-group { border-top: 1px solid var(--line); padding-top: .4rem; }
+.minibtn { position: relative; flex: none; display: grid; place-items: center; width: 36px; height: 36px; padding: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+.minibtn .vbadge { width: 20px; height: 20px; font-size: 12px; }
+.minibtn .dot { position: absolute; right: 1px; bottom: 1px; box-shadow: 0 0 0 2px var(--panel); }
+.minibtn.selected { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent) inset; background: color-mix(in srgb, var(--accent) 22%, var(--panel)); }
+.minibtn.blocked { border-color: var(--warn); animation: blink 1.2s ease-in-out infinite; }
+.split.mini .mini-search { display: grid; margin: 2px auto; }
+.mini-more { flex: none; padding: 0; width: 36px; font-size: 11px; font-variant-numeric: tabular-nums; }
 .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(24rem, 100%), 1fr)); column-gap: .5rem; align-items: start; }
 .empty { color: var(--muted); }
 
@@ -162,7 +178,7 @@ body.resizing { user-select: none; }
 .card.drop-side.drop-after::after { left: auto; right: -5px; }
 .card.blocked { border-color: var(--warn); animation: blink 1.2s ease-in-out infinite; }
 @keyframes blink { 50% { box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 35%, transparent); } }
-@media (prefers-reduced-motion: reduce) { .card.blocked { animation: none; } .dot.working { animation: none; } .gtoggle .caret { transition: none; } }
+@media (prefers-reduced-motion: reduce) { .card.blocked, .minibtn.blocked { animation: none; } .dot.working { animation: none; } .gtoggle .caret { transition: none; } }
 
 .dot { width: .7rem; height: .7rem; border-radius: 50%; background: var(--idle); flex: none; }
 .dot.working { border: 2px solid var(--accent); border-right-color: transparent; background: none; animation: spin 1s linear infinite; }
@@ -276,6 +292,12 @@ table.grid td.num, table.grid th.num { text-align: right; font-variant-numeric: 
   .splitter { flex-direction: column; cursor: row-resize; }
   .splitter::before { width: auto; height: 1px; }
   .splitter::after { width: 2.5rem; height: 4px; }
+  /* The strip lies along the top and scrolls sideways. */
+  .split.mini { grid-template-columns: minmax(0, 1fr); grid-template-rows: 44px 1rem minmax(0, 1fr); }
+  .split.mini .mini-list { flex-direction: row; }
+  .mini-scroll { flex-direction: row; overflow: auto hidden; align-self: stretch; }
+  .mini-group { flex-direction: row; }
+  .mini-group + .mini-group { border-top: 0; border-left: 1px solid var(--line); padding: 2px 2px 2px .4rem; }
 }
 @media (max-width: 800px) {
   .usage { grid-template-columns: 1fr; }

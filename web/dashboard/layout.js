@@ -68,6 +68,79 @@ export function keyRatio(key, shift, ratio, total, minA, minB) {
   return clampRatio(r, total, minA, minB);
 }
 
+/** Size of a first pane collapsed to its strip, px. */
+export const STRIP_PX = 44;
+
+/** A pane dragged narrower than this (px) snaps to the strip. */
+export const SNAP_PX = 140;
+
+/** The snap threshold of a pane: SNAP_PX, but below the pane's own minimum so every allowed size stays reachable. */
+export const snapPx = (minA) => Math.min(SNAP_PX, 0.75 * minA);
+
+/**
+ * Where a drag of a collapsible split puts the first pane.
+ * @param {number} px  wanted size of the first pane
+ * @param {number} total
+ * @param {number} minA
+ * @param {number} minB
+ * @returns {{strip: true} | {strip: false, ratio: number}}
+ */
+export function dragSplit(px, total, minA, minB) {
+  if (px < snapPx(minA)) return { strip: true };
+  return { strip: false, ratio: clampRatio(px / total, total, minA, minB) };
+}
+
+/**
+ * `keyRatio` for a collapsible split: shrinking at the minimum (or Home) collapses to the strip,
+ * growing from the strip restores. No `ratio` in a restore means the last stored width.
+ * @param {string} key
+ * @param {boolean} shift
+ * @param {{strip: boolean, ratio: number}} cur
+ * @param {number} total
+ * @param {number} minA
+ * @param {number} minB
+ * @returns {{strip: boolean, ratio?: number} | null}
+ */
+export function keySplit(key, shift, cur, total, minA, minB) {
+  const ratio = keyRatio(key, shift, cur.ratio, total, minA, minB);
+  if (ratio == null) return null;
+  const shrink = key === 'ArrowLeft' || key === 'ArrowUp' || key === 'PageUp';
+  if (cur.strip) {
+    if (shrink || key === 'Home') return { strip: true };
+    return key === 'End' ? { strip: false, ratio } : { strip: false };
+  }
+  if (key === 'Home' || (shrink && cur.ratio <= clampRatio(0, total, minA, minB) + 1e-4)) return { strip: true };
+  return { strip: false, ratio };
+}
+
+/**
+ * A split's stored state: the last full size (null: the default) and whether it is collapsed.
+ * @param {Pick<Storage, 'getItem'>} store
+ */
+export function readSplit(store, id, stacked) {
+  const key = splitKey(id, stacked);
+  return { ratio: parseRatio(store.getItem(key)), strip: store.getItem(`${key}-strip`) === '1' };
+}
+
+/**
+ * Stores a split's state. Collapsing leaves the last full size alone, so it can be restored.
+ * @param {Pick<Storage, 'setItem'|'removeItem'>} store
+ * @param {{strip: boolean, ratio?: number}} s
+ */
+export function writeSplit(store, id, stacked, { strip, ratio }) {
+  const key = splitKey(id, stacked);
+  if (strip) { store.setItem(`${key}-strip`, '1'); return; }
+  store.removeItem(`${key}-strip`);
+  if (ratio != null) store.setItem(key, ratio.toFixed(4));
+}
+
+/**
+ * How many strip items lie (partly) past the visible end: the “+N”.
+ * @param {number[]} ends  each item's far edge, px from the start of the scrolled content
+ * @param {number} visibleEnd  scroll offset plus visible size
+ */
+export const hiddenAfter = (ends, visibleEnd) => ends.filter(e => e > visibleEnd + 1).length;
+
 /**
  * Whether a vertical drag on the header (or on its handle) ends collapsed.
  * Collapses when dragged up past a third of the header's height (at least 24 px) or flicked up;
