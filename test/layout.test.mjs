@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { clampRatio, parseRatio, defaultRatio, splitKey, keyRatio, collapseAfterDrag, HEADER_STEPS, stepClasses, pickStep, handleKey } from '../web/dashboard/layout.js';
+import { clampRatio, parseRatio, defaultRatio, splitKey, keyRatio, collapseAfterDrag, HEADER_STEPS, stepClasses, pickStep, handleKey, STRIP_PX, SNAP_PX, snapPx, dragSplit, keySplit, readSplit, writeSplit, hiddenAfter } from '../web/dashboard/layout.js';
 
 test('clampRatio keeps both panes at their minimum', () => {
   assert.equal(clampRatio(0.4, 1000, 200, 300), 0.4);
@@ -119,3 +119,46 @@ test('header markup: the title leads to the board, no nav tabs, never a second r
   for (const s of HEADER_STEPS.slice(1)) assert.ok(css.includes(`.top.h-${s} `) || css.includes(`.top.h-${s},`), `h-${s} has a style`);
 });
 
+
+test('dragSplit snaps to the strip below the threshold and clamps above it', () => {
+  assert.equal(snapPx(288), SNAP_PX);
+  assert.equal(snapPx(96), 72, 'stacked: below the pane minimum');
+  assert.deepEqual(dragSplit(SNAP_PX - 1, 1000, 288, 320), { strip: true });
+  assert.deepEqual(dragSplit(SNAP_PX, 1000, 288, 320), { strip: false, ratio: 0.288 }, 'between threshold and minimum');
+  assert.deepEqual(dragSplit(500, 1000, 288, 320), { strip: false, ratio: 0.5 });
+  assert.deepEqual(dragSplit(96, 600, 96, 140), { strip: false, ratio: 0.16 });
+});
+
+test('keySplit: shrinking at the minimum collapses, growing from the strip restores', () => {
+  const key = (k, cur) => keySplit(k, false, cur, 1000, 200, 300);
+  assert.deepEqual(key('ArrowLeft', { strip: false, ratio: 0.21 }), { strip: false, ratio: 0.2 });
+  for (const k of ['ArrowLeft', 'ArrowUp', 'PageUp']) assert.deepEqual(key(k, { strip: false, ratio: 0.2 }), { strip: true }, k);
+  assert.deepEqual(key('Home', { strip: false, ratio: 0.5 }), { strip: true });
+  for (const k of ['ArrowRight', 'ArrowDown', 'PageDown']) assert.deepEqual(key(k, { strip: true, ratio: 0.5 }), { strip: false }, k);
+  assert.deepEqual(key('ArrowLeft', { strip: true, ratio: 0.5 }), { strip: true });
+  assert.deepEqual(key('End', { strip: true, ratio: 0.5 }), { strip: false, ratio: 0.7 });
+  assert.equal(key('a', { strip: true, ratio: 0.5 }), null);
+});
+
+test('readSplit/writeSplit: collapsing keeps the last width, per split and orientation', () => {
+  const m = new Map();
+  const store = { getItem: (k) => m.get(k) ?? null, setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k) };
+  assert.deepEqual(readSplit(store, 'board', false), { ratio: null, strip: false });
+  writeSplit(store, 'board', false, { strip: false, ratio: 0.35 });
+  writeSplit(store, 'board', false, { strip: true, ratio: 0.288 });
+  assert.deepEqual(readSplit(store, 'board', false), { ratio: 0.35, strip: true });
+  assert.deepEqual(readSplit(store, 'board', true), { ratio: null, strip: false });
+  assert.deepEqual(readSplit(store, 'history', false), { ratio: null, strip: false });
+  writeSplit(store, 'board', false, { strip: false });
+  assert.deepEqual(readSplit(store, 'board', false), { ratio: 0.35, strip: false });
+});
+
+test('hiddenAfter counts the strip items past the visible end', () => {
+  assert.equal(hiddenAfter([40, 80, 120, 160], 100), 2);
+  assert.equal(hiddenAfter([40, 80], 80), 0);
+});
+
+test('the strip is as wide in the stylesheet as in the logic', () => {
+  const css = readFileSync(new URL('../web/dashboard/style.css', import.meta.url), 'utf8');
+  assert.equal(css.split(`${STRIP_PX}px 1rem minmax(0, 1fr)`).length - 1, 2, 'side by side and stacked');
+});

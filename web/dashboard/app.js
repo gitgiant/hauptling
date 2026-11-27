@@ -6,7 +6,7 @@ import { keyFor, TOUCH_KEYS } from './termkeys.js';
 import { testProgress } from './progress.js';
 import { updateView, afterHello } from './update.js';
 import { movable, canDrop, dropSide, keyMove } from './queue.js';
-import { STACKED_QUERY, HANDLE_PX, DRAG_IGNORE, clampRatio, parseRatio, defaultRatio, splitKey, keyRatio, collapseAfterDrag, HEADER_STEPS, stepClasses, pickStep, handleKey } from './layout.js';
+import { STACKED_QUERY, HANDLE_PX, DRAG_IGNORE, STRIP_PX, clampRatio, defaultRatio, splitKey, keyRatio, dragSplit, keySplit, readSplit, writeSplit, hiddenAfter, collapseAfterDrag, HEADER_STEPS, stepClasses, pickStep, handleKey } from './layout.js';
 // Text from the store is always set with textContent (h() below), never parsed as HTML.
 
 const $ = (sel) => document.querySelector(sel);
@@ -205,12 +205,13 @@ handle.addEventListener('pointerdown', dragHeader);
 
 // ---------- splitters between the panes of each split view ----------
 const stacked = matchMedia(STACKED_QUERY);
-/** Defaults and minimum px of [first, second] pane, side by side and stacked. */
+/** Defaults and minimum px of [first, second] pane, side by side and stacked; `strip`: collapses to a strip. */
 const SPLITS = {
-  board: { def: [0.4, 0.45], min: [[288, 320], [96, 140]] },
-  history: { def: [0.4, 0.45], min: [[288, 320], [96, 140]] },
+  board: { def: [0.4, 0.45], min: [[288, 320], [96, 140]], strip: true },
+  history: { def: [0.4, 0.45], min: [[288, 320], [96, 140]], strip: true },
   db: { def: [{ px: 208 }, 0.3], min: [[128, 320], [64, 140]] },
 };
+/** Wires one splitter; returns `expand()`, which restores a collapsed first pane. */
 function initSplitter(sp) {
   const id = sp.dataset.split, cfg = SPLITS[id], view = sp.parentElement, first = sp.previousElementSibling;
   Object.assign(sp, { tabIndex: 0 });
@@ -218,27 +219,34 @@ function initSplitter(sp) {
   sp.setAttribute('aria-controls', first.id);
   sp.setAttribute('aria-valuemin', '0');
   sp.setAttribute('aria-valuemax', '100');
-  sp.title = 'Drag or use the arrow keys to resize; double-click to reset';
-  let ratio = 0.4;
+  sp.title = `Drag or use the arrow keys to resize; double-click to ${cfg.strip ? 'collapse or expand' : 'reset'}`;
+  let ratio = 0.4, strip = false;
   const geo = () => {
     const st = stacked.matches, cs = getComputedStyle(view), r = view.getBoundingClientRect();
     const [a, b] = st ? [parseFloat(cs.paddingTop), parseFloat(cs.paddingBottom)] : [parseFloat(cs.paddingLeft), parseFloat(cs.paddingRight)];
     const total = (st ? r.height : r.width) - a - b - (st ? sp.offsetHeight : sp.offsetWidth);
     return { st, total, start: (st ? r.top : r.left) + a, min: cfg.min[st ? 1 : 0] };
   };
+  /** Applies a state; `ratio` is ignored while collapsed. */
   const set = (want, save) => {
     const g = geo();
-    ratio = clampRatio(want, g.total, ...g.min);
+    strip = !!want.strip;
+    if (!strip) ratio = clampRatio(want.ratio, g.total, ...g.min);
+    view.classList.toggle('mini', strip);
     view.style.setProperty('--split', ratio.toFixed(4));
     sp.setAttribute('aria-orientation', g.st ? 'horizontal' : 'vertical');
-    sp.setAttribute('aria-valuenow', String(Math.round(ratio * 100)));
-    if (save) localStorage.setItem(splitKey(id, g.st), ratio.toFixed(4));
+    sp.setAttribute('aria-valuenow', String(Math.round((strip ? STRIP_PX / g.total : ratio) * 100)));
+    if (save) writeSplit(localStorage, id, g.st, { strip, ratio });
   };
   const load = () => {
     const g = geo();
     if (g.total <= 0) return; // hidden view
-    set(parseRatio(localStorage.getItem(splitKey(id, g.st))) ?? defaultRatio(cfg.def[g.st ? 1 : 0], g.total), false);
+    const s = readSplit(localStorage, id, g.st);
+    ratio = clampRatio(s.ratio ?? defaultRatio(cfg.def[g.st ? 1 : 0], g.total), g.total, ...g.min);
+    set({ strip: cfg.strip && s.strip, ratio }, false);
   };
+  /** Collapses or restores the last stored width. */
+  const collapse = (on) => { writeSplit(localStorage, id, stacked.matches, { strip: on }); load(); };
   new ResizeObserver(load).observe(view); // also fires when a hidden view is shown and when orientation flips
   sp.addEventListener('pointerdown', (e) => {
     if (e.button !== 0) return;
@@ -248,15 +256,23 @@ function initSplitter(sp) {
     document.body.classList.add('resizing');
     const g = geo();
     const pos = (ev) => (g.st ? ev.clientY : ev.clientX) - g.start;
-    const grab = pos(e) - ratio * g.total; // keep the handle where it was grabbed
-    const move = (ev) => set((pos(ev) - grab) / g.total, false);
+    const p0 = pos(e), grab = p0 - (strip ? STRIP_PX : ratio * g.total); // keep the handle where it was grabbed
+    let moved = false;
+    const move = (ev) => {
+      if (!moved && Math.abs(pos(ev) - p0) < 3) return; // a click, or half of a double-click
+      moved = true;
+      const px = pos(ev) - grab;
+      set(cfg.strip ? dragSplit(px, g.total, ...g.min) : { ratio: px / g.total }, false);
+    };
     const end = () => {
       sp.removeEventListener('pointermove', move);
       sp.removeEventListener('pointerup', end);
       sp.removeEventListener('pointercancel', end);
       sp.classList.remove('dragging');
       document.body.classList.remove('resizing');
-      set(ratio, true);
+      if (!moved) return;
+      set({ strip, ratio }, !strip);
+      if (strip) collapse(true); // keeps the width stored before this drag
     };
     sp.addEventListener('pointermove', move);
     sp.addEventListener('pointerup', end);
@@ -264,14 +280,24 @@ function initSplitter(sp) {
   });
   sp.addEventListener('keydown', (e) => {
     const g = geo();
-    const r = keyRatio(e.key, e.shiftKey, ratio, g.total, ...g.min);
-    if (r == null) return;
+    const next = cfg.strip
+      ? keySplit(e.key, e.shiftKey, { strip, ratio }, g.total, ...g.min)
+      : { ratio: keyRatio(e.key, e.shiftKey, ratio, g.total, ...g.min) };
+    if (!next || next.ratio === null) return;
     e.preventDefault();
-    set(r, true);
+    if (next.strip) collapse(true);
+    else if (next.ratio === undefined) collapse(false);
+    else set(next, true);
   });
-  sp.addEventListener('dblclick', () => { localStorage.removeItem(splitKey(id, stacked.matches)); load(); });
+  sp.addEventListener('dblclick', () => {
+    if (cfg.strip) return collapse(!strip);
+    localStorage.removeItem(splitKey(id, stacked.matches));
+    load();
+  });
+  return { expand: () => collapse(false) };
 }
-for (const sp of document.querySelectorAll('.splitter[data-split]')) initSplitter(sp);
+const splitters = Object.fromEntries([...document.querySelectorAll('.splitter[data-split]')].map(sp => [sp.dataset.split, initSplitter(sp)]));
+$('#history-expand').addEventListener('click', () => { splitters.history.expand(); $('#history-q').focus(); });
 
 // ---------- state ----------
 const state = { board: null, selected: null, sub: 'terminal', view: 'board', histSelected: null, hello: null, update: null };
@@ -642,7 +668,10 @@ function mergeToggle(d, delegator, kind) {
 }
 function renderBoard(b) {
   if (drag) return; // replacing the cards would end the drag
-  const focused = document.activeElement?.matches?.('#board .card') ? document.activeElement.dataset.id : null;
+  const focused = document.activeElement?.matches?.('#board .card, #board .minibtn') ? document.activeElement : null;
+  const [focusId, focusClass] = [focused?.dataset.id, focused?.classList.contains('card') ? 'card' : 'minibtn'];
+  const miniAt = $('#board .mini-scroll');
+  const [miniTop, miniLeft] = [miniAt?.scrollTop ?? 0, miniAt?.scrollLeft ?? 0];
   const active = new Map(b.delegators.map(d => [d.id, d]));
   const live = b.agents.filter(a => !a.ended && active.has(a.delegator));
   const recent = b.agents.filter(a => a.ended).sort((x, y) => (x.updated_at < y.updated_at ? 1 : -1));
@@ -682,12 +711,48 @@ function renderBoard(b) {
   }
   if (recent.length) {
     const det = h('details', { class: 'recent', open: localStorage.getItem('hl-recent') === '1' }, h('summary', { text: `Recent, last 24 h (${recent.length})` }), h('div', { class: 'cards' }, recent.map(card)));
-    det.addEventListener('toggle', () => localStorage.setItem('hl-recent', det.open ? '1' : '0'));
+    det.addEventListener('toggle', () => {
+      const v = det.open ? '1' : '0';
+      if (localStorage.getItem('hl-recent') === v) return; // the event also fires for a re-rendered open list
+      localStorage.setItem('hl-recent', v);
+      renderBoard(state.board); // the strip lists the recent agents only while they are open
+    });
     out.push(det);
   }
-  put($('#board'), ...out);
-  if (focused) $(`#board .card[data-id="${CSS.escape(focused)}"]`)?.focus({ preventScroll: true });
+  const recentOpen = localStorage.getItem('hl-recent') === '1';
+  put($('#board'), ...out, miniBoard([...groups.values(), recentOpen ? recent : []]));
+  $('#board .mini-scroll').scrollTo(miniLeft, miniTop);
+  miniMore();
+  if (focused) $(`#board .${focusClass}[data-id="${CSS.escape(focusId)}"]`)?.focus({ preventScroll: true });
 }
+
+// ---------- board strip: the collapsed board, one icon per card (shown by CSS while .split.mini) ----------
+function miniButton(a) {
+  const v = vendorBadge(a.vendor), status = a.host_state ? `host ${a.host_state}` : a.state;
+  const label = `${a.headline || a.title} · ${status}`, on = state.selected === a.id;
+  return h('button', { type: 'button', class: `minibtn ${dotState(a)}${on ? ' selected' : ''}`, 'data-id': a.id, title: label, 'aria-label': `${v.label}: ${label}`, 'aria-current': on ? 'true' : null, onclick: () => select(a.id) },
+    h('span', { class: `vbadge v-${v.key}`, 'aria-hidden': 'true', text: v.glyph }),
+    h('span', { class: `dot ${dotState(a)}`, 'aria-hidden': 'true' }));
+}
+/** @param {object[][]} lists  agents per group, in board order */
+function miniBoard(lists) {
+  const scroll = h('div', { class: 'mini-scroll', onscroll: () => miniMore() },
+    lists.filter(l => l.length).map(l => h('div', { class: 'mini-group' }, l.map(miniButton))));
+  const more = h('button', { type: 'button', class: 'mini-more', title: 'Scroll to more agents', onclick: () => scroll.scrollBy(stacked.matches ? { left: scroll.clientWidth } : { top: scroll.clientHeight }) });
+  return h('nav', { class: 'mini-list', 'aria-label': 'Agents' }, scroll, more);
+}
+/** Updates the strip's “+N”: the agents further down (stacked: further right). */
+function miniMore() {
+  const scroll = $('#board .mini-scroll');
+  if (!scroll?.clientHeight) return; // not shown
+  const st = stacked.matches, box = scroll.getBoundingClientRect();
+  const ends = [...scroll.querySelectorAll('.minibtn')].map(b => { const r = b.getBoundingClientRect(); return st ? r.right - box.left + scroll.scrollLeft : r.bottom - box.top + scroll.scrollTop; });
+  const n = hiddenAfter(ends, st ? scroll.scrollLeft + scroll.clientWidth : scroll.scrollTop + scroll.clientHeight);
+  const more = $('#board .mini-more');
+  more.textContent = `+${n}`;
+  more.style.visibility = n ? 'visible' : 'hidden'; // keeps its room, so the count doesn't change what fits
+}
+new ResizeObserver(() => miniMore()).observe($('#board'));
 
 // ---------- detail ----------
 /** The id now of a renamed agent's old one (a queued agent that changed vendor), else undefined. */
