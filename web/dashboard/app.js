@@ -7,6 +7,7 @@ import { testProgress } from './progress.js';
 import { updateView, afterHello } from './update.js';
 import { movable, canDrop, dropSide, keyMove } from './queue.js';
 import { starting, spinner, wheel, startFailure, tickWheels } from './wheel.js';
+import { dotState, byDelegator, stripGroup } from './strip.js';
 import { STACKED_QUERY, HANDLE_PX, DRAG_IGNORE, STRIP_PX, STRIP_CLASS, clampRatio, defaultRatio, splitKey, keyRatio, dragSplit, keySplit, readSplit, writeSplit, hiddenAfter, collapseAfterDrag, HEADER_STEPS, stepClasses, pickStep, handleKey } from './layout.js';
 // Text from the store is always set with textContent (h() below), never parsed as HTML.
 
@@ -521,9 +522,6 @@ function markCurrent(b) {
 function hostChip(a) {
   return state.board?.hosts ? h('span', { class: 'chip host', title: a.host_state ? `host ${a.host_state}` : `runs on ${a.host}`, text: a.host }) : null;
 }
-/** The dot's class: grey for an agent whose host is offline or lost, never the working spinner. */
-const dotState = (a) => (a.host_state ? `host-${a.host_state}` : a.state);
-
 function card(a) {
   const meta = [
     h('span', { class: 'aid', title: `${a.vendor} · ${a.model} · ${a.branch}` }, vbadge(a.vendor), h('span', { class: 'mono', text: a.id })),
@@ -676,8 +674,9 @@ function mergeToggle(d, delegator, kind) {
 }
 function renderBoard(b) {
   if (drag) return; // replacing the cards would end the drag
-  const focused = document.activeElement?.matches?.('#board .card, #board .minibtn') ? document.activeElement : null;
-  const [focusId, focusClass] = [focused?.dataset.id, focused?.classList.contains('card') ? 'card' : 'minibtn'];
+  const focused = document.activeElement?.matches?.('#board .card, #board .mini-icon, #board .mini-dot, #board .mini-over') ? document.activeElement : null;
+  const focusId = focused?.dataset.id;
+  const focusClass = ['card', 'mini-icon', 'mini-dot', 'mini-over'].find(c => focused?.classList.contains(c));
   const miniAt = $('#board .mini-scroll');
   const [miniTop, miniLeft] = [miniAt?.scrollTop ?? 0, miniAt?.scrollLeft ?? 0];
   const active = new Map(b.delegators.map(d => [d.id, d]));
@@ -723,38 +722,36 @@ function renderBoard(b) {
       const v = det.open ? '1' : '0';
       if (localStorage.getItem('hl-recent') === v) return; // the event also fires for a re-rendered open list
       localStorage.setItem('hl-recent', v);
-      renderBoard(state.board); // the strip lists the recent agents only while they are open
     });
     out.push(det);
   }
-  const recentOpen = localStorage.getItem('hl-recent') === '1';
-  put($('#board'), ...out, miniBoard([...groups.values(), recentOpen ? recent : []]));
+  put($('#board'), ...out, miniBoard(byDelegator(groups), active));
   $('#board .mini-scroll').scrollTo(miniLeft, miniTop);
   miniMore();
   if (focused) $(`#board .${focusClass}[data-id="${CSS.escape(focusId)}"]`)?.focus({ preventScroll: true });
 }
 
-// ---------- board strip: the collapsed board, one icon per card (shown by CSS while .split.in-strip) ----------
-function miniButton(a) {
-  const v = vendorBadge(a.vendor), status = a.host_state ? `host ${a.host_state}` : a.state;
-  const label = `${a.headline || a.title} · ${status}`, on = state.selected === a.id;
-  return h('button', { type: 'button', class: `minibtn ${dotState(a)}${on ? ' selected' : ''}`, 'data-id': a.id, title: label, 'aria-label': `${v.label}: ${label}`, 'aria-current': on ? 'true' : null, onclick: () => select(a.id) },
-    h('span', { class: `vbadge v-${v.key}`, 'aria-hidden': 'true', text: v.glyph }),
-    starting(a) ? spinner(h) : h('span', { class: `dot ${dotState(a)}`, 'aria-hidden': 'true' }));
+// ---------- board strip: the collapsed board, a delegator's icon and its agents' dots (shown by CSS while .split.in-strip) ----------
+/** Restores the collapsed Board, scrolled to a group. */
+function showGroup(key) {
+  splitters.board.expand();
+  const board = $('#board'), group = [...board.querySelectorAll('.group')].find(g => g.dataset.key === key);
+  if (!group) return;
+  board.scrollTop += group.getBoundingClientRect().top - board.getBoundingClientRect().top;
+  group.querySelector('.gtoggle').focus({ preventScroll: true }); // the icon is hidden now
 }
-/** @param {object[][]} lists  agents per group, in board order */
-function miniBoard(lists) {
+function miniBoard(delegators, active) {
   const scroll = h('div', { class: 'mini-scroll', onscroll: () => miniMore() },
-    lists.filter(l => l.length).map(l => h('div', { class: 'mini-group' }, l.map(miniButton))));
-  const more = h('button', { type: 'button', class: 'mini-more', title: 'Scroll to more agents', onclick: () => scroll.scrollBy(stacked.matches ? { left: scroll.clientWidth } : { top: scroll.clientHeight }) });
-  return h('nav', { class: 'mini-list', 'aria-label': 'Agents' }, scroll, more);
+    delegators.map(d => stripGroup(h, d, { cli: active.get(d.id)?.cli, selected: state.selected, onGroup: showGroup, onAgent: select })));
+  const more = h('button', { type: 'button', class: 'mini-more', title: 'Scroll to more delegators', onclick: () => scroll.scrollBy(stacked.matches ? { left: scroll.clientWidth } : { top: scroll.clientHeight }) });
+  return h('nav', { class: 'mini-list', 'aria-label': 'Delegators and their agents' }, scroll, more);
 }
-/** Updates the strip's “+N”: the agents further down (stacked: further right). */
+/** Updates the strip's “+N”: the delegators further down (stacked: further right). */
 function miniMore() {
   const scroll = $('#board .mini-scroll');
   if (!scroll?.clientHeight) return; // not shown
   const st = stacked.matches, box = scroll.getBoundingClientRect();
-  const ends = [...scroll.querySelectorAll('.minibtn')].map(b => { const r = b.getBoundingClientRect(); return st ? r.right - box.left + scroll.scrollLeft : r.bottom - box.top + scroll.scrollTop; });
+  const ends = [...scroll.querySelectorAll('.mini-group')].map(b => { const r = b.getBoundingClientRect(); return st ? r.right - box.left + scroll.scrollLeft : r.bottom - box.top + scroll.scrollTop; });
   const n = hiddenAfter(ends, st ? scroll.scrollLeft + scroll.clientWidth : scroll.scrollTop + scroll.clientHeight);
   const more = $('#board .mini-more');
   more.textContent = `+${n}`;
