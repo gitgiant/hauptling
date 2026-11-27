@@ -20,7 +20,7 @@ Delegator (host): pass --delegator ID on spawn, wait, status, handoff and resume
         [--repo R] [--base B] [--title T] [--allow-tier] [--effort low|medium|high|…] [--test-writer [--test-writer-vendor V] [--test-writer-model M]]
         [--host H] [--gpu]   --host: run it on H (overrides the delegator's); --gpu: only on a host with a GPU
   wait [--timeout 270] [--until-event]     block until the next event (max 280 s; run again on timeout); --until-event never times out
-  status [--all]                           agents of the current delegator
+  status [AGENT] [--all]                   agents of the current delegator (or just AGENT)
   models                                   models.json table (suggest mode reasons over this)
   models prefer [cheap|balanced|best]      show or set the highest tier workers may use (spawn --allow-tier overrides)
   pause AGENT | unpause AGENT | restart AGENT
@@ -61,6 +61,12 @@ async function main() {
   const { call } = await import('../src/client.mjs');
   const args = parseArgs(rest, { repeat: ['choice', 'artifacts'], bool: ['test-writer', 'allow-tier', 'until-event', 'host', 'all', 'gpu', 'force', 'no-host', 'no-login', 'now', 'print', 'new-token', 'no-gate', 'no-automerge', 'once'] });
   const text = () => args._.join(' ');
+  /** The agent id to use for what was typed; says so when it is the old id of a renamed agent. */
+  const target = async (agent) => {
+    const r = await call('agent.resolve', { agent });
+    if (r.renamed) console.error(`note: ${agent} was renamed to ${r.id}`);
+    return r.id;
+  };
   switch (cmd) {
     case undefined: case 'help': case '--help': case '-h': return out(USAGE);
 
@@ -165,7 +171,8 @@ async function main() {
       return out(r.events.length ? r.events.map(e => `[${e.kind}] ${e.text}`).join('\n') : 'No events yet (timed out). Run `hauptling wait` again.');
     }
     case 'status': {
-      const agents = await call('agents', { delegator: args.delegator, all: args.all });
+      const one = args._[0] && await target(args._[0]);
+      const agents = (await call('agents', { delegator: args.delegator, all: args.all || Boolean(one) })).filter(a => !one || a.id === one);
       const satellites = await call('satellite.list').catch(() => []);
       return out(board(agents, { hosts: satellites.length > 0 }));
     }
@@ -174,22 +181,22 @@ async function main() {
       const { loadModels, table } = await import('../src/models.mjs'); return out(table(loadModels()));
     }
     case 'attach': {
-      const r = await call('attach', { agent: args._[0] });
+      const agent = await target(args._[0]);
+      const r = await call('attach', { agent });
       if (r.remote) {
         // An agent on a satellite: the hub relays its screen and keys over the link (PRD "Part 3").
-        out(`Attaching to ${args._[0]} on ${r.remote} through the hub (detach: Ctrl-])…${r.online ? '' : ` ${r.remote} is offline right now.`}`);
+        out(`Attaching to ${agent} on ${r.remote} through the hub (detach: Ctrl-])…${r.online ? '' : ` ${r.remote} is offline right now.`}`);
         const { attachRemote } = await import('../src/terminal.mjs');
-        return out(`Detached: ${await attachRemote({ call, agent: args._[0], host: r.remote })}`);
+        return out(`Detached: ${await attachRemote({ call, agent: agent, host: r.remote })}`);
       }
       const { argv } = r;
-      out(`Attaching to ${args._[0]} (detach: Ctrl-b d)…`);
+      out(`Attaching to ${agent} (detach: Ctrl-b d)…`);
       const { spawnSync } = await import('node:child_process');
       spawnSync(argv[0], argv.slice(1), { stdio: 'inherit' });
       return;
     }
-    case 'reply': { const [agent, ...t] = args._; return out(await call('reply', { agent, text: t.join(' ') })); }
-    case 'pause': case 'unpause': case 'restart': case 'kill': return out(await call(cmd, { agent: args._[0] }));
-    case 'merge': return out(await call('merge', { agent: args._[0] }));
+    case 'reply': { const [agent, ...t] = args._; return out(await call('reply', { agent: await target(agent), text: t.join(' ') })); }
+    case 'pause': case 'unpause': case 'restart': case 'kill': case 'merge': return out(await call(cmd, { agent: await target(args._[0]) }));
 
     // ----- worker -----
     case 'usage': {

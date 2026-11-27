@@ -230,6 +230,7 @@ export function createDashboard({ db, dbPath, core, host, hub = null, log = () =
       const ask = db.prepare('SELECT id, question, choices, at FROM asks WHERE agent = ? AND answered_at IS NULL ORDER BY id DESC LIMIT 1').get(a.id);
       return {
         ...pub(a),
+        aliases: db.prepare('SELECT old FROM aliases WHERE new = ?').all(a.id).map(r => r.old),
         ended: ENDED.includes(a.state),
         usage: a.usage ? JSON.parse(a.usage) : null,
         spend: a.usage_start != null && core.spend ? core.spend(a) : null,

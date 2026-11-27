@@ -9,6 +9,8 @@ CREATE TABLE IF NOT EXISTS identities (
   identity TEXT PRIMARY KEY, family TEXT NOT NULL, model TEXT NOT NULL,
   session_id TEXT UNIQUE, repo TEXT, seen_at TEXT NOT NULL
 );
+-- Old ids of renamed agents (PRD "Token economy" stage 3): they resolve to the new one.
+CREATE TABLE IF NOT EXISTS aliases (old TEXT PRIMARY KEY, new TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS status (identity TEXT PRIMARY KEY, text TEXT NOT NULL, at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS mail (
   id INTEGER PRIMARY KEY, recipient TEXT NOT NULL, sender TEXT NOT NULL, text TEXT NOT NULL,

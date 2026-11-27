@@ -236,13 +236,14 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     if (tw) insert({ ...tw, title: `Spec tests: ${title}`.slice(0, 72), state: 'queued', role: 'tests' });
     const started = await startQueued(d);
     // The rows as they are now: a queued agent may have moved to another vendor.
-    const result = (x, chosen) => {
+    const result = (spawned, chosen) => {
+      const x = mail.resolve(db, spawned);
       const a = agentRow(x);
       const warning = chosen ? headroomWarning(a.vendor) : null;
       const waiting = headroomNote(a);
       return { id: x, vendor: a.vendor, model: a.model, effort: a.effort, state: started.includes(x) ? 'spawning' : a.state, host: a.host, ...(warning ? { warning } : {}), ...(waiting ? { waiting } : {}) };
     };
-    return { ...result(id, !auto), billing: agentRow(id).billing, ...(tw ? { testWriter: result(tw.id, !tw.auto) } : {}) };
+    return { ...result(id, !auto), billing: mustAgent(id).billing, ...(tw ? { testWriter: result(tw.id, !tw.auto) } : {}) };
   }
 
   /** The vendor a model id belongs to, when only one enabled vendor has it. */
@@ -425,7 +426,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   }
   /** A queued agent whose rotation-chosen vendor is full moves to the next vendor with headroom and a free slot. */
   function revendor(a, drow, hubGpu) {
-    if (!headroomGated(a) || roomy(a.vendor)) return null;
+    if (changing.has(a.id) || !headroomGated(a) || roomy(a.vendor)) return null;
     const cfg = models();
     const order = enabledVendors(cfg);
     const at = order.indexOf(a.vendor);
@@ -441,11 +442,34 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
       const place = placements(moved, drow, hubGpu).find(p => p.name === 'hub');
       if (!place) continue;
       db.prepare('UPDATE agents SET vendor = ?, model = ?, effort = ? WHERE id = ?').run(vendor, entry.id, effort, a.id);
-      db.prepare('UPDATE identities SET family = ?, model = ? WHERE identity = ?').run(vendor, sanitizeModel(entry.id), a.id);
       log(`headroom: ${a.id} moves from ${a.vendor} to ${vendor} ${entry.id}`);
+      if (vendor !== a.vendor || entry.id !== a.model) {
+        Object.assign(moved, rename(moved));
+        emit(a.delegator, moved.id, 'renamed', `${a.id} → ${moved.id} (headroom: ${a.vendor} is short, now ${vendor} ${entry.id})`);
+      }
       return { a: moved, place };
     }
     return null;
+  }
+  /**
+   * A queued agent that changed vendor or model gets an id that says so, with its branch; the old id becomes an
+   * alias. Only on the hub before it starts, inside the caller's transaction. A test writer's branch is the
+   * implementer's task branch, and spec tests already pushed stay where `start_from` says.
+   */
+  function rename(a) {
+    const old = a.id;
+    const id = `${a.vendor}_${sanitizeModel(a.model)}_${hex(3).slice(0, 5)}`;
+    const branch = a.branch === `hl/${old}` ? `hl/${id}` : a.branch;
+    db.prepare('UPDATE agents SET id = ?, branch = ?, updated_at = ? WHERE id = ?').run(id, branch, now(), old);
+    db.prepare('UPDATE identities SET identity = ?, family = ?, model = ? WHERE identity = ?').run(id, a.vendor, sanitizeModel(a.model), old);
+    for (const [table, column] of [['agents', 'depends_on'], ['status', 'identity'], ['mail', 'recipient'], ['mail', 'sender'], ['events', 'agent'], ['asks', 'agent'], ['tests', 'agent'], ['tests', 'requester'], ['aliases', 'new']]) {
+      db.prepare(`UPDATE ${table} SET ${column} = ? WHERE ${column} = ?`).run(id, old);
+    }
+    // start_from names a branch.
+    if (branch !== a.branch) db.prepare('UPDATE agents SET start_from = ? WHERE start_from = ? AND id != ?').run(branch, a.branch, id);
+    for (const key of ['screen', 'held-gate', 'held-land', 'stall']) db.prepare('UPDATE kv SET key = ? WHERE key = ?').run(`${key}:${id}`, `${key}:${old}`);
+    db.prepare('INSERT INTO aliases (old, new) VALUES (?, ?)').run(old, id);
+    return { id, branch };
   }
   /** A stretch with every vendor full ends as soon as one has headroom: the next one is announced again. */
   function endHeadroomStretch() {
@@ -2056,6 +2080,12 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     answer, reply, spawn, wait, agents, poll,
     pause: onItsHost('pause', pause), unpause: onItsHost('unpause', unpause), restart: onItsHost('restart', restart), kill: onItsHost('kill', kill), merge: onItsHost('merge', merge),
     'agent.get': ({ agent }) => { const { token: _t, ...r } = mustAgent(agent); return r; },
+    // What the CLI was given → the agent's id now; `renamed`: it was an old one.
+    'agent.resolve': ({ agent }) => {
+      const { id } = mustAgent(agent);
+      const renamed = db.prepare('SELECT old FROM aliases WHERE new = ?').all(id).some(r => r.old === agent || (/^[0-9a-f]{5,}$/.test(agent) && r.old.endsWith(agent)));
+      return { id, renamed };
+    },
     'attach': ({ agent }) => {
       const a = mustAgent(agent);
       if (a.state === 'parked' || (a.state === 'queued' && a.unpark) || (a.state === 'paused' && ['parked', 'unpark'].includes(a.paused_state))) {

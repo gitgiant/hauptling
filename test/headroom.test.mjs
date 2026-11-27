@@ -78,12 +78,14 @@ test('all vendors full: spawns queue with one event and notification, then start
   reading('codex', 20, { window: 'week', slot: 'hl-w2' });
   await core.poll();
   await settle();
-  for (const x of [a, b]) {
-    assert.notEqual(row(x.id).state, 'queued');
-    assert.equal(row(x.id).vendor, 'codex');
-    assert.match(row(x.id).model, /./);
+  // Those that changed vendor have new ids by now.
+  const [x, y] = await Promise.all([a, b].map(async s => row((await core.call('agent.resolve', { agent: s.id })).id)));
+  for (const r of [x, y]) {
+    assert.notEqual(r.state, 'queued');
+    assert.equal(r.vendor, 'codex');
+    assert.match(r.model, /./);
   }
-  assert.ok(row(a.id).updated_at <= row(b.id).updated_at);
+  assert.ok(x.updated_at <= y.updated_at);
 
   // A new stretch is announced again.
   reading('codex', 99, { window: 'week' });
@@ -118,4 +120,67 @@ test('the test writer skips a vendor without headroom', async () => {
   assert.equal(r.testWriter.vendor, 'claude');
   const s = await spawn({ vendor: 'claude', testWriter: {} });
   assert.equal(s.testWriter.vendor, 'agy');
+});
+
+test('a queued agent moved to another vendor is renamed; the old id still works', async () => {
+  const { db, core, reading, spawn, row } = await setup();
+  for (const v of ['claude', 'codex', 'agy']) reading(v, 90);
+  const r = await spawn({ testWriter: {} });
+  const old = r.testWriter.id, impl = r.id;
+  const to = row(old).vendor === 'codex' ? 'agy' : 'codex';
+  await core.call('mail.send', { from: 'user', to: old, text: 'hello' });
+  db.prepare("INSERT INTO kv (key, value) VALUES (?, 'x')").run(`stall:${old}`);
+
+  reading(to, 10);
+  await core.poll();
+  await settle();
+  assert.equal(row(old), undefined);
+  const moved = db.prepare("SELECT * FROM agents WHERE role = 'tests'").get();
+  assert.match(moved.id, new RegExp(`^${to}_.+_[0-9a-f]{5}$`));
+  assert.notEqual(moved.state, 'queued');
+  // The test writer commits on the implementer's task branch, which keeps its name.
+  assert.equal(moved.branch, `hl/${impl}`);
+  assert.equal(row(impl).depends_on, moved.id);
+  const renamed = db.prepare("SELECT agent, text FROM events WHERE kind = 'renamed'").all();
+  assert.equal(renamed.length, 1);
+  assert.equal(renamed[0].agent, moved.id);
+  assert.ok(renamed[0].text.startsWith(`${old} → ${moved.id} (headroom`));
+  assert.equal(db.prepare('SELECT recipient FROM mail').get().recipient, moved.id);
+  assert.ok(db.prepare('SELECT 1 FROM kv WHERE key = ?').get(`stall:${moved.id}`));
+
+  const suffix = old.split('_').pop();
+  for (const name of [old, suffix]) assert.deepEqual(await core.call('agent.resolve', { agent: name }), { id: moved.id, renamed: true });
+  assert.deepEqual(await core.call('agent.resolve', { agent: moved.id }), { id: moved.id, renamed: false });
+  assert.deepEqual((await core.call('reply', { agent: old, text: 'go on' })).sent, [moved.id]);
+  assert.deepEqual(await core.call('mail.send', { from: 'user', to: suffix, text: 'again' }), [moved.id]);
+  assert.deepEqual(await core.call('kill', { agent: old }), { killed: moved.id });
+  assert.equal(row(moved.id).state, 'killed');
+});
+
+test('the renamed agent gets the new branch; the spawn answers with the new id', async () => {
+  const { db, core, reading, spawn, row } = await setup();
+  for (const v of ['claude', 'codex', 'agy']) reading(v, 90);
+  const r = await spawn();
+  const before = row(r.id);
+  reading(before.vendor === 'agy' ? 'codex' : 'agy', 10);
+  await core.poll();
+  await settle();
+  const now = db.prepare('SELECT * FROM agents').get();
+  assert.notEqual(now.id, r.id);
+  assert.ok(now.id.startsWith(`${now.vendor}_`));
+  assert.equal(now.branch, `hl/${now.id}`);
+  assert.equal((await core.call('agent.get', { agent: r.id })).id, now.id);
+});
+
+test('no rename when vendor and model stay the same', async () => {
+  const { db, core, reading, spawn, row } = await setup();
+  for (const v of ['claude', 'codex', 'agy']) reading(v, 90);
+  const r = await spawn();
+  reading(r.vendor, 10);
+  await core.poll();
+  await settle();
+  assert.notEqual(row(r.id).state, 'queued');
+  assert.equal(row(r.id).branch, `hl/${r.id}`);
+  assert.equal(db.prepare("SELECT COUNT(*) n FROM events WHERE kind = 'renamed'").get().n, 0);
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM aliases').get().n, 0);
 });

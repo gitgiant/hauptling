@@ -308,7 +308,8 @@ function render() {
   renderGpu(b.gpu, b.tests);
   renderSys();
   renderBoard(b);
-  if (state.selected) {
+  if (state.selected && renamedTo(state.selected)) select(state.selected);
+  else if (state.selected) {
     const a = b.agents.find(x => x.id === state.selected);
     if (a) {
       const detail = $('#detail');
@@ -552,7 +553,11 @@ function renderBoard(b) {
 }
 
 // ---------- detail ----------
-function select(id) {
+/** The id now of a renamed agent's old one (a queued agent that changed vendor), else undefined. */
+const renamedTo = (id) => state.board?.agents.find(x => x.aliases?.includes(id))?.id;
+
+function select(wanted) {
+  const id = renamedTo(wanted) || wanted;
   closeTerm();
   state.selected = id;
   location.hash = `agent=${id}${state.sub !== 'terminal' ? `/${state.sub}` : ''}`;
