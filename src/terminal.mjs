@@ -87,7 +87,7 @@ export function clampSize(size) {
 }
 
 /** `rpc(host, op, args)`: on the hub, a request to a satellite over its link (hub.rpc); null elsewhere. */
-export function createTerminals({ db, host, slotDir, rpc = null, log = () => {}, now = () => Date.now(), later = (fn, ms) => { const t = setTimeout(fn, ms); t.unref?.(); return () => clearTimeout(t); } }) {
+export function createTerminals({ db, host, slotDir, hold = () => () => {}, rpc = null, log = () => {}, now = () => Date.now(), later = (fn, ms) => { const t = setTimeout(fn, ms); t.unref?.(); return () => clearTimeout(t); } }) {
   const inputUntil = new Map(); // session → epoch ms
   /** session → { views: viewer → size|null, sent: last applied key, held: a web size may be in force, at, busy, cancel, fails } */
   const sizing = new Map();
@@ -280,6 +280,10 @@ export function createTerminals({ db, host, slotDir, rpc = null, log = () => {},
     // Refresh tokens rotate (Claude, Codex; agy's MCP tokens): a second process refreshing the same file signs the other out.
     const busy = runningOn(slot, vendor);
     if (busy) throw new Error(`${busy} is running on ${slot} with this ${vendor} sign-in; signing in again now could sign it out mid-task. Wait until it ends (or kill it), then sign in.`);
+    const release = hold(slot, vendor); // not while a usage refresh runs this sign-in
+    try { return await openLogin(slot, vendor); } finally { release(); }
+  }
+  async function openLogin(slot, vendor) {
     const sid = `login-${slot}-${vendor}`;
     await tmux(['kill-session', '-t', sid]).catch(() => {});
     const dir = slotDir(slot);
@@ -306,6 +310,9 @@ export function createTerminals({ db, host, slotDir, rpc = null, log = () => {},
 
   return { resolve, screen, input, inputState, keys, relayKeys, join, resize, leave, sync, relayResize, restoreSizes, startLogin, stopLogin, runningOn };
 }
+
+/** Whether a dashboard sign-in for this slot × vendor is still running (tmux on this host). */
+export const signingIn = (slot, vendor) => tmux(['display-message', '-p', '-t', `login-${slot}-${vendor}:`, '#{pane_dead}']).then(o => o.trim() === '0', () => false);
 
 /**
  * `hauptling attach` on the hub for an agent on a satellite (PRD "Part 3"): redraws the relayed screen when it

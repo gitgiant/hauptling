@@ -27,6 +27,7 @@ Delegator (host): pass --delegator ID on spawn, wait, status, handoff and resume
   attach AGENT | reply AGENT <text> | kill AGENT | merge AGENT   (merge: local repos, or when automerge is off)
   test request --sha S [--selector X] [--gpu] [--timeout S] | test wait ID | test get ID | test report ID FILE
   dashboard [--print] [--host H] [--new-token]  open the dashboard (--print: show the sign-in link; --host: link via H, e.g. your Tailscale name)
+  usage refresh                            read every vendor's current 5h/week usage now (no model tokens; once per 30 s)
   gpu status | gpu pause [--now] | gpu resume   hold the GPU test queue (--now kills and requeues the running job)
   runner [--gpu] [--once] [--dir D] | runner token   run test jobs on this machine, no container (GPU: set "gpuRunner": "host"
                                            in config.json; on another OS, e.g. Windows, set HAUPTLING_BROKER and HAUPTLING_TOKEN=<runner token>)
@@ -192,6 +193,10 @@ async function main() {
 
     // ----- worker -----
     case 'usage': {
+      if (args._[0] === 'refresh') {
+        const { vendors } = await call('usage.refresh');
+        return out(vendors.map(v => `${v.vendor.padEnd(7)}${v.status === 'ok' ? `${v.limits.map(l => `${l.window} ${Math.round(l.used_pct)}%${l.resets_at ? ` (resets ${new Date(l.resets_at).toLocaleString()})` : ''}`).join(' · ')}  [${v.slot}]` : `${v.status}: ${v.note}`}`).join('\n'));
+      }
       // A worker's status line command: forward the vendor's JSON, print a short line. Never blocks the TUI for long.
       let raw = '';
       for await (const c of process.stdin) raw += c;

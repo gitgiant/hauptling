@@ -139,7 +139,7 @@ export function joinLine(headers, tok) {
 
 /** `hub`: on the hub, its satellites (src/hub.mjs), for the Hosts panel and the relayed terminal, diff and timeline. */
 export function createDashboard({ db, dbPath, core, host, hub = null, log = () => {}, slotDir = () => { throw new Error('no slots'); }, logins = () => [], report = {} }) {
-  const terms = createTerminals({ db, host, slotDir, log, rpc: hub ? (name, op, args) => hub.rpc(name, op, args) : null });
+  const terms = createTerminals({ db, host, slotDir, log, rpc: hub ? (name, op, args) => hub.rpc(name, op, args) : null, hold: core.holdSignin });
   const satellites = () => db.prepare('SELECT name, online, lost_at FROM hosts ORDER BY name').all();
   const offline = (e) => /is offline/.test(e.message);
   const json = (res, code, body) => { res.writeHead(code, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(body)); };
@@ -389,6 +389,7 @@ export function createDashboard({ db, dbPath, core, host, hub = null, log = () =
         budget: core.budgetState?.(vendor) || null, // API first, then the plan: { usd, spent, stop_at, until, … }
         out_of_credit: core.keyOut?.(vendor) || null, // the API refused the key: { at, until }
         limits: [...latest.values()],
+        refresh: core.lastRefresh?.(vendor) || null, // the Refresh button's last result: { status, note, at }
         slots: slotNames.map(slot => ({
           slot,
           signed_in: Boolean(signedIn.get(`${slot}:${vendor}`)),
@@ -593,6 +594,12 @@ export function createDashboard({ db, dbPath, core, host, hub = null, log = () =
         if (origin && new URL(origin).host !== req.headers.host) { json(res, 403, { error: 'Cross-origin request' }); return true; }
         const body = await readBody(req, p === '/dash/report/send' ? 8e6 : 64e3);
         if (p === '/dash/db/query') { json(res, 200, await query(body.sql)); return true; }
+        if (p === '/dash/usage/refresh') {
+          const r = await core.call('usage.refresh');
+          tick();
+          json(res, 200, r);
+          return true;
+        }
         if (p === '/dash/term/login') { json(res, 200, await terms.startLogin(body.slot, body.vendor)); return true; }
         if (p === '/dash/hosts/token') {
           if (!hub) throw new Error('This broker is a satellite: add hosts on the hub');
@@ -628,7 +635,7 @@ export function createDashboard({ db, dbPath, core, host, hub = null, log = () =
       json(res, 404, { error: 'Not found' });
     } catch (e) {
       log(`dashboard ${p}: ${e.message}`);
-      json(res, 400, { error: e.message });
+      json(res, e.status || 400, { error: e.message });
     }
     return true;
   }
