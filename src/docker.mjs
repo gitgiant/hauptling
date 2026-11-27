@@ -96,7 +96,7 @@ export function sysInfo() {
   const totalMB = totalmem() / 2 ** 20, availMB = kb('MemAvailable') ?? freemem() / 2 ** 20;
   const disks = [];
   const seen = new Set();
-  for (const [mount, what] of [['/', 'system, Docker images and containers'], [home(), 'Hauptling store, clones and slots'], [process.cwd(), 'this checkout']]) {
+  for (const [mount, what] of [['/', 'system, Docker images and containers'], [home(), 'Hauptling store, clones and slots'], [fileURLToPath(new URL('..', import.meta.url)), 'the Hauptling checkout']]) {
     try {
       const s = statfsSync(mount);
       const key = `${s.blocks}:${s.bsize}:${s.type}`;
