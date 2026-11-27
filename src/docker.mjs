@@ -602,6 +602,7 @@ export function dockerHost({ log = () => {}, docker: dockerCmd = docker } = {}) 
     gpuRunner: () => (config().gpuRunner === 'host' ? 'host' : 'container'),
     testConcurrency: () => config().testConcurrency,
     maxWorkers: () => config().maxWorkers,
+    testRoundAsk: () => config().testRoundAsk,
 
     /** argv for an interactive sign-in in a throwaway container with the slot's credentials for this vendor. */
     loginArgv(slot, vendor, vendorArgv) {

@@ -267,7 +267,7 @@ test('a newer report supersedes the agent\'s older gate jobs; only the newest sh
   assert.equal(db.prepare('SELECT state FROM agents WHERE id = ?').get(id).state, 'merged');
 });
 
-test('required checks → auto-merge; queue beyond 3; ask → toast → answer; round 3 blocks', async () => {
+test('required checks → auto-merge; queue beyond 3; ask → toast → answer; round 5 blocks', async () => {
   const { db, core, gh, host, toasts } = setup(fakeGithub({ required: ['ci'] }));
   await core.call('delegator.start', { repo: 'gitgiant/demo' });
   const ids = [];
@@ -290,11 +290,22 @@ test('required checks → auto-merge; queue beyond 3; ask → toast → answer; 
   await core.call('answer', { ask: q.ask, choice: 1 });
   assert.match(host.typed.at(-1)[1], /\[user .*Which DB\?": postgres/);
 
-  for (let i = 1; i <= 2; i++) await core.call('test.request', { selector: 'x' }, who);
-  assert.equal(db.prepare('SELECT state FROM agents WHERE id = ?').get(ids[0]).state, 'working', 'two rounds run freely');
-  await core.call('test.request', { selector: 'x' }, who);
-  assert.equal(db.prepare('SELECT state FROM agents WHERE id = ?').get(ids[0]).state, 'blocked');
-  assert.match(toasts.at(-1).body, /round 3/);
+  const state = () => db.prepare('SELECT state FROM agents WHERE id = ?').get(ids[0]).state;
+  const request = () => core.call('test.request', { selector: 'x' }, who);
+  for (let round = 1; round <= 10; round++) {
+    const asked = toasts.length;
+    await request();
+    if (round % 5) {
+      assert.equal(state(), 'working', `round ${round} runs freely`);
+      assert.equal(toasts.length, asked, `round ${round} asks nothing`);
+      continue;
+    }
+    assert.equal(state(), 'blocked', `round ${round} blocks`);
+    assert.match(toasts.at(-1).body, new RegExp(`round ${round}\\. Keep iterating`));
+    const { id } = db.prepare('SELECT id FROM asks WHERE agent = ? AND answered_at IS NULL').get(ids[0]);
+    await core.call('answer', { ask: id, choice: 0 });
+    assert.equal(state(), 'working', 'Keep going');
+  }
 
   await core.call('report', { text: 'ok' }, who);
   await settle();
@@ -303,6 +314,20 @@ test('required checks → auto-merge; queue beyond 3; ask → toast → answer; 
   await settle();
   assert.equal(db.prepare('SELECT state FROM agents WHERE id = ?').get(ids[0]).state, 'merged');
   assert.equal(db.prepare('SELECT state FROM agents WHERE id = ?').get(ids[3]).state, 'working', 'queued agent took the freed slot');
+});
+
+test('testRoundAsk in the host config overrides the test-round cap; an unusable value falls back to 5', async () => {
+  for (const [setting, asks] of [[2, [2, 4, 6]], ['nope', [5]], [0, [5]]]) {
+    const { db, core, host, toasts } = setup();
+    host.testRoundAsk = () => setting;
+    await core.call('delegator.start', { repo: 'gitgiant/demo' });
+    const { id } = await core.call('spawn', { brief: 'task', mode: 'cheapest' });
+    await settle();
+    const who = core.authenticate(db.prepare('SELECT token FROM agents WHERE id = ?').get(id).token, 'ADMIN');
+    const before = toasts.length;
+    for (let round = 1; round <= 6; round++) await core.call('test.request', { selector: 'x' }, who);
+    assert.deepEqual(toasts.slice(before).map(t => Number(/test round (\d+)/.exec(t.body)?.[1])).filter(Boolean), asks, `testRoundAsk: ${setting}`);
+  }
 });
 
 test('hand-started sessions use the mailbox via hooks; handoff/resume', async () => {

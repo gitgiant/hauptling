@@ -24,6 +24,8 @@ import * as keyStore from './keys.mjs';
  */
 
 const PAUSABLE = ['working', 'blocked', 'done'];
+/** An agent is asked "Keep iterating?" at every multiple of this many test rounds (`testRoundAsk` overrides it). */
+export const TEST_ROUND_ASK = 5;
 const ACTIVE = ['spawning', 'restarting', 'paused', ...PAUSABLE];
 const TEST_ELIGIBLE = "NOT EXISTS (SELECT 1 FROM agents a WHERE a.id = q.agent AND a.state IN ('paused','restarting'))";
 const START_PROMPT = 'Read your brief at .hauptling/brief.md and carry it out.';
@@ -1020,6 +1022,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   }
 
   // ---------- tests ----------
+  const testRoundAsk = () => Math.max(1, Math.floor(Number(host.testRoundAsk?.() ?? TEST_ROUND_ASK)) || TEST_ROUND_ASK);
   function requestTest({ agent, requester, sha, branch, selector = '', gpu = false, artifacts = [], timeout_s = 1800, purpose = 'agent', repo }) {
     const a = agent ? agentRow(agent) : null;
     const round = a && purpose === 'agent' ? db.prepare("SELECT COUNT(*) n FROM tests WHERE agent = ? AND purpose = 'agent'").get(a.id).n + 1 : 1;
@@ -1028,7 +1031,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     db.prepare(`INSERT INTO tests (id, agent, requester, repo, sha, branch, selector, gpu, artifacts, timeout_s, round, purpose, state, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)`).run(id, a?.id ?? null, requester, repo || a.repo, sha, branch || a?.branch || null, selector, gpu ? 1 : 0, JSON.stringify(artifacts), Number(timeout_s), round, purpose, now());
     testSynced(id);
-    if (a && round >= 3 && PAUSABLE.includes(a.state)) {
+    if (a && round % testRoundAsk() === 0 && PAUSABLE.includes(a.state)) {
       const q = `${a.id} is on test round ${round}. Keep iterating?`;
       update(a.id, { state: 'blocked' });
       setStatus(a.id, `blocked: test round ${round}`);
