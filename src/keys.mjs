@@ -14,6 +14,9 @@ import { home } from './util.mjs';
  *
  * Budget (optional, ~/.hauptling/keys/<vendor>.budget.json): API first, then the plan. Spawns take the key
  * while this period's API spend is under STOP_AT of the budget, else the slots' sign-ins (PRD "API keys").
+ *
+ * Ceiling (optional, ~/.hauptling/keys/<vendor>.upto): the highest model tier the key pays for; models above
+ * it go to the plan (PRD "API keys").
  */
 
 export const KEY_ENV = { claude: 'ANTHROPIC_API_KEY', codex: 'OPENAI_API_KEY', agy: 'GEMINI_API_KEY' };
@@ -44,6 +47,7 @@ export function removeKey(vendor) {
   const had = existsSync(f);
   rmSync(f, { force: true });
   rmSync(budgetFile(vendor), { force: true });
+  rmSync(upToFile(vendor), { force: true });
   clearExhausted(vendor);
   return { vendor, removed: had };
 }
@@ -73,6 +77,24 @@ export function setBudget(vendor, usd, resetsOn = 1) {
   writeFileSync(f, `${JSON.stringify({ usd: n, resets_on: day })}\n`, { mode: 0o600 });
   clearExhausted(vendor);
   return { usd: n, resets_on: day };
+}
+
+// ---------- model-tier ceiling ----------
+const upToFile = (vendor) => `${file(vendor)}.upto`;
+
+/** Highest model tier the key pays for, or null (no ceiling). */
+export function getUpTo(vendor) {
+  try { return Number(readFileSync(upToFile(vendor), 'utf8').trim()) || null; } catch { return null; }
+}
+
+/** `tier` 1–3, or null to remove the ceiling. */
+export function setUpTo(vendor, tier) {
+  const f = upToFile(vendor);
+  if (tier == null) { rmSync(f, { force: true }); return null; }
+  if (![1, 2, 3].includes(tier)) throw new Error(`The ceiling must be a tier 1–3, got "${tier}"`);
+  mkdirSync(dir(), { recursive: true, mode: 0o700 });
+  writeFileSync(f, `${tier}\n`, { mode: 0o600 });
+  return tier;
 }
 
 // ---------- out of credit ----------

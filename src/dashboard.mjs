@@ -388,6 +388,7 @@ export function createDashboard({ db, dbPath, core, host, hub = null, log = () =
         vendor,
         key: keyOf.get(vendor) || null,
         budget: core.budgetState?.(vendor) || null, // API first, then the plan: { usd, spent, stop_at, until, … }
+        up_to: core.ceiling?.(vendor) || null, // the key pays for models up to this tier: { tier, name }
         out_of_credit: core.keyOut?.(vendor) || null, // the API refused the key: { at, until }
         limits: [...latest.values()],
         refresh: core.lastRefresh?.(vendor) || null, // the Refresh button's last result: { status, note, at }
