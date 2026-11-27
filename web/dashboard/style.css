@@ -145,6 +145,16 @@ body.resizing { user-select: none; }
 .cputests { display: flex; align-items: center; gap: .4rem; margin-right: .5rem; }
 .card .usagechips { flex-wrap: wrap; gap: .1rem .5rem; }
 .card .elapsed { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.card.movable { position: relative; overflow: visible; }
+.card.dragging { opacity: .5; }
+.card .meta .qpos { cursor: grab; touch-action: none; user-select: none; font-variant-numeric: tabular-nums; color: var(--text); padding: 0 .25rem; }
+/* Where a dragged queued card lands: a line in the gap above or below the target. */
+.card.drop-before::before, .card.drop-after::after { content: ""; position: absolute; left: 0; right: 0; height: 3px; border-radius: 2px; background: var(--accent); }
+.card.drop-before::before { top: -4px; }
+.card.drop-after::after { bottom: -4px; }
+.card.drop-side::before, .card.drop-side::after { top: 0; bottom: 0; right: auto; width: 3px; height: auto; }
+.card.drop-side.drop-before::before { left: -5px; }
+.card.drop-side.drop-after::after { left: auto; right: -5px; }
 .card.blocked { border-color: var(--warn); animation: blink 1.2s ease-in-out infinite; }
 @keyframes blink { 50% { box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 35%, transparent); } }
 @media (prefers-reduced-motion: reduce) { .card.blocked { animation: none; } .dot.working { animation: none; } .gtoggle .caret { transition: none; } }

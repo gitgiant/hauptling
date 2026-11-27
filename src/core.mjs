@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { kvDel, kvGet, kvSet, tx } from './db.mjs';
+import { kvDel, kvGet, kvSet, tx, QUEUE_ORDER, IN_QUEUE } from './db.mjs';
 import * as mail from './mail.mjs';
 import * as codegraph from './codegraph.mjs';
 import { checkTier, effortFor, enabledVendors, findModel, launchArgv, loadModels, nextVendor, pick, preferOf, setPrefer, shortModel, tierName } from './models.mjs';
@@ -222,8 +222,8 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     const id = `${vendor}_${sanitizeModel(entry.id)}_${hex(3).slice(0, 5)}`;
     title ||= (brief.match(/^#+\s*(.+)$/m)?.[1] || brief.trim().split('\n')[0]).slice(0, 72);
     const insert = (row) => {
-      db.prepare(`INSERT INTO agents (id, delegator, vendor, model, repo, base, branch, brief, title, test_writer, state, token, created_at, updated_at, role, depends_on, effort, want_host, gpu, auto)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(row.id, d, row.vendor, row.model, repo, base || '', `hl/${id}`, brief, row.title, testWriter ? 1 : 0, row.state, token(), now(), now(), row.role, row.depends_on ?? null, row.effort ?? null, wantHost, row.gpu ? 1 : 0, row.auto);
+      db.prepare(`INSERT INTO agents (id, delegator, vendor, model, repo, base, branch, brief, title, test_writer, state, token, created_at, updated_at, role, depends_on, effort, want_host, gpu, auto, priority)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(row.id, d, row.vendor, row.model, repo, base || '', `hl/${id}`, brief, row.title, testWriter ? 1 : 0, row.state, token(), now(), now(), row.role, row.depends_on ?? null, row.effort ?? null, wantHost, row.gpu ? 1 : 0, row.auto, nextPriority(d));
       mail.addIdentity(db, row.id, row.vendor, sanitizeModel(row.model), repo);
     };
     let tw = null;
@@ -312,7 +312,10 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     for (const { id } of db.prepare("SELECT DISTINCT delegator id FROM agents WHERE state = 'queued' AND host = 'hub'").all()) await startQueued(id).catch(e => log(`start ${id}: ${e.message}`));
   }
 
-  const inActive = `state IN (${ACTIVE.map(() => '?').join(',')})`;
+  // An agent paused in the queue has no worker, so it counts toward no limit.
+  const inActive = `(state IN (${ACTIVE.map(() => '?').join(',')}) AND paused_state IS NOT 'queued')`;
+  /** The priority that puts a new agent at the end of its delegator's queue. */
+  const nextPriority = (d) => db.prepare('SELECT COALESCE(MAX(priority), 0) + 1 n FROM agents WHERE delegator = ?').get(d).n;
   /**
    * Slots with no live worker of this vendor. A slot runs at most one worker per vendor: each vendor's
    * credentials sit in their own dir under the slot, and a container mounts only its vendor's dir, so a
@@ -346,7 +349,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
         if (active >= drow.max_agents) return null;
         let a, place;
         // Unparking agents first: they were reported work that is needed again (PRD "Parking").
-        for (const q of db.prepare("SELECT * FROM agents WHERE delegator = ? AND state = 'queued' AND host = 'hub' ORDER BY unpark IS NULL, created_at, rowid").all(d)) {
+        for (const q of db.prepare(`SELECT * FROM agents WHERE delegator = ? AND state = 'queued' AND host = 'hub' ORDER BY ${QUEUE_ORDER}`).all(d)) {
           [place] = placements(q, drow, hubGpu);
           if (place) { a = q; break; }
           const moved = revendor(q, drow, hubGpu);
@@ -504,7 +507,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   }
   /** Once per stretch: one `[headroom]` event per delegator with a held spawn, and one notification. */
   function announceHeadroom(d) {
-    const held = db.prepare("SELECT * FROM agents WHERE delegator = ? AND state = 'queued' AND host = 'hub' ORDER BY created_at, rowid").all(d).find(a => headroomGated(a) && headroomNote(a));
+    const held = db.prepare(`SELECT * FROM agents WHERE delegator = ? AND state = 'queued' AND host = 'hub' ORDER BY ${QUEUE_ORDER}`).all(d).find(a => headroomGated(a) && headroomNote(a));
     if (!held) return;
     const told = JSON.parse(kvGet(db, 'headroom:stretch') || '[]');
     if (told.includes(d)) return;
@@ -921,7 +924,11 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     const cur = agentRow(id);
     if (cur.state === 'parked') { if (Object.keys(fields).length) update(id, fields); unpark(cur, why); return; }
     if (cur.state === 'queued' && cur.unpark) { if (Object.keys(fields).length) update(id, fields); return; } // already coming back
-    if (cur.state === 'paused' || cur.state === 'restarting') { update(id, { ...fields, paused_state: ['parked', 'unpark'].includes(cur.paused_state) ? 'unpark' : 'working' }); return; }
+    if (cur.state === 'paused' || cur.state === 'restarting') {
+      const held = cur.paused_state === 'queued' ? 'queued' : ['parked', 'unpark'].includes(cur.paused_state) ? 'unpark' : 'working';
+      update(id, { ...fields, paused_state: held });
+      return;
+    }
     update(id, { ...fields, state: 'working' });
   }
 
@@ -1676,6 +1683,46 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     return rows.map(({ token: _t, brief: _b, ...r }) => ({ ...r, status: db.prepare('SELECT text FROM status WHERE identity = ?').get(r.id)?.text || null, headroom: headroomNote(r), ...(offline.has(r.host) ? { host_offline: true } : {}) }));
   }
 
+  // ---------- queue priority ----------
+  /** A delegator's queue on this host, in the order it starts (paused agents keep their place). */
+  const queueRows = (d) => db.prepare(`SELECT * FROM agents WHERE delegator = ? AND host = 'hub' AND ${IN_QUEUE} ORDER BY ${QUEUE_ORDER}`).all(d);
+  function queueList({ delegator }) {
+    const d = delegatorId(delegator);
+    return { delegator: d, queue: queueRows(d).map((a, i) => ({ position: i + 1, id: a.id, title: a.title, paused: a.state === 'paused', unparking: Boolean(a.unpark) })) };
+  }
+  /**
+   * Moves a queued agent within its delegator's queue: `before`/`after` another one, or to the `top`/`bottom`.
+   * The queue's priorities are reshuffled among its members, so agents still waiting keep their place.
+   */
+  async function queueMove({ agent, before, after, top, bottom }) {
+    if ([before, after, top || null, bottom || null].filter(Boolean).length !== 1) throw new Error('Give one of --before OTHER, --after OTHER, --top or --bottom');
+    const a = mustAgent(agent);
+    const d = a.delegator;
+    const order = tx(db, () => {
+      const rows = queueRows(d);
+      const me = rows.find(r => r.id === a.id);
+      if (!me) throw new Error(a.host !== 'hub' ? `${a.id} is on ${a.host}: only the hub's queue can be reordered` : `${a.id} is ${a.state}; only queued agents can be moved`);
+      // Unparking agents start before all others, so each group is ordered on its own.
+      const group = rows.filter(r => Boolean(r.unpark) === Boolean(me.unpark));
+      const rest = group.filter(r => r.id !== me.id);
+      let at = top ? 0 : rest.length;
+      if (before || after) {
+        const other = mustAgent(before || after);
+        if (other.id === me.id) return null;
+        if (!rows.some(r => r.id === other.id)) throw new Error(`${other.id} is not in the queue of ${d}`);
+        at = rest.findIndex(r => r.id === other.id);
+        if (at < 0) throw new Error('Unparking agents always start first: move within the unparking agents, or within the others');
+        if (after) at++;
+      }
+      rest.splice(at, 0, me);
+      const priorities = group.map(r => r.priority).sort((x, y) => x - y);
+      rest.forEach((r, i) => { if (r.priority !== priorities[i]) update(r.id, { priority: priorities[i] }); });
+      return true;
+    });
+    if (order) log(`queue ${d}: moved ${a.id}`);
+    return queueList({ delegator: d });
+  }
+
   async function lifecycle(agent, change) {
     const a = mustAgent(agent);
     if (changing.has(a.id) || merging.has(a.id)) throw new Error(`${a.id} already has a lifecycle action in progress`);
@@ -1711,6 +1758,11 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
 
   const pause = ({ agent }) => lifecycle(agent, async a => {
     if (a.state === 'paused') return { paused: a.id };
+    if (a.state === 'queued') { // not started: startQueued skips it until unpaused
+      update(a.id, { state: 'paused', paused_state: 'queued' });
+      emit(a.delegator, a.id, 'paused', `${a.id} paused (queued)`);
+      return { paused: a.id };
+    }
     if (a.state === 'parked') { // no container to freeze: holds its gate and merge only
       update(a.id, { state: 'paused', paused_state: 'parked' });
       emit(a.delegator, a.id, 'paused', `${a.id} paused (parked)`);
@@ -1730,6 +1782,13 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
 
   const unpause = ({ agent }) => lifecycle(agent, async a => {
     if (a.state !== 'paused') throw new Error(`${a.id} is ${a.state}; only paused workers can resume`);
+    if (a.paused_state === 'queued') { // back in the queue at its old priority
+      update(a.id, { state: 'queued', paused_state: null });
+      await releaseHeldWork(a.id);
+      emit(a.delegator, a.id, 'resumed', `${a.id} resumed (queued)`);
+      await startQueued(a.delegator);
+      return { resumed: a.id };
+    }
     if (['parked', 'unpark'].includes(a.paused_state)) { // paused while parked: no container
       update(a.id, { state: 'parked', paused_state: null });
       setStatus(a.id, `parked: ${a.title}`.slice(0, STATUS_MAX));
@@ -1749,7 +1808,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   });
 
   const restart = ({ agent }) => lifecycle(agent, async a => {
-    if (a.state === 'parked' || (a.state === 'paused' && ['parked', 'unpark'].includes(a.paused_state))) {
+    if (a.state === 'parked' || (a.state === 'paused' && (['parked', 'unpark'].includes(a.paused_state) || (a.paused_state === 'queued' && a.unpark)))) {
       // No container: unpark it (front of the queue, any free slot); its saved session resumes.
       unpark(a, 'restart');
       await startQueued(a.delegator);
@@ -1946,7 +2005,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     const row = delegatorRow(d);
     if (hub && (gate != null || automerge != null)) {
       // Satellites running its agents keep their own copy of the merge settings.
-      for (const { host: h } of db.prepare(`SELECT DISTINCT host FROM agents WHERE delegator = ? AND host != 'hub' AND (${inActive} OR state = 'queued')`).all(d, ...ACTIVE)) {
+      for (const { host: h } of db.prepare(`SELECT DISTINCT host FROM agents WHERE delegator = ? AND host != 'hub' AND (state IN (${ACTIVE.map(() => '?').join(',')}) OR state = 'queued')`).all(d, ...ACTIVE)) {
         hub.command(h, 'delegator', { delegator: { id: d, gate: Boolean(row.gate), automerge: Boolean(row.automerge) } });
       }
     }
@@ -2038,7 +2097,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
       const cols = Object.keys(fields).filter(k => MIRROR_FIELDS.includes(k));
       if (cols.length) db.prepare(`UPDATE agents SET ${cols.map(k => `${k} = ?`).join(', ')}, updated_at = ? WHERE id = ?`).run(...cols.map(k => fields[k] ?? null), now(), a.id);
       if (typeof status === 'string' && status) mail.setStatus(db, a.id, status.slice(0, STATUS_MAX));
-      if ('state' in fields && !ACTIVE.includes(fields.state)) placeSoon(); // a place freed up
+      if ('state' in fields && (!ACTIVE.includes(fields.state) || fields.paused_state === 'queued')) placeSoon(); // a place freed up
       bus.emit('agents');
       return;
     }
@@ -2118,9 +2177,9 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     if (!agentRow(x.id)) {
       if (refused(x.vendor)) throw new Error(refusal(x.vendor));
       copyDelegator(d);
-      db.prepare(`INSERT INTO agents (id, delegator, vendor, model, repo, base, branch, brief, title, test_writer, state, token, created_at, updated_at, role, depends_on, start_from, effort, gpu)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?)`).run(x.id, d.id, x.vendor, x.model, x.repo, x.base || '', x.branch, x.brief, x.title, x.test_writer ? 1 : 0,
-        token(), now(), now(), x.role || 'impl', x.depends_on ?? null, x.start_from ?? null, x.effort ?? null, x.gpu ? 1 : 0);
+      db.prepare(`INSERT INTO agents (id, delegator, vendor, model, repo, base, branch, brief, title, test_writer, state, token, created_at, updated_at, role, depends_on, start_from, effort, gpu, priority)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(x.id, d.id, x.vendor, x.model, x.repo, x.base || '', x.branch, x.brief, x.title, x.test_writer ? 1 : 0,
+        token(), now(), now(), x.role || 'impl', x.depends_on ?? null, x.start_from ?? null, x.effort ?? null, x.gpu ? 1 : 0, nextPriority(d.id));
       mail.addIdentity(db, x.id, x.vendor, sanitizeModel(x.model), x.repo);
       synced(x.id);
     }
@@ -2135,6 +2194,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     ask: (a, who) => ask(who, a),
     answer, reply, spawn, wait, agents, poll,
     pause: onItsHost('pause', pause), unpause: onItsHost('unpause', unpause), restart: onItsHost('restart', restart), kill: onItsHost('kill', kill), merge: onItsHost('merge', merge),
+    'queue.list': queueList, 'queue.move': queueMove,
     'agent.get': ({ agent }) => { const { token: _t, ...r } = mustAgent(agent); return r; },
     // What the CLI was given → the agent's id now; `renamed`: it was an old one.
     'agent.resolve': ({ agent }) => {
@@ -2144,7 +2204,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     },
     'attach': ({ agent }) => {
       const a = mustAgent(agent);
-      if (a.state === 'parked' || (a.state === 'queued' && a.unpark) || (a.state === 'paused' && ['parked', 'unpark'].includes(a.paused_state))) {
+      if (a.state === 'parked' || (a.state === 'queued' && a.unpark) || (a.state === 'paused' && (['parked', 'unpark'].includes(a.paused_state) || a.unpark && a.paused_state === 'queued'))) {
         throw new Error(`${a.id} is parked: its container was removed after it reported, to free its slot. \`hauptling restart ${a.id}\` brings it back with its session; mail to it does too.`);
       }
       if (a.host !== 'hub') {

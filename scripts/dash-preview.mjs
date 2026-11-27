@@ -39,6 +39,8 @@ const agents = [
   ...[5, 6, 7].map(i => agent(i, 'codex_gpt-5_a11b2', 'example/nullpunkt')),
   ...[8, 9].map(i => ({ ...agent(i, 'claude_opus-5-5_d72c0', '/home/me/hauptling'), state: 'merged', ended: true })),
 ];
+const places = {};
+for (const a of agents.filter(a => a.state === 'queued')) a.queue = places[a.delegator] = (places[a.delegator] || 0) + 1;
 const wave = (n, f) => Array.from({ length: n }, (_, i) => Math.round(f(i)));
 const delegators = [
   { id: agents[0].delegator, repo: agents[0].repo, cli: 'claude', created_at: ago(90), handoff_waiting: false },

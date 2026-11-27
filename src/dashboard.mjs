@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join, normalize } from 'node:path';
 import { cpus, freemem, hostname, totalmem } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { kvGet, kvSet } from './db.mjs';
+import { kvGet, kvSet, QUEUE_ORDER, IN_QUEUE } from './db.mjs';
 import { readOnlyQuery } from './dbquery.mjs';
 import { createTerminals, HISTORY_MAX, SCREEN_MAX } from './terminal.mjs';
 import { token as newToken } from './util.mjs';
@@ -17,6 +17,7 @@ import { buildBody, checkImage, brokerFacts, fileIssue, issueRepo, originUrl, sc
  *   GET  /dash/agent/<id>/diff|events, /dash/history, /dash/db/tables, /dash/db/table
  *   POST /dash/db/query     ad-hoc read-only SQL
  *   POST /dash/do/<call>    actions (answer, reply, pause, unpause, restart, kill, merge, gpu.*), need `X-Hauptling: 1`
+ *   POST /dash/agents/<id>/move   reorder the queue: {before|after: id} or {top|bottom: true}, need `X-Hauptling: 1`
  *   POST /dash/report/preview|send   F2 "Report an issue": the scrubbed body, and filing it with `gh issue create`
  *   POST /dash/hosts/token  a satellite join token and the `hauptling satellite join` line (part 3, hub only)
  * With satellites (PRD "Part 3") the board carries host chips and offline states, the Usage page a Hosts panel,
@@ -224,12 +225,19 @@ export function createDashboard({ db, dbPath, core, host, hub = null, log = () =
     // With satellites: agents on a host that is offline (or lost) say so instead of their last state.
     const sats = satellites();
     const down = new Map(sats.filter(h => !h.online).map(h => [h.name, h.lost_at ? 'lost' : 'offline']));
+    // Place in the delegator's queue (hub only: satellites' queues aren't reordered).
+    const places = new Map(), counts = new Map();
+    for (const q of db.prepare(`SELECT id, delegator FROM agents WHERE host = 'hub' AND ${IN_QUEUE} ORDER BY ${QUEUE_ORDER}`).all()) {
+      counts.set(q.delegator, (counts.get(q.delegator) || 0) + 1);
+      places.set(q.id, counts.get(q.delegator));
+    }
     const agents = rows.map(a => {
       const t = db.prepare('SELECT id, state, gpu, purpose, repo, selector, report, created_at, claimed_at, done_at, attempt, retry_note FROM tests WHERE agent = ? ORDER BY created_at DESC LIMIT 1').get(a.id);
       const r = t?.report ? JSON.parse(t.report) : null;
       const ask = db.prepare('SELECT id, question, choices, at FROM asks WHERE agent = ? AND answered_at IS NULL ORDER BY id DESC LIMIT 1').get(a.id);
       return {
         ...pub(a),
+        queue: places.get(a.id) ?? null,
         aliases: db.prepare('SELECT old FROM aliases WHERE new = ?').all(a.id).map(r => r.old),
         ended: ENDED.includes(a.state),
         usage: a.usage ? JSON.parse(a.usage) : null,
@@ -623,6 +631,14 @@ export function createDashboard({ db, dbPath, core, host, hub = null, log = () =
           if (body.screenshot) checkImage(body.screenshot); // reject a bad image before anything is filed
           const r = await fileIssue({ gh: report.gh, repo: b.repo, title: b.title, body: b.body, screenshot: body.screenshot });
           json(res, 200, typeof r === 'string' ? { ok: true, url: r } : { ok: true, ...r });
+          return true;
+        }
+        const mv = /^\/dash\/agents\/([\w.-]+)\/move$/.exec(p);
+        if (mv) {
+          const { before, after, top, bottom } = body;
+          const result = await core.call('queue.move', { agent: mv[1], before, after, top, bottom });
+          tick();
+          json(res, 200, { ok: true, result });
           return true;
         }
         const m = /^\/dash\/do\/([\w.]+)$/.exec(p);
