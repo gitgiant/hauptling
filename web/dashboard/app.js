@@ -2,6 +2,7 @@
 import { ansiFragment } from './ansi.js';
 import { vendorBadge } from './vendors.js';
 import { windowLabel, sortWindows } from './windows.js';
+import { gauges, facts, repoRows } from './hostinfo.js';
 import { openReport, shouldOpenReport, terminalInputFocused } from './report.js';
 import { keyFor, TOUCH_KEYS } from './termkeys.js';
 import { testProgress } from './progress.js';
@@ -431,9 +432,52 @@ function metric(name, v, values, title) {
 function renderSys() {
   const l = state.host;
   if (!l) return;
-  put($('#sys'), l.name ? h('span', { class: 'hostname', title: `Host: ${l.name}`, text: l.name }) : null, metric('CPU', l.cpu, l.hist.cpu, 'Host CPU in use, all cores'), metric('Mem', l.mem, l.hist.mem, 'Host memory in use'));
+  // The load figures are one button: it opens the host info panel.
+  const open = { type: 'button', class: 'sysbtn', 'aria-haspopup': 'dialog', 'aria-label': 'Host info: load, disks, GPU and what work costs per repo', onclick: openHostInfo };
+  put($('#sys'), h('button', open, l.name ? h('span', { class: 'hostname', title: `Host: ${l.name}`, text: l.name }) : null, metric('CPU', l.cpu, l.hist.cpu, 'Host CPU in use, all cores'), metric('Mem', l.mem, l.hist.mem, 'Host memory in use')));
   const g = $('#gpu .gpu-util');
-  if (g) put(g, metric('', l.gpu, l.hist.gpu, 'GPU utilization'));
+  if (g) put(g, h('button', open, metric('', l.gpu, l.hist.gpu, 'GPU utilization')));
+}
+
+// ---------- host info panel ----------
+let hostInfoTimer = null;
+function closeHostInfo() {
+  clearTimeout(hostInfoTimer);
+  hostInfoTimer = null;
+  $('#hostinfo')?.remove();
+}
+async function openHostInfo() {
+  if ($('#hostinfo')) return closeHostInfo();
+  const body = h('div', { class: 'hi-body' }, h('p', { class: 'empty', text: 'Loading…' }));
+  const close = h('button', { type: 'button', onclick: closeHostInfo }, 'Close');
+  const box = h('div', { class: 'rp-box hi-box' }, h('div', { class: 'panelhead' }, h('h2', { id: 'hi-h', text: 'Host info' }), close), body);
+  const back = h('div', { id: 'hostinfo', class: 'rp-back', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'hi-h' }, box);
+  back.addEventListener('click', (e) => { if (e.target === back) closeHostInfo(); });
+  back.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeHostInfo(); });
+  document.body.append(back);
+  close.focus();
+  const load = async () => {
+    if (!$('#hostinfo')) return;
+    try {
+      const i = await api.get('/dash/hostinfo');
+      if (!$('#hostinfo')) return;
+      const rows = repoRows(i);
+      put(body,
+        h('div', { class: 'hi-gauges' }, gauges(i).map(g => h('div', { class: 'acct' },
+          h('div', { class: `meter wide ${g.level}`, role: 'meter', 'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-valuenow': String(Math.round(g.pct ?? 0)), 'aria-label': g.label },
+            h('span', { text: g.label }), h('span', { class: 'track' }, h('span', { class: 'fill', style: `width:${Math.min(100, g.pct ?? 0)}%` })), h('span', { class: 'val', text: g.text })),
+          h('span', { class: 'resets', text: g.detail })))),
+        h('dl', { class: 'hi-facts' }, facts(i).flatMap(([k, v]) => [h('dt', { text: k }), h('dd', { text: v })])),
+        h('h3', { text: 'What work costs, per repo' }),
+        h('p', { class: 'empty', text: 'Medians of recent runs. Tests: run time, peak RAM, cores (what the queue counts a job as). Implementation: spawn to first report. Start: each step of bringing a worker up.' }),
+        rows.length ? h('table', { class: 'grid' },
+          h('thead', {}, h('tr', {}, ['Repo', 'Tests', 'GPU tests', 'Implementation', 'Start'].map(t => h('th', { text: t })))),
+          h('tbody', {}, rows.map(r => h('tr', {}, r.map(c => h('td', { title: c, text: c }))))))
+          : h('p', { class: 'empty', text: 'Nothing measured yet.' }));
+    } catch (e) { put(body, h('p', { class: 'no', text: e.message })); }
+    hostInfoTimer = setTimeout(load, 5000);
+  };
+  load();
 }
 
 /** CPU test jobs: how many run of the limit; what runs now (agent, repo, elapsed) and how many wait go in `.more`. */

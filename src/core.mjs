@@ -79,7 +79,19 @@ export function createCore({ db, host, github, notify = () => false, models = lo
     synced(id);
   };
   /** The step a starting agent is at (PRD "Start progress"); ignored once it is no longer starting. */
-  const step = (id, text) => { if (['spawning', 'restarting'].includes(agentRow(id)?.state)) update(id, { step: text, step_at: now(), step_error: null }); };
+  const step = (id, text) => {
+    const a = agentRow(id);
+    if (!['spawning', 'restarting'].includes(a?.state)) return;
+    // How long the step before took, per repo (last 5), for the host info panel's "start" column.
+    if (a.step && a.step_at && a.step !== text) {
+      const key = `start:steps:${a.repo}`;
+      let all = {};
+      try { all = JSON.parse(kvGet(db, key) || '{}'); } catch {}
+      all[a.step] = [...(all[a.step] || []), Math.round((Date.now() - Date.parse(a.step_at)) / 100) / 10].slice(-5);
+      kvSet(db, key, JSON.stringify(all));
+    }
+    update(id, { step: text, step_at: now(), step_error: null });
+  };
   /** Cleared when a start succeeds. */
   const STARTED = { step: null, step_at: null, step_error: null };
   const setStatus = (id, text) => { mail.setStatus(db, id, text); synced(id); };
@@ -1507,6 +1519,38 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     const busy = Math.max(Number(res.load1) || 0, running.reduce((n, r) => n + estimate(r).cores, 0));
     return res.cores - busy >= e.cores;
   }
+  const median = (xs) => { const s = xs.filter(n => n != null && Number.isFinite(n)).sort((a, b) => a - b); return s.length ? s[Math.floor(s.length / 2)] : null; };
+  /**
+   * What work costs per repo (host info panel): test jobs (measured RAM, cores, VRAM and the usual run time),
+   * implementation tasks (spawn to first report, tokens, cost: medians of the last 10) and the start steps.
+   */
+  function repoCosts() {
+    const repos = new Map();
+    const of = (repo) => { if (!repos.has(repo)) repos.set(repo, { repo, cpu: null, gpu: null, impl: null, start: null }); return repos.get(repo); };
+    for (const t of db.prepare("SELECT DISTINCT repo, gpu FROM tests WHERE state = 'done'").all()) {
+      const runs = db.prepare("SELECT report FROM tests WHERE repo = ? AND gpu = ? AND state = 'done' AND report IS NOT NULL ORDER BY done_at DESC LIMIT 5").all(t.repo, t.gpu)
+        .map(r => { try { const j = JSON.parse(r.report); return ['pass', 'fail'].includes(j.status) ? Number(j.duration_s) : null; } catch { return null; } });
+      of(t.repo)[t.gpu ? 'gpu' : 'cpu'] = { secs: median(runs), runs: costRuns(t).length, ...estimate(t), ...(t.gpu ? { vramMB: Number(measuredNeed(t.repo)) || null } : {}) };
+    }
+    const tasks = db.prepare(`SELECT a.repo, a.created_at, a.usage, (SELECT MIN(e.at) FROM events e WHERE e.agent = a.id AND e.kind = 'report') reported
+      FROM agents a WHERE a.role = 'impl' ORDER BY a.created_at DESC LIMIT 400`).all().filter(a => a.reported);
+    for (const repo of new Set(tasks.map(a => a.repo))) {
+      const mine = tasks.filter(a => a.repo === repo).slice(0, 10);
+      const usage = mine.map(a => { try { return JSON.parse(a.usage || 'null'); } catch { return null; } });
+      of(repo).impl = { n: mine.length, secs: median(mine.map(a => (Date.parse(a.reported) - Date.parse(a.created_at)) / 1000)),
+        tokens: median(usage.map(u => (u ? (u.tokens_in || 0) + (u.tokens_out || 0) : null))), cost: median(usage.map(u => u?.cost_usd ?? null)) };
+    }
+    for (const r of db.prepare("SELECT key, value FROM kv WHERE key LIKE 'start:steps:%'").all()) {
+      try { of(r.key.slice('start:steps:'.length)).start = Object.fromEntries(Object.entries(JSON.parse(r.value)).map(([s, xs]) => [s, median(xs)])); } catch {}
+    }
+    return [...repos.values()].sort((a, b) => a.repo.localeCompare(b.repo));
+  }
+  /** Workers and test jobs on this host right now, for the host info panel. */
+  const hostCounts = () => ({
+    workers: { running: workerCount(), max: maxWorkers(), slots: slots().length, queued: db.prepare("SELECT COUNT(*) n FROM agents WHERE state = 'queued' AND host = 'hub'").get().n },
+    tests: { running: localTests().length, queued: db.prepare("SELECT COUNT(*) n FROM tests WHERE state = 'queued' AND host = 'hub'").get().n },
+  });
+
   /** What the queues are working from, for `hauptling test scale` and the dashboard. */
   function testScale() {
     const repos = db.prepare("SELECT key FROM kv WHERE key LIKE 'test:cost:%'").all().map(r => { const [, , kind, ...rest] = r.key.split(':'); return { repo: rest.join(':'), gpu: kind === 'gpu' ? 1 : 0 }; })
@@ -2656,5 +2700,5 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   hub?.bind({ receive, onState: placeSoon, onResult: commandDone });
   if (satellite) syncTests();
 
-  return { call, authenticate, emit, keyOut, ceiling, command, startAll, syncTests, freeSlots, headroomNote, blockerNote, spend, testProgress, testScale, gpuSample, poll, watch, watchTests, startQueued, bus, askForPage, answer, pump, recover, gpuReady, refreshUsage, refreshAllUsage, lastRefresh, holdSignin, recordUsage, budgetState, billingFor };
+  return { call, authenticate, emit, keyOut, ceiling, command, startAll, syncTests, freeSlots, headroomNote, blockerNote, spend, testProgress, testScale, repoCosts, hostCounts, gpuSample, poll, watch, watchTests, startQueued, bus, askForPage, answer, pump, recover, gpuReady, refreshUsage, refreshAllUsage, lastRefresh, holdSignin, recordUsage, budgetState, billingFor };
 }

@@ -1,3 +1,5 @@
+import { execFileSync as gitSync } from 'node:child_process';
+import { fileURLToPath as rootUrl } from 'node:url';
 import { createHash, timingSafeEqual, randomUUID } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join, normalize } from 'node:path';
@@ -191,10 +193,26 @@ export function createDashboard({ db, dbPath, core, host, hub = null, updater = 
     const gpu = await host.gpuUtil?.().catch(() => null) ?? null;
     return { name: hostname(), cpu, mem: Math.round(100 * (1 - freemem() / totalmem())), gpu };
   }
+  /** The host info panel (PRD "Host info"): this host's load, disks and GPU, the broker, and what work costs per repo. */
+  const startedAt = Date.now();
+  /** The commit this broker runs, read once. */
+  const version = (() => { try { return gitSync('git', ['-C', rootUrl(new URL('..', import.meta.url)), 'log', '-1', '--format=%h %cs'], { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { return null; } })();
+  let lastLoad = null;
+  async function hostInfo() {
+    const sys = host.sysInfo?.() || {};
+    const gpu = await host.gpuInfo?.().catch(() => null) ?? null;
+    return {
+      name: hostname(), ...sys, cpu: lastLoad?.cpu ?? null, gpu,
+      broker: { pid: process.pid, uptime_s: Math.round((Date.now() - startedAt) / 1000), node: process.versions.node, version, image: host.imageTag?.() ?? null },
+      ...(core.hostCounts?.() || { workers: { running: 0, max: 0, slots: 0, queued: 0 }, tests: { running: 0, queued: 0 } }),
+      scale: core.testScale?.() ?? null, repos: core.repoCosts?.() ?? [],
+    };
+  }
   let sampler = null;
   let lastHost = '';
   async function sample() {
     const l = await hostLoad();
+    lastLoad = l;
     for (const k of Object.keys(hist)) { hist[k].push(l[k]); if (hist[k].length > HIST) hist[k].shift(); }
     lastHost = JSON.stringify({ ...l, every_s: 5, hist });
     for (const res of clients) res.write(`event: host\ndata: ${lastHost}\n\n`);
@@ -604,6 +622,7 @@ export function createDashboard({ db, dbPath, core, host, hub = null, updater = 
         if (p === '/dash/board') { json(res, 200, await snapshot()); return true; }
         if (p === '/dash/history') { json(res, 200, history(url.searchParams.get('q') || '')); return true; }
         if (p === '/dash/usage') { json(res, 200, await usage()); return true; }
+        if (p === '/dash/hostinfo') { json(res, 200, await hostInfo()); return true; }
         const ts = /^\/dash\/term\/([\w.-]+)\/stream$/.exec(p);
         if (ts) { try { termStream(req, res, ts[1]); } catch (e) { json(res, 404, { error: e.message }); } return true; }
         if (p === '/dash/db/tables') { json(res, 200, tables()); return true; }

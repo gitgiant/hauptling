@@ -1,8 +1,8 @@
 import { execFile, execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { closeSync, cpSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, rmSync, statSync, writeFileSync, realpathSync } from 'node:fs';
+import { closeSync, cpSync, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, rmSync, statSync, statfsSync, writeFileSync, realpathSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { homedir, availableParallelism, freemem, loadavg, totalmem } from 'node:os';
+import { homedir, availableParallelism, freemem, loadavg, totalmem, networkInterfaces, release, uptime } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { BROKER_PORT, home, shellLine } from './util.mjs';
 import { workerKeyEnv } from './keys.mjs';
@@ -76,6 +76,44 @@ export function gpuFreeMB() {
     const n = parseInt(String(out).split('\n')[0], 10);
     resolve(err || Number.isNaN(n) ? null : n);
   }));
+}
+
+/** The first GPU's name, utilization %, memory (MiB) and temperature, or null. */
+export function gpuInfo() {
+  const bin = nvidiaSmi();
+  if (!bin) return Promise.resolve(null);
+  return new Promise((resolve) => execFile(bin, ['--query-gpu=name,utilization.gpu,memory.used,memory.total,temperature.gpu', '--format=csv,noheader,nounits'], { timeout: 15e3 }, (err, out) => {
+    const [name, util, used, total, temp] = String(out).split('\n')[0].split(',').map(s => s.trim());
+    const n = (v) => (Number.isFinite(Number(v)) && v !== '' ? Number(v) : null);
+    resolve(err || !name ? null : { name, util: n(util), memUsedMB: n(used), memTotalMB: n(total), tempC: n(temp) });
+  }));
+}
+
+/** Host facts for the dashboard's host info panel: addresses, memory, swap, load and the disks Hauptling writes to. */
+export function sysInfo() {
+  const mi = (() => { try { return readFileSync('/proc/meminfo', 'utf8'); } catch { return ''; } })();
+  const kb = (k) => { const m = new RegExp(`^${k}:\\s+(\\d+) kB`, 'm').exec(mi); return m ? Number(m[1]) / 1024 : null; };
+  const totalMB = totalmem() / 2 ** 20, availMB = kb('MemAvailable') ?? freemem() / 2 ** 20;
+  const disks = [];
+  const seen = new Set();
+  for (const [mount, what] of [['/', 'system, Docker images and containers'], [home(), 'Hauptling store, clones and slots'], [process.cwd(), 'this checkout']]) {
+    try {
+      const s = statfsSync(mount);
+      const key = `${s.blocks}:${s.bsize}:${s.type}`;
+      if (seen.has(key) || !s.blocks) continue;
+      seen.add(key);
+      const total = (s.blocks * s.bsize) / 2 ** 20, free = (s.bavail * s.bsize) / 2 ** 20;
+      disks.push({ mount, what, totalMB: Math.round(total), usedMB: Math.round(total - free), usedPct: Math.round((100 * (total - free)) / total) });
+    } catch {}
+  }
+  const size = (p) => { try { return statSync(p).size / 2 ** 20; } catch { return null; } };
+  return {
+    ips: Object.values(networkInterfaces()).flat().filter(a => a && !a.internal && a.family === 'IPv4').map(a => a.address),
+    platform: `${process.platform} ${release()}`, uptime_s: Math.round(uptime()), cores: availableParallelism(), load: loadavg().map(n => Math.round(n * 100) / 100),
+    mem: { totalMB: Math.round(totalMB), availMB: Math.round(availMB), usedMB: Math.round(totalMB - availMB), pct: Math.round((100 * (totalMB - availMB)) / totalMB) },
+    swap: { totalMB: Math.round(kb('SwapTotal') ?? 0), usedMB: Math.round((kb('SwapTotal') ?? 0) - (kb('SwapFree') ?? 0)) },
+    disks, store: { dbMB: size(join(home(), 'hauptling.db')), logMB: size(join(home(), 'broker.log')) },
+  };
 }
 
 /** GPU utilization % of the first GPU (for the dashboard's load graph), or null. */
@@ -702,7 +740,8 @@ export function dockerHost({ log = () => {}, docker: dockerCmd = docker } = {}) 
       const ids = lines.map(l => l.trim().split(' ')).filter(([id, job]) => id && !keep.includes(job)).map(([id]) => id);
       if (ids.length) await dockerCmd(['rm', '-f', ...ids]);
     },
-    gpuAvailable, gpuFreeMB, gpuUtil,
+    gpuAvailable, gpuFreeMB, gpuUtil, gpuInfo, sysInfo,
+    imageTag: () => { try { return baseImageTag(); } catch { return null; } },
     /** Last `token_count` payload of the newest Codex session log in the slot written since `since` (ISO), or null. */
     async codexUsage(slot, since, sessionId = null) {
       // codex: subscription sign-in; codex-key: API key mode (separate CODEX_HOME).
