@@ -84,10 +84,11 @@ export function openDb(path) {
   db.exec(SCHEMA);
   // Columns added after phase 1 shipped; ALTER fails harmlessly when they exist.
   // usage: latest normalized usage JSON (src/usage.mjs); kept as the final total once the agent ends.
+  // parked: paused, then its container removed to free the slot (PRD "Paused workers give way"). paused_at: when it was paused.
   // billing: 'api' (the vendor's API key) or 'plan' (the slot's sign-in), fixed when the agent starts.
   // auto: pick options (JSON) of a spawn whose vendor the rotation chose; while queued it may move to a vendor with headroom.
   // usage_start: the vendor's window readings at launch (src/usage.mjs windowSnapshot), for per-task deltas.
-  for (const col of ["role TEXT NOT NULL DEFAULT 'impl'", 'depends_on TEXT', 'start_from TEXT', 'usage TEXT', 'billing TEXT', 'usage_start TEXT', 'effort TEXT', 'paused_state TEXT', 'unpark TEXT', 'auto TEXT']) {
+  for (const col of ["role TEXT NOT NULL DEFAULT 'impl'", 'depends_on TEXT', 'start_from TEXT', 'usage TEXT', 'billing TEXT', 'usage_start TEXT', 'effort TEXT', 'paused_state TEXT', 'unpark TEXT', 'auto TEXT', 'parked INTEGER NOT NULL DEFAULT 0', 'paused_at TEXT']) {
     try { db.exec(`ALTER TABLE agents ADD COLUMN ${col}`); } catch {}
   }
   try { db.exec('ALTER TABLE asks ADD COLUMN nonce TEXT'); } catch {}
@@ -121,6 +122,9 @@ export function openDb(path) {
 export const QUEUE_ORDER = 'unpark IS NULL, priority, created_at, rowid';
 /** In the queue: queued, or paused while queued. */
 export const IN_QUEUE = "(state = 'queued' OR (state = 'paused' AND paused_state IS 'queued'))";
+/** Paused with no container (queued, parked, or parked to give way): it counts toward no limit and holds no slot. */
+export const HELD = "(state = 'paused' AND (parked = 1 OR COALESCE(paused_state, '') IN ('queued', 'parked', 'unpark')))";
+export const isHeld = (a) => a?.state === 'paused' && (Boolean(a.parked) || ['queued', 'parked', 'unpark'].includes(a.paused_state));
 export const kvGet = (db, key) => db.prepare('SELECT value FROM kv WHERE key = ?').get(key)?.value ?? null;
 export const kvDel = (db, key) => db.prepare('DELETE FROM kv WHERE key = ?').run(key);
 export const kvSet = (db, key, value) => db.prepare('INSERT INTO kv (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value').run(key, String(value));

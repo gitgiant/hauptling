@@ -86,8 +86,6 @@ test('pause holds its slot, hooks, mail, and CPU and GPU jobs until unpause rest
   assert.equal(row().slot, 'hl-w1');
   assert.deepEqual(host.calls.at(-1), ['pause', 'hl-w1', id]);
 
-  const after = await core.call('spawn', { brief: 'next task', vendor: 'claude', mode: 'cheapest' });
-  assert.equal(after.state, 'queued');
   let probes = 0;
   host.tmuxAlive = async () => { probes++; return false; };
   await core.watch(Date.now() + 3600e3);

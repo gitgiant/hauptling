@@ -47,7 +47,7 @@ Other delegator sessions may run at the same time. Once you have your delegator 
 - `[updated] old → new`: Hauptling itself was updated and its broker is restarting; running workers carry on. If a command fails meanwhile, run it again.
 - `[failed]`: read it, fix the brief or pick another model, spawn again.
 - `[exited]`: the worker's CLI quit. Look with `hauptling attach`, then use `hauptling restart <agent>` to resume work on the same branch.
-- `hauptling pause <agent>` freezes the container and holds its queued tests. `hauptling unpause <agent>` restores its previous state. `hauptling restart <agent>` replaces a stuck CLI and tries to resume its session. Lifecycle events include `[paused]`, `[resumed]` and `[restarted]`.
+- `hauptling pause <agent>` freezes the container and holds its queued tests; when a queued agent needs that slot, the longest-paused worker is parked (`[parked]` "paused, slot needed by …"), and unpausing queues it first to resume its session. `hauptling unpause <agent>` restores its previous state. `hauptling restart <agent>` replaces a stuck CLI and tries to resume its session. Lifecycle events include `[paused]`, `[resumed]` and `[restarted]`.
 - `hauptling status --delegator <id>` shows every agent; blocked agents (questions, stuck permission prompts) go to the user directly, not you.
 
 ## Rules
