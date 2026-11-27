@@ -48,7 +48,7 @@ Hauptling delegates coding tasks to Claude, Codex and agy (Antigravity CLI) agen
 - `hauptling test report <req_id> report.json`.
 - Request: `{id, from, sha, branch, selector, gpu, artifacts[], timeout_s, round}`.
 - Report: `{id, sha, status: pass|fail|error|timeout, passed, failed, skipped, duration_s, failures:[{test_id, loc, message ≤300, excerpt ≤20 lines}], artifacts, log_path, notes ≤300}`.
-- Reports for a different sha are rejected. Round 3 sets the agent to `blocked` (was 4; token economy, 2026-11-25).
+- Reports for a different sha are rejected. Round 5 sets the agent to `blocked`, and so does every 5th round after it (see "Test-round cap").
 - **GPU tests run deterministically, no LLM**, in a fresh `--gpus all` test container, one at a time on their own queue (phase 3; an earlier design used a host worktree).
 
 ### Merge gate / test jobs (2026-11-25)
@@ -226,7 +226,7 @@ Goal: subscription usage windows last longer. Workers first, then the delegator;
   - **Per-task totals**: at launch the agent stores its vendor's window readings (`usage_start`); its final tokens are already kept. The `[report]` event and the dashboard's agent detail add one line: tokens in/out, cost, how many points each window rose during the task (a window that reset mid-task shows no delta), test rounds used.
   - **Worker preamble**: `prompts/worker-rules.md`, put in front of every brief by the broker: read files in ranges, search before reading, keep command output short (`| tail`, `-q`), run only the tests touched, reports stay ≤300 chars.
   - **Bare worker CLI**: workers load no user MCP servers or plugins, only hauptling's hooks. Claude: the per-agent `managed-mcp.json` (see "CodeGraph in workers"; it already admits only Hauptling's servers, so the branch's `--strict-mcp-config` was dropped in the 2026-11-25 merge, as it could shut CodeGraph out) and every `enabledPlugins` entry set false in the slot's settings; hooks and status line stay managed in the image (see Workers). Codex: `-c mcp_servers={}` in its launch template. agy: unknown, open.
-  - **Test-round cap**: round 3 (not 4) blocks the worker with a question to the user.
+  - **Test-round cap** (2026-11-27; was round 3 and every round after it): round 5 blocks the worker with a question to the user ("Keep iterating?"); after "Keep going" it asks again only every 5 rounds (10, 15, …). The interval is `TEST_ROUND_ASK = 5`, overridable as `testRoundAsk` in host `~/.hauptling/config.json`.
   - **Cheaper-model preference**: `"prefer": "cheap" | "balanced" | "best"` in `~/.hauptling/models.json` (shipped default `best`, i.e. no change) caps the tier spawn may use at 1, 2 or 3. A model above the cap is refused unless the spawn passes `--allow-tier`; `--mode rule` clamps to the cap; `cheapest` and test writers are unaffected. Set with `hauptling models prefer <value>` or the Usage tab's toggle; `hauptling models` prints it first so suggest mode reasons with it.
 - **Stage 2**:
   - **Effort per tier**: `models.json` `effort` per tier (1 low, 2 medium, 3 high), passed through each vendor's `effortArgs` (Claude `--effort`, Codex `-c model_reasoning_effort="…"`; agy has none: its model ids carry it, and `--effort` for agy is refused). Precedence: `spawn --effort`, the model entry's `effort`, the tier default. Test writers get their model's default.
