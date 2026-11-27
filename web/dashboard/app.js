@@ -4,6 +4,7 @@ import { vendorBadge } from './vendors.js';
 import { openReport, shouldOpenReport, terminalInputFocused } from './report.js';
 import { keyFor, TOUCH_KEYS } from './termkeys.js';
 import { testProgress } from './progress.js';
+import { updateView, afterHello } from './update.js';
 import { movable, canDrop, dropSide, keyMove } from './queue.js';
 import { STACKED_QUERY, HANDLE_PX, DRAG_IGNORE, clampRatio, parseRatio, defaultRatio, splitKey, keyRatio, collapseAfterDrag, HEADER_STEPS, stepClasses, pickStep, handleKey } from './layout.js';
 // Text from the store is always set with textContent (h() below), never parsed as HTML.
@@ -114,7 +115,8 @@ function closeMore() { $('#gpu').classList.remove('open'); $('#gpu .more-btn')?.
 document.addEventListener('click', (e) => {
   const g = $('#gpu');
   if (e.target.closest('#gpu .more-btn')) { const open = !g.classList.contains('open'); g.classList.toggle('open', open); e.target.closest('button').setAttribute('aria-expanded', String(open)); return; }
-  if (g.classList.contains('open') && !e.target.closest('#gpu .pop')) closeMore();
+  // The path at dispatch time: a button that re-rendered its own section is still inside the popover.
+  if (g.classList.contains('open') && !e.composedPath().some(n => n.matches?.('#gpu .pop'))) closeMore();
 });
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') closeMore();
@@ -272,7 +274,7 @@ function initSplitter(sp) {
 for (const sp of document.querySelectorAll('.splitter[data-split]')) initSplitter(sp);
 
 // ---------- state ----------
-const state = { board: null, selected: null, sub: 'terminal', view: 'board', histSelected: null };
+const state = { board: null, selected: null, sub: 'terminal', view: 'board', histSelected: null, hello: null, update: null };
 
 // ---------- views ----------
 $('#home').addEventListener('click', (e) => {
@@ -295,6 +297,19 @@ function show(view) {
 // ---------- live board ----------
 function connect() {
   const es = new EventSource('/dash/stream');
+  es.addEventListener('hello', (e) => {
+    const hello = JSON.parse(e.data);
+    const next = afterHello(state.hello, hello, state.update);
+    state.hello ||= hello;
+    if (next.reload) return location.reload();
+    if (next.update !== state.update) { state.update = next.update; renderUpdate(); toast(`Updated to ${next.update.to}`); }
+  });
+  es.addEventListener('update', (e) => {
+    const progress = JSON.parse(e.data);
+    if (progress.error) toast(`Update: ${progress.error}`, true);
+    state.update = progress;
+    renderUpdate();
+  });
   es.addEventListener('board', (e) => {
     state.board = JSON.parse(e.data);
     render();
@@ -302,7 +317,41 @@ function connect() {
   });
   es.addEventListener('host', (e) => { state.host = JSON.parse(e.data); renderSys(); });
   es.onopen = () => { $('#conn').className = 'conn live'; put($('#conn'), h('span', { class: 'long', text: 'live' })); $('#conn').title = 'Live updates: connected'; };
-  es.onerror = () => { $('#conn').className = 'conn down'; put($('#conn'), h('span', { class: 'long', text: 'reconnecting…' })); $('#conn').title = 'Live updates: reconnecting…'; };
+  es.onerror = () => {
+    $('#conn').className = 'conn down'; put($('#conn'), h('span', { class: 'long', text: 'reconnecting…' })); $('#conn').title = 'Live updates: reconnecting…';
+    // An error status (a proxy's 502 while the broker restarts) ends an EventSource for good: open another.
+    if (es.readyState === 2) setTimeout(connect, 3000);
+  };
+}
+
+// ---------- update (PRD "Update from the dashboard") ----------
+/** The popover's update section: one element, kept across the popover's re-renders. */
+const updateBox = document.createElement('div');
+updateBox.className = 'update';
+function renderUpdate() {
+  const v = updateView(state.update);
+  put(updateBox,
+    h('button', { type: 'button', disabled: v.busy, onclick: checkUpdate }, 'Check for update'),
+    v.text ? h('span', { class: v.error ? 'err' : '', role: 'status', text: v.text }) : null,
+    v.commits.length ? h('ul', {}, v.commits.map(c => h('li', { text: c }))) : null,
+    v.apply ? h('button', { type: 'button', onclick: applyUpdate }, 'Update and restart') : null);
+}
+async function checkUpdate() {
+  state.update = { checking: true };
+  renderUpdate();
+  try { state.update = { report: await api.post('/dash/update/check') }; } catch (e) { state.update = { error: e.message }; }
+  renderUpdate();
+}
+async function applyUpdate() {
+  const { report } = state.update;
+  if (!confirm(`Update to ${report.latest} and restart the broker? Running workers and test jobs keep going.`)) return;
+  state.update = { phase: 'pulling', to: report.latest };
+  renderUpdate();
+  try {
+    const r = await api.post('/dash/update/apply');
+    if (r.upToDate) state.update = { report: { ...report, behind: 0, current: r.current } };
+  } catch (e) { state.update = { error: e.message }; }
+  renderUpdate();
 }
 
 function render() {
@@ -419,13 +468,16 @@ function moreMenu(open, title, label, ...sections) {
     markCurrent(b);
     return b;
   };
-  return [h('button', { class: 'more-btn', type: 'button', title, 'aria-label': label, 'aria-expanded': String(open) }, '⋯'),
+  const news = state.board?.update;
+  const note = news ? `${news.behind} new commit${news.behind === 1 ? '' : 's'} on main` : null;
+  return [h('button', { class: `more-btn${news ? ' has-update' : ''}`, type: 'button', title: note ? `${title}\n${note}` : title, 'aria-label': note ? `${label} (${note})` : label, 'aria-expanded': String(open) }, '⋯'),
     h('div', { class: 'pop', role: 'group', 'aria-label': label },
       h('div', { class: 'views' }, link('board', 'Board'), link('history', 'History'), link('db', 'Database')),
       h('div', { class: 'extra' },
         h('button', { type: 'button', onclick: () => { closeMore(); toggleTheme(); } }, 'Light / dark'),
         h('button', { type: 'button', onclick: () => { closeMore(); report(); } }, 'Report issue (F2)')),
-      sections)];
+      sections,
+      updateBox)];
 }
 /** Marks the title (it leads to the board) or a popover view link when its view is shown. */
 function markCurrent(b) {
@@ -1147,6 +1199,7 @@ $('#db-query').addEventListener('submit', async (e) => {
 $('#db-query textarea').addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) $('#db-query').requestSubmit(); });
 
 // ---------- start ----------
+renderUpdate();
 setInterval(() => { if (state.board && state.view === 'board') renderBoard(state.board); }, 30e3); // elapsed times
 const hash = location.hash.slice(1);
 connect();

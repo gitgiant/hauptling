@@ -11,6 +11,7 @@ import { createSatellite, readSatellite } from './satellite.mjs';
 import { platform } from './platform/index.mjs';
 import { config as dockerConfig, dockerHost, gpuAvailable, slotDir, WORKER_BROKER_URL } from './docker.mjs';
 import { logins } from './setup.mjs';
+import { createUpdater } from './update.mjs';
 import { signingIn } from './terminal.mjs';
 import { networkInterfaces } from 'node:os';
 import * as github from './github.mjs';
@@ -123,8 +124,9 @@ export async function runBroker({ port = BROKER_PORT } = {}) {
     satellite = createSatellite({ db, config: joined, capabilities, onCommand: (c) => core.command(c), onRpc: (op, args) => dash.remote(op, args), log });
   }
   const core = createCore({ db, host, github, notify: plat.notify, workerUrl: WORKER_BROKER_URL, publicUrl: base, runnerToken, hub, satellite, log });
+  const updater = createUpdater({ log, announce: (from, to) => core.call('update.announce', { from, to }) });
   // The dashboard's host features (Hosts panel, relayed terminal/diff) are the hub's; a joined satellite has none.
-  const dash = createDashboard({ db, dbPath, core, host, hub: joined ? null : hub, log, slotDir, logins, report: { gh: github.gh, logPath, config: dockerConfig, secrets: () => [adminToken, runnerToken] } });
+  const dash = createDashboard({ db, dbPath, core, host, hub: joined ? null : hub, updater, log, slotDir, logins, report: { gh: github.gh, logPath, config: dockerConfig, secrets: () => [adminToken, runnerToken] } });
 
   const recovery = core.recover();
   recovery.then(() => dash.terms.restoreSizes()).catch(e => log(`terminal sizes: ${e.message}`)); // nobody is watching yet
@@ -146,6 +148,10 @@ export async function runBroker({ port = BROKER_PORT } = {}) {
   setInterval(() => core.poll().catch(e => log(`poll: ${e.message}`)), 60e3).unref();
   setInterval(() => { try { hub.tick(); } catch (e) { log(`hub tick: ${e.message}`); } }, 30e3).unref();
   core.pump().catch(e => log(`test pump: ${e.message}`));
+  // Is main ahead? Quietly, for the dot on the dashboard's ⋯ button (PRD "Update from the dashboard").
+  const lookForUpdate = () => updater.check().catch(e => log(`update check: ${e.message}`));
+  setTimeout(lookForUpdate, 30e3).unref();
+  setInterval(lookForUpdate, 6 * 3600e3).unref();
   if (satellite) {
     satellite.start();
     log(`satellite mode: dialling ${joined.hub} as ${joined.host}`);

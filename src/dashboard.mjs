@@ -1,5 +1,5 @@
 import { createHash, timingSafeEqual, randomUUID } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join, normalize } from 'node:path';
 import { cpus, freemem, hostname, totalmem } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -19,6 +19,7 @@ import { buildBody, checkImage, brokerFacts, fileIssue, issueRepo, originUrl, sc
  *   POST /dash/do/<call>    actions (answer, reply, pause, unpause, restart, kill, merge, gpu.*), need `X-Hauptling: 1`
  *   POST /dash/agents/<id>/move   reorder the queue: {before|after: id} or {top|bottom: true}, need `X-Hauptling: 1`
  *   POST /dash/report/preview|send   F2 "Report an issue": the scrubbed body, and filing it with `gh issue create`
+ *   POST /dash/update/check|apply   is origin/main ahead; update to it and restart (PRD "Update from the dashboard")
  *   POST /dash/hosts/token  a satellite join token and the `hauptling satellite join` line (part 3, hub only)
  * With satellites (PRD "Part 3") the board carries host chips and offline states, the Usage page a Hosts panel,
  * and a satellite agent's terminal, diff and timeline come from its host over the link (`hub.rpc`); on a
@@ -108,6 +109,9 @@ const same = (a, b) => {
   return timingSafeEqual(x, y);
 };
 const cookieOf = (req) => Object.fromEntries((req.headers.cookie || '').split(';').map(c => c.trim().split('=')).filter(p => p.length === 2))[COOKIE];
+/** A hash of the page's files: a page that reconnects to a broker serving others reloads itself. */
+const assetHash = () => readdirSync(WEB).sort().reduce((h, f) => h.update(f).update(readFileSync(join(WEB, f))), createHash('sha1')).digest('hex');
+
 const isLoopback = (req) => ['127.0.0.1', '::ffff:127.0.0.1', '::1'].includes(req.socket.localAddress);
 
 /** Replaces token/nonce values (and strings containing them) with •••. */
@@ -139,7 +143,7 @@ export function joinLine(headers, tok) {
 }
 
 /** `hub`: on the hub, its satellites (src/hub.mjs), for the Hosts panel and the relayed terminal, diff and timeline. */
-export function createDashboard({ db, dbPath, core, host, hub = null, log = () => {}, slotDir = () => { throw new Error('no slots'); }, logins = () => [], report = {} }) {
+export function createDashboard({ db, dbPath, core, host, hub = null, updater = null, log = () => {}, slotDir = () => { throw new Error('no slots'); }, logins = () => [], report = {} }) {
   const terms = createTerminals({ db, host, slotDir, log, rpc: hub ? (name, op, args) => hub.rpc(name, op, args) : null, hold: core.holdSignin });
   const satellites = () => db.prepare('SELECT name, online, lost_at FROM hosts ORDER BY name').all();
   const offline = (e) => /is offline/.test(e.message);
@@ -259,12 +263,17 @@ export function createDashboard({ db, dbPath, core, host, hub = null, log = () =
     const g = await gpu();
     // GPU status is cached for 10 s; the running job's progress is read fresh.
     const gpuNow = g?.running ? { ...g, running: g.running.map(r => { const t = db.prepare('SELECT repo, selector FROM tests WHERE id = ?').get(r.id); return { ...r, ...live({ ...r, repo: t?.repo, selector: t?.selector, gpu: 1 }) }; }) } : g;
+    const update = updater?.available();
     return { agents, delegators, gpu: gpuNow, tests, blocked: agents.filter(a => a.state === 'blocked').length,
+      ...(update ? { update } : {}),
       ...(sats.length ? { hosts: [{ name: 'hub', online: true, lost: false }, ...sats.map(h => ({ name: h.name, online: Boolean(h.online), lost: Boolean(h.lost_at) }))] } : {}) };
   }
 
   // One ticker for all open streams; it only runs while someone is watching.
   const clients = new Set();
+  // This broker process and the page it serves, told to every new stream.
+  const hello = JSON.stringify({ boot: randomUUID(), assets: assetHash() });
+  updater?.onChange((s) => { for (const res of clients) res.write(`event: update\ndata: ${JSON.stringify(s)}\n\n`); });
   let last = '';
   let timer = null;
   async function tick() {
@@ -277,7 +286,10 @@ export function createDashboard({ db, dbPath, core, host, hub = null, log = () =
   function stream(req, res) {
     res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive' });
     res.write('retry: 3000\n\n');
+    res.write(`event: hello\ndata: ${hello}\n\n`);
     clients.add(res);
+    const progress = updater?.status();
+    if (progress) res.write(`event: update\ndata: ${JSON.stringify(progress)}\n\n`);
     if (last) res.write(`event: board\ndata: ${last}\n\n`);
     if (lastHost) res.write(`event: host\ndata: ${lastHost}\n\n`);
     startSampler();
@@ -608,6 +620,13 @@ export function createDashboard({ db, dbPath, core, host, hub = null, log = () =
           const r = await core.call('usage.refresh');
           tick();
           json(res, 200, r);
+          return true;
+        }
+        if (updater && p === '/dash/update/check') { json(res, 200, await updater.check()); tick(); return true; }
+        if (updater && p === '/dash/update/apply') {
+          const { run, ...r } = await updater.start();
+          json(res, run ? 202 : 200, r);
+          run?.(); // after the response: it ends with this broker restarting
           return true;
         }
         if (p === '/dash/term/login') { json(res, 200, await terms.startLogin(body.slot, body.vendor)); return true; }
