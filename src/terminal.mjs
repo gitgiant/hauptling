@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import { existsSync, mkdirSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
+import { HELD, isHeld } from './db.mjs';
 import { shellLine } from './util.mjs';
 
 /*
@@ -99,7 +100,7 @@ export function createTerminals({ db, host, slotDir, hold = () => () => {}, rpc 
     const m = LOGIN_RE.exec(sid);
     if (m) return { kind: 'login', sid, slot: m[1], vendor: m[2] };
     const a = agentRow(sid);
-    if (!a || !a.slot || !LIVE.includes(a.state)) throw new Error(`No live session ${sid}`);
+    if (!a || !a.slot || !LIVE.includes(a.state) || isHeld(a)) throw new Error(`No live session ${sid}`);
     if (a.host && a.host !== 'hub') {
       if (!rpc) throw new Error(`${sid} runs on ${a.host}; its terminal is there`);
       return { kind: 'remote', sid, host: a.host, id: a.id, state: a.state };
@@ -181,7 +182,7 @@ export function createTerminals({ db, host, slotDir, hold = () => () => {}, rpc 
   }
 
   /** A worker of this vendor running on the slot: it refreshes the same credential file. */
-  const runningOn = (slot, vendor) => db.prepare("SELECT id FROM agents WHERE slot = ? AND vendor = ? AND state IN ('spawning','restarting','paused','working','blocked','done')").get(slot, vendor)?.id || null;
+  const runningOn = (slot, vendor) => db.prepare(`SELECT id FROM agents WHERE slot = ? AND vendor = ? AND state IN ('spawning','restarting','paused','working','blocked','done') AND NOT ${HELD}`).get(slot, vendor)?.id || null;
 
   // ---------- window size ----------
   const sizeEntry = (sid) => {

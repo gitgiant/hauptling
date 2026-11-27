@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { openDb } from '../src/db.mjs';
 import { createCore } from '../src/core.mjs';
+import { createDashboard } from '../src/dashboard.mjs';
 import * as keyStore from '../src/keys.mjs';
 import { loadModels } from '../src/models.mjs';
 import { join } from 'node:path';
@@ -30,6 +31,8 @@ function fakeHost() {
     },
     async startWorker(o) { starts.push({ ...o, unread: this.unreadAtStart?.(o.id) }); calls.push(['start', o.slot, o.id]); },
     async stopWorker(slot, id) { calls.push(['stop', slot, id]); },
+    async pauseWorker(slot, id) { calls.push(['pause', slot, id]); },
+    async unpauseWorker(slot, id) { calls.push(['unpause', slot, id]); },
     async tmuxType(slot, id, text) { typed.push([id, text]); },
     async tmuxAlive() { return true; },
     async tmuxCapture() { return ''; },
@@ -299,4 +302,120 @@ test('pause holds a parked agent without Docker; unpause after a failed gate unp
   await core.call('kill', { agent: a });
   assert.equal(row(a).state, 'killed');
   assert.deepEqual(host.sessions.dropped, [a]);
+});
+
+// ---------- paused workers give way (PRD "Paused workers give way") ----------
+/** \`n\` running agents with recorded sessions, of a delegator allowing \`max\`. */
+async function running({ n = 3, max = 3, slots = ['hl-w1', 'hl-w2', 'hl-w3'], maxWorkers } = {}) {
+  const s = await setup({ slots });
+  if (maxWorkers) s.host.maxWorkers = () => maxWorkers;
+  const { id: delegator } = await s.core.call('delegator.start', { repo: 'gitgiant/demo', max });
+  const spawn = async (brief = 'task') => { const r = await s.core.call('spawn', { delegator, brief, vendor: 'claude', mode: 'cheapest' }); await settle(); return r.id; };
+  const ids = [];
+  for (let i = 0; i < n; i++) {
+    const id = await spawn(`task ${i}`);
+    await s.core.call('hook', { vendor: 'claude', event: 'SessionStart', sessionId: `sess-${id}` }, s.who(id));
+    ids.push(id);
+  }
+  const pause = async (id) => { await s.core.call('pause', { agent: id }); await settle(); };
+  const events = (id) => s.db.prepare('SELECT kind, text FROM events WHERE agent = ? ORDER BY id').all(id);
+  const head = async (id) => (await createDashboard({ db: s.db, dbPath: ':memory:', core: s.core, host: s.host }).snapshot()).agents.find(a => a.id === id).headline;
+  return { ...s, delegator, ids, spawn, pause, events, head };
+}
+
+test('paused queued agents count toward no limit: an unpaused one starts past them', async () => {
+  const s = await running({ n: 0, max: 3, maxWorkers: 3 });
+  await s.core.call('slots.set', { slots: [] }); // nothing can start yet
+  const queued = [await s.spawn(), await s.spawn(), await s.spawn()];
+  for (const id of queued) await s.pause(id);
+  await s.core.call('slots.set', { slots: ['hl-w1'] });
+  const next = await s.spawn('the one I want');
+  assert.equal(s.row(next).state, 'working');
+  assert.ok(queued.every(id => s.row(id).state === 'paused'));
+});
+
+test('pause and unpause with nobody waiting only freeze: no parking', async () => {
+  const s = await running();
+  for (const id of s.ids) await s.pause(id);
+  await s.core.poll();
+  await settle();
+  assert.ok(s.ids.every(id => s.row(id).state === 'paused' && !s.row(id).parked));
+  assert.ok(!s.host.calls.some(c => c[0] === 'stop'));
+  await s.core.call('unpause', { agent: s.ids[0] });
+  assert.equal(s.row(s.ids[0]).state, 'working');
+  assert.deepEqual(s.events(s.ids[0]).map(e => e.kind), ['paused', 'resumed']);
+});
+
+test('the longest-paused worker gives way to a queued agent; unpaused, it is queued first and resumes its session', async () => {
+  const s = await running();
+  const [a, b, c] = s.ids;
+  for (const id of [b, a, c]) { await s.pause(id); }
+  const next = await s.spawn('needs a place');
+  assert.equal(s.row(next).state, 'working');
+  assert.equal(s.row(next).slot, 'hl-w2');
+  assert.deepEqual([s.row(b).state, s.row(b).paused_state, s.row(b).parked], ['paused', 'working', 1]);
+  assert.ok([a, c].every(id => s.row(id).state === 'paused' && !s.row(id).parked), 'only as many as needed');
+  assert.deepEqual(s.host.sessions.saved, [{ slot: 'hl-w2', vendor: 'claude', id: b, sessionId: `sess-${b}` }]);
+  assert.match(s.db.prepare('SELECT value FROM kv WHERE key = ?').get(`screen:${b}`).value, /screen of/);
+  assert.match(s.events(b).find(e => e.kind === 'parked').text, new RegExp(`paused, slot needed by ${next}`));
+  assert.equal(await s.head(b), 'Paused by you (parked, slot freed)');
+  assert.equal(await s.head(a), 'Paused by you');
+  await assert.rejects(s.core.call('attach', { agent: b }), /paused and parked/);
+
+  // Unpaused while every place is taken: it parks the next paused one and goes ahead of an older queued agent.
+  const waiting = await s.spawn('also queued');
+  assert.equal(s.row(a).parked, 1, 'a, paused second, made room for it');
+  const later = await s.spawn('queued behind');
+  assert.equal(s.row(c).parked, 1);
+  const last = await s.spawn('nothing left to park');
+  assert.equal(s.row(last).state, 'queued');
+  await s.core.call('unpause', { agent: b });
+  assert.deepEqual([s.row(b).state, s.row(b).unpark], ['queued', 'unpaused']);
+  assert.deepEqual((await s.core.call('queue.list', { delegator: s.delegator })).queue.map(q => q.id), [b, last]);
+  await s.core.call('kill', { agent: waiting });
+  await settle();
+  assert.equal(s.row(b).state, 'working');
+  assert.equal(s.row(b).parked, 0);
+  assert.equal(s.row(last).state, 'queued');
+  assert.equal(s.row(later).state, 'working');
+  const start = s.host.starts.filter(o => o.id === b).at(-1);
+  assert.deepEqual(start.resumeArgv.slice(-3, -1), ['--resume', `sess-${b}`]);
+  assert.match(start.resumeArgv.at(-1), /paused mid-task.*working tree/);
+  assert.match(s.host.state.brief, /^You were paused mid-task/);
+  assert.deepEqual(s.events(b).map(e => e.kind), ['paused', 'parked', 'resumed', 'unparked']);
+});
+
+test('an already waiting agent gets the slot as soon as the worker is paused; parked ones hold no slot or maxWorkers place', async () => {
+  const s = await running({ n: 1, max: 5, slots: ['hl-w1', 'hl-w2'], maxWorkers: 1 });
+  const [a] = s.ids;
+  const next = await s.spawn();
+  assert.equal(await s.head(next), `Queued: waiting for a free worker (maxWorkers 1, busy: ${a})`);
+  await s.pause(a);
+  assert.equal(s.row(a).parked, 1);
+  assert.equal(s.row(next).state, 'working');
+  assert.deepEqual(s.core.freeSlots('claude'), ['hl-w2'], 'only the new one holds a slot');
+  await s.core.call('kill', { agent: a });
+  assert.equal(s.row(a).state, 'killed');
+});
+
+test('the queued headline names the blocker: the slot holders, or max_agents', async () => {
+  const s = await running({ n: 1, max: 5, slots: ['hl-w1'] });
+  const [a] = s.ids;
+  const next = await s.spawn();
+  assert.equal(await s.head(next), `Queued: waiting for a free claude slot (hl-w1 busy: ${a})`);
+  s.db.prepare('UPDATE delegators SET max_agents = 1 WHERE id = ?').run(s.delegator);
+  assert.equal(await s.head(next), `Queued: waiting: ${s.delegator} is at max_agents 1 (busy: ${a})`);
+});
+
+test('a paused reported worker that gives way is an ordinary parked one', async () => {
+  const s = await running({ n: 1, max: 5, slots: ['hl-w1'] });
+  const [a] = s.ids;
+  await s.core.call('report', { text: 'did it' }, s.who(a));
+  await settle();
+  await s.pause(a);
+  const next = await s.spawn();
+  assert.deepEqual([s.row(a).state, s.row(a).paused_state, s.row(a).parked], ['paused', 'parked', 0]);
+  assert.equal(s.row(next).state, 'working');
+  await s.core.call('unpause', { agent: a });
+  assert.equal(s.row(a).state, 'parked');
 });

@@ -767,8 +767,9 @@ function renderSub(el, a) {
   if (state.sub === 'events') loadEvents(a.id, body);
   if (state.sub === 'terminal') {
     // Same live states as the server's terminal (src/terminal.mjs); otherwise the stream would retry forever.
-    if (a.slot && TERMINAL_STATES.includes(a.state)) state.term = openTerminal(body, a.id);
-    else if (a.state === 'parked') loadParkedScreen(a, body);
+    const pausedParked = a.state === 'paused' && (a.parked || ['parked', 'unpark'].includes(a.paused_state));
+    if (a.slot && TERMINAL_STATES.includes(a.state) && !pausedParked && a.paused_state !== 'queued') state.term = openTerminal(body, a.id);
+    else if (a.state === 'parked' || pausedParked) loadParkedScreen(a, body);
     else put(body, h('p', { class: 'empty', text: `No live session (${a.state})` }));
   }
 }
@@ -782,9 +783,10 @@ function patchView(text) {
   return pre;
 }
 
-/** A parked worker has no container: the screen saved when it was parked (PRD "Parking"). */
+/** A parked worker has no container: the screen saved when it was parked (or paused) (PRD "Parking"). */
 async function loadParkedScreen(a, body) {
-  const note = h('p', { class: 'empty', text: `Parked: its container was removed after it reported. Mail, a failed gate or CI, or Restart bring it back.` });
+  const note = h('p', { class: 'empty', text: a.parked ? 'Paused and parked: its container was removed to free its slot. Resume brings it back.'
+    : 'Parked: its container was removed after it reported. Mail, a failed gate or CI, or Restart bring it back.' });
   try {
     const s = await api.get(`/dash/agent/${encodeURIComponent(a.id)}/screen`);
     put(body, note, s.text ? h('pre', { class: 'term' }, ansiFragment(s.text.replace(/\s+$/, ''))) : h('p', { class: 'empty', text: 'No screen was saved.' }));

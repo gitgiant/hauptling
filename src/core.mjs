@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { kvDel, kvGet, kvSet, tx, QUEUE_ORDER, IN_QUEUE } from './db.mjs';
+import { kvDel, kvGet, kvSet, tx, QUEUE_ORDER, IN_QUEUE, HELD, isHeld } from './db.mjs';
 import * as mail from './mail.mjs';
 import * as codegraph from './codegraph.mjs';
 import { checkTier, effortFor, enabledVendors, findModel, launchArgv, loadModels, nextVendor, pick, preferOf, setPrefer, shortModel, tierName } from './models.mjs';
@@ -36,6 +36,7 @@ const ENDED = ['merged', 'killed', 'closed', 'handed-off'];
 /** Reported and waiting on its gate or PR: `done` still has its container, `parked` gave it up (PRD "Parking"). */
 const REPORTED = ['done', 'parked'];
 const UNPARK_PREAMBLE = 'You were parked after your report (your container was removed to free its slot) and are back because you are needed again; continue from the current state of the branch and working tree.';
+const UNPAUSE_PREAMBLE = 'You were paused mid-task, and your container was removed to free its slot; you are unpaused now. Check your working tree for unfinished work (an interrupted command or edit) and continue. If you were waiting for an answer to a question, keep waiting: end your turn.';
 const UNPARK_PROMPT = 'You were parked after your report and are back because new mail arrived for you (it comes with this message). Continue from the current state of the branch and working tree.';
 /** Paths added to every clone's .git/info/exclude: Hauptling's own files and caches tools write into the clone. */
 // node_modules/: prepare installs dependencies into the clone (vendors.mjs installDeps); a repo that doesn't ignore it must not get it committed.
@@ -45,7 +46,7 @@ const RUNNER_CALLS = new Set(['test.claim', 'test.report', 'test.heartbeat']);
 /** What a satellite key may call on /api: nothing. It reports through /hub/state and /hub/events (ordered, exactly once). */
 const SATELLITE_CALLS = new Set();
 /** Agent columns a satellite mirrors to the hub (`state` events), plus its status line. */
-const MIRROR_FIELDS = ['state', 'unpark', 'slot', 'dir', 'idle', 'sha', 'report', 'pr_url', 'pr_number', 'gate', 'base', 'usage', 'billing', 'usage_start', 'paused_state', 'start_from', 'ci_note'];
+const MIRROR_FIELDS = ['state', 'unpark', 'slot', 'dir', 'idle', 'sha', 'report', 'pr_url', 'pr_number', 'gate', 'base', 'usage', 'billing', 'usage_start', 'paused_state', 'parked', 'start_from', 'ci_note'];
 /** Test job columns mirrored to the hub (`test` events). */
 const TEST_FIELDS = ['id', 'agent', 'requester', 'repo', 'sha', 'branch', 'selector', 'gpu', 'artifacts', 'timeout_s', 'round', 'purpose', 'state', 'report', 'created_at', 'claimed_at', 'done_at', 'attempt', 'retry_note'];
 /** What a satellite's spawn command carries of the hub's agent row. */
@@ -63,6 +64,8 @@ const WORKER_RULES = readFileSync(new URL('../prompts/worker-rules.md', import.m
 export function createCore({ db, host, github, notify = () => false, models = loadModels, savePrefer = setPrefer, keys = keyStore, workerUrl, publicUrl = workerUrl, runnerToken, hub = null, satellite = null, remoteWaitMs = 30e3, log = () => {}, stallMinutes = Number(process.env.HAUPTLING_STALL_MINUTES || 10), idleMinutes = Number(process.env.HAUPTLING_IDLE_MINUTES || 15), parkMinutes = 2, parkDelayMs = 3000 }) {
   const changing = new Set();
   const merging = new Set();
+  /** Paused agents on satellites asked to park, until their state comes back. */
+  const yielding = new Set();
   const bus = new EventEmitter();
   bus.setMaxListeners(0);
   const agentRow = (id) => db.prepare('SELECT * FROM agents WHERE id = ?').get(id);
@@ -283,16 +286,16 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     return h;
   }
   /** Agents the hub has placed on a satellite that still hold (or wait there for) a worker. */
-  const liveOn = (name, vendor = null) => db.prepare(`SELECT COUNT(*) n FROM agents WHERE host = ? AND (? IS NULL OR vendor = ?) AND (${inActive} OR state = 'queued')`).get(name, vendor, vendor, ...ACTIVE).n;
+  const liveOn = (name, vendor = null, except = null) => db.prepare(`SELECT COUNT(*) n FROM agents WHERE host = ? AND (? IS NULL OR vendor = ?) AND ${notIn} AND (${inActive} OR state = 'queued')`).get(name, vendor, vendor, ids(except), ...ACTIVE).n;
   /**
    * Hosts that can start `a` now, least busy first (the hub first on a tie): its pin (`spawn --host`), else its
    * delegator's host, else every online host. Satellites: only GitHub repos; their signed-in slots, `maxWorkers`
    * and `gpu` come from their last heartbeat, minus the agents placed there that are still live.
    */
-  function placements(a, drow, hubGpu) {
+  function placements(a, drow, hubGpu, except = null) {
     const pin = a.unpark ? 'hub' : a.want_host || drow.host; // an unparking agent stays on this host (its clone is here)
     const fits = [];
-    if ((!pin || pin === 'hub') && (!a.gpu || hubGpu) && slotsFor(a).length && workerCount() < maxWorkers() && (headroomGated(a) ? roomy(a.vendor, a.model) : startable(a.vendor, a.model))) fits.push({ name: 'hub', live: workerCount() });
+    if ((!pin || pin === 'hub') && (!a.gpu || hubGpu) && slotsFor(a, except).length && workerCount(except) < maxWorkers() && (headroomGated(a) ? roomy(a.vendor, a.model) : startable(a.vendor, a.model))) fits.push({ name: 'hub', live: workerCount(except) });
     if (hub && pin !== 'hub' && githubSlug(a.repo)) {
       for (const h of db.prepare('SELECT name, capabilities FROM hosts WHERE online = 1 AND key_hash IS NOT NULL ORDER BY name').all()) {
         if (pin && pin !== h.name) continue;
@@ -300,8 +303,8 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
         try { c = JSON.parse(h.capabilities || '{}') || {}; } catch {}
         if (a.gpu && !c.gpu) continue;
         const signed = Array.isArray(c.vendors?.[a.vendor]) ? c.vendors[a.vendor].length : 0;
-        const live = liveOn(h.name);
-        if (signed - liveOn(h.name, a.vendor) <= 0 || live >= Math.max(1, Number(c.maxWorkers) || 6)) continue;
+        const live = liveOn(h.name, null, except);
+        if (signed - liveOn(h.name, a.vendor, except) <= 0 || live >= Math.max(1, Number(c.maxWorkers) || 6)) continue;
         fits.push({ name: h.name, live });
       }
     }
@@ -312,8 +315,11 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     for (const { id } of db.prepare("SELECT DISTINCT delegator id FROM agents WHERE state = 'queued' AND host = 'hub'").all()) await startQueued(id).catch(e => log(`start ${id}: ${e.message}`));
   }
 
-  // An agent paused in the queue has no worker, so it counts toward no limit.
-  const inActive = `(state IN (${ACTIVE.map(() => '?').join(',')}) AND paused_state IS NOT 'queued')`;
+  // A paused agent without a container counts toward no limit.
+  const inActive = `(state IN (${ACTIVE.map(() => '?').join(',')}) AND NOT ${HELD})`;
+  /** `except`: an agent id, or a set of them, to leave out of a count. */
+  const notIn = 'id NOT IN (SELECT value FROM json_each(?))';
+  const ids = (except) => JSON.stringify(typeof except === 'string' ? [except] : [...(except || [])]);
   /** The priority that puts a new agent at the end of its delegator's queue. */
   const nextPriority = (d) => db.prepare('SELECT COALESCE(MAX(priority), 0) + 1 n FROM agents WHERE delegator = ?').get(d).n;
   /**
@@ -322,19 +328,23 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
    * claude and a codex worker on one slot never share a refresh token. `except`: an agent to ignore (restart).
    */
   function freeSlots(vendor, except = null) {
-    const used = new Set(db.prepare(`SELECT slot FROM agents WHERE slot IS NOT NULL AND host = 'hub' AND vendor = ? AND id IS NOT ? AND ${inActive}`).all(vendor, except, ...ACTIVE).map(r => r.slot));
+    const used = new Set(db.prepare(`SELECT slot FROM agents WHERE slot IS NOT NULL AND host = 'hub' AND vendor = ? AND ${notIn} AND ${inActive}`).all(vendor, ids(except), ...ACTIVE).map(r => r.slot));
     return slots().filter(s => !used.has(s) && held.get(`${s}:${vendor}`) !== 'refreshing usage');
   }
   /** Live worker containers on this host, across every delegator. */
-  const workerCount = (except = null) => db.prepare(`SELECT COUNT(*) n FROM agents WHERE slot IS NOT NULL AND host = 'hub' AND id IS NOT ? AND ${inActive}`).get(except, ...ACTIVE).n;
+  const workerCount = (except = null) => db.prepare(`SELECT COUNT(*) n FROM agents WHERE slot IS NOT NULL AND host = 'hub' AND ${notIn} AND ${inActive}`).get(ids(except), ...ACTIVE).n;
   /** Host-wide cap on live workers (`maxWorkers` in ~/.hauptling/config.json, default 6), so CPU and RAM aren't overrun. */
   const maxWorkers = () => Math.max(1, Number(host.maxWorkers?.() ?? 6) || 6);
+
+  /** The agents counting toward the delegator's `max_agents`, on every host. */
+  const activeOf = (d, except = null) => db.prepare(`SELECT id FROM agents WHERE delegator = ? AND ${notIn} AND (${inActive} OR (state = 'queued' AND host != 'hub'))`).all(d, ids(except), ...ACTIVE).map(r => r.id);
 
   /**
    * Starts queued agents while the delegator is under its limit (agents on every host count): each goes to the
    * first host from `placements`. On the hub: a slot free for its vendor, the hub under `maxWorkers`, and on the
    * API key or on a plan that isn't at 100% (below the headroom threshold if the rotation chose the vendor),
-   * else it waits for the reset. On a satellite: a `spawn` command.
+   * else it waits for the reset. On a satellite: a `spawn` command. When only paused workers are in the way,
+   * they are parked (`giveWay`).
    */
   async function startQueued(d) {
     const started = [];
@@ -345,8 +355,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     for (;;) {
       const next = tx(db, () => {
         const drow = delegatorRow(d);
-        const active = db.prepare(`SELECT COUNT(*) n FROM agents WHERE delegator = ? AND (${inActive} OR (state = 'queued' AND host != 'hub'))`).get(d, ...ACTIVE).n;
-        if (active >= drow.max_agents) return null;
+        if (activeOf(d).length >= drow.max_agents) return null;
         let a, place;
         // Unparking agents first: they were reported work that is needed again (PRD "Parking").
         for (const q of db.prepare(`SELECT * FROM agents WHERE delegator = ? AND state = 'queued' AND host = 'hub' ORDER BY ${QUEUE_ORDER}`).all(d)) {
@@ -368,7 +377,11 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
         synced(a.id);
         return { ...a, slot, dir, billing, state: 'spawning' };
       });
-      if (!next) { announceHeadroom(d); return started; }
+      if (!next) {
+        if (await giveWay(d, hubGpu)) continue;
+        announceHeadroom(d);
+        return started;
+      }
       started.push(next.id);
       if (next.remote) { log(`placed ${next.id} on ${next.remote}`); continue; }
       (next.unpark ? unparkLaunch(next) : launch(next)).catch(e => {
@@ -452,9 +465,8 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     const r = fullest(over(vendor, headroomPct()));
     return `warning: ${vendor} is at ${Math.round(r.used_pct)}% of its ${r.window} window${r.resets_at ? ` (resets ${clock(Date.parse(r.resets_at))})` : ''}; ${exhausted(vendor) ? 'the spawn waits for the reset' : 'starting there anyway, as you chose it'}`;
   }
-  /** A queued agent whose rotation-chosen vendor is full moves to the next vendor with headroom and a free slot. */
-  function revendor(a, drow, hubGpu) {
-    if (changing.has(a.id) || !headroomGated(a) || roomy(a.vendor, a.model)) return null;
+  /** The other vendors' versions of a rotation-chosen agent, in rotation order. */
+  function* alternatives(a) {
     const cfg = models();
     const order = enabledVendors(cfg);
     const at = order.indexOf(a.vendor);
@@ -466,19 +478,109 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
         entry = checkTier(cfg, vendor, pick(cfg, vendor, opts.mode, opts.difficulty), opts.allowTier);
         effort = effortFor(cfg, vendor, entry, opts.effort);
       } catch (e) { log(`headroom: ${a.id} can't move to ${vendor}: ${e.message}`); continue; }
-      const moved = { ...a, vendor, model: entry.id, effort };
+      yield { ...a, vendor, model: entry.id, effort };
+    }
+  }
+  /** May this queued agent move to another vendor now? */
+  const movableVendor = (a) => !changing.has(a.id) && headroomGated(a) && !roomy(a.vendor, a.model);
+  /** A queued agent whose rotation-chosen vendor is full moves to the next vendor with headroom and a free slot. */
+  function revendor(a, drow, hubGpu) {
+    if (!movableVendor(a)) return null;
+    for (const moved of alternatives(a)) {
       const place = placements(moved, drow, hubGpu).find(p => p.name === 'hub');
       if (!place) continue;
-      db.prepare('UPDATE agents SET vendor = ?, model = ?, effort = ? WHERE id = ?').run(vendor, entry.id, effort, a.id);
-      log(`headroom: ${a.id} moves from ${a.vendor} to ${vendor} ${entry.id}`);
-      if (vendor !== a.vendor || entry.id !== a.model) {
+      const { vendor, model, effort } = moved;
+      db.prepare('UPDATE agents SET vendor = ?, model = ?, effort = ? WHERE id = ?').run(vendor, model, effort, a.id);
+      log(`headroom: ${a.id} moves from ${a.vendor} to ${vendor} ${model}`);
+      if (vendor !== a.vendor || model !== a.model) {
         Object.assign(moved, rename(moved));
-        emit(a.delegator, moved.id, 'renamed', `${a.id} → ${moved.id} (headroom: ${a.vendor} is short, now ${vendor} ${entry.id})`);
+        emit(a.delegator, moved.id, 'renamed', `${a.id} → ${moved.id} (headroom: ${a.vendor} is short, now ${vendor} ${model})`);
       }
       return { a: moved, place };
     }
     return null;
   }
+
+  // ---------- giving way (PRD "Paused workers give way") ----------
+  /** Could queued agent `a` start if the agents in `gone` held nothing? */
+  function fitsWithout(a, drow, hubGpu, gone) {
+    if (activeOf(a.delegator, gone).length >= drow.max_agents) return false;
+    if (placements(a, drow, hubGpu, gone).length) return true;
+    return movableVendor(a) && [...alternatives(a)].some(m => placements(m, drow, hubGpu, gone).some(p => p.name === 'hub'));
+  }
+  /**
+   * A queued agent of `d` held back only by limits that paused workers hold: those paused longest are parked, as
+   * few as it takes. True when places were freed here (a satellite's come back with its state).
+   */
+  async function giveWay(d, hubGpu) {
+    const chosen = tx(db, () => {
+      const frozen = db.prepare(`SELECT * FROM agents WHERE state = 'paused' AND NOT ${HELD} AND slot IS NOT NULL ORDER BY COALESCE(paused_at, updated_at), rowid`).all()
+        .filter(c => !changing.has(c.id) && !merging.has(c.id) && !yielding.has(c.id) && (c.host === 'hub' || hub?.linked(c.host)));
+      if (!frozen.length) return null;
+      const drow = delegatorRow(d);
+      for (const q of db.prepare(`SELECT * FROM agents WHERE delegator = ? AND state = 'queued' AND host = 'hub' ORDER BY ${QUEUE_ORDER}`).all(d)) {
+        const gone = new Set(yielding);
+        if (fitsWithout(q, drow, hubGpu, gone)) { if (gone.size) return null; continue; } // a place is on its way
+        const take = [];
+        for (const c of frozen) {
+          take.push(c);
+          gone.add(c.id);
+          if (fitsWithout(q, drow, hubGpu, gone)) break;
+        }
+        if (!fitsWithout(q, drow, hubGpu, gone)) continue; // waiting for something else
+        for (let i = take.length - 2; i >= 0; i--) { // drop those that were not in the way
+          gone.delete(take[i].id);
+          if (fitsWithout(q, drow, hubGpu, gone)) take.splice(i, 1); else gone.add(take[i].id);
+        }
+        for (const c of take) (c.host === 'hub' ? changing : yielding).add(c.id);
+        return { take, by: q.id };
+      }
+      return null;
+    });
+    if (!chosen) return false;
+    let freed = false;
+    for (const c of chosen.take) {
+      if (c.host !== 'hub') { hub.command(c.host, 'park', { agent: c.id, for: chosen.by }); continue; }
+      try { freed = await parkPaused(c.id, chosen.by) || freed; }
+      catch (e) { log(`park ${c.id}: ${e.message}`); }
+      finally { changing.delete(c.id); }
+    }
+    return freed;
+  }
+  /** Parks a frozen worker for `by`: session saved, container removed; it stays paused. The caller holds `changing`. */
+  async function parkPaused(id, by) {
+    const a = agentRow(id);
+    if (!a || a.state !== 'paused' || isHeld(a) || !a.slot || a.host !== 'hub') return false;
+    let saved = [];
+    if (a.session_id) saved = await Promise.resolve(host.saveSession?.({ slot: a.slot, vendor: a.vendor, id: a.id, sessionId: a.session_id })).catch(e => { log(`park ${id}: saving the session failed: ${e.message}`); return []; }) || [];
+    await host.stopWorker(a.slot, a.id, { paused: true });
+    const cur = agentRow(id);
+    if (cur.state !== 'paused') return false;
+    // A reported worker is an ordinary parked one from here; one mid-task resumes when unpaused.
+    update(id, cur.paused_state === 'done' ? { paused_state: 'parked', idle: 0 } : { parked: 1, idle: 0 });
+    setStatus(id, `paused (parked): ${a.title}`.slice(0, STATUS_MAX));
+    emit(a.delegator, id, 'parked', `${id} parked: paused, slot needed by ${by}${saved.length ? '' : ' (no session saved: it will start fresh)'}. \`hauptling unpause ${id}\` queues it again.`);
+    return true;
+  }
+
+  /** Why a queued agent has not started on this host, naming who holds the limit; null when that isn't known. */
+  function blockerNote(a) {
+    if (a.state !== 'queued' || a.host !== 'hub') return null;
+    const drow = delegatorRow(a.delegator);
+    const active = activeOf(a.delegator);
+    if (active.length >= drow.max_agents) return `waiting: ${a.delegator} is at max_agents ${drow.max_agents} (busy: ${active.join(', ')})`;
+    const pin = a.unpark ? 'hub' : a.want_host || drow.host;
+    if ((pin && pin !== 'hub') || headroomNote(a)) return null;
+    const holders = (vendor) => db.prepare(`SELECT id, slot FROM agents WHERE slot IS NOT NULL AND host = 'hub' AND (? IS NULL OR vendor = ?) AND ${inActive} ORDER BY slot, id`).all(vendor, vendor, ...ACTIVE);
+    if (workerCount() >= maxWorkers()) return `waiting for a free worker (maxWorkers ${maxWorkers()}, busy: ${holders(null).map(w => w.id).join(', ')})`;
+    if (!slotsFor(a).length) {
+      const busy = [...holders(a.vendor).map(w => `${w.slot} busy: ${w.id}`), ...slots().filter(s => held.get(`${s}:${a.vendor}`) === 'refreshing usage').map(s => `${s} refreshing usage`)];
+      return `waiting for a free ${a.vendor} slot${busy.length ? ` (${busy.join(', ')})` : ''}`;
+    }
+    if (!startable(a.vendor, a.model)) return refused(a.vendor, a.model) ? `waiting: ${a.vendor} API credit ran out` : `waiting for the ${a.vendor} plan to reset`;
+    return null;
+  }
+
   /**
    * A queued agent that changed vendor or model gets an id that says so, with its branch; the old id becomes an
    * alias. Only on the hub before it starts, inside the caller's transaction. A test writer's branch is the
@@ -549,7 +651,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   /** Above the ceiling a worker needs a signed-in slot; otherwise sign-ins aren't checked here. */
   const planSlot = (vendor, model, slot) => !aboveCeiling(vendor, model) || (planSlots.get(vendor)?.has(slot) ?? true);
   const planSignedIn = (vendor, model) => slots().some(s => planSlot(vendor, model, s));
-  const slotsFor = (a) => freeSlots(a.vendor).filter(s => planSlot(a.vendor, a.model, s));
+  const slotsFor = (a, except = null) => freeSlots(a.vendor, except).filter(s => planSlot(a.vendor, a.model, s));
   /**
    * Out of credit and no budget, so no plan to fall back to: nothing of this vendor starts here, except models
    * above the ceiling, which never use the key.
@@ -799,6 +901,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   }
 
   async function workerOptions(a, { restart = false, newClone = !restart, unpark = null } = {}) {
+    const preamble = unpark ? (unpark.paused ? UNPAUSE_PREAMBLE : UNPARK_PREAMBLE) : RESTART_PREAMBLE;
     const cfg = models();
     const entry = findModel(cfg, a.vendor, a.model);
     // Inside the clone (auto modes don't read outside the workspace), excluded from git.
@@ -816,13 +919,13 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     // because the clone is a different mount from the worker's home.
     const exclude = `printf '%s\\n' ${CLONE_EXCLUDES.join(' ')} >> "$1/.git/info/exclude"`;
     await host.run(a.slot, ['sh', '-c', `mkdir -p "$(dirname "$0")" && cat > "$0"${newClone ? ` && ${exclude}` : ''}`, briefPath, a.dir],
-      { input: restart ? `${unpark ? UNPARK_PREAMBLE : RESTART_PREAMBLE}\n\n${brief}` : brief });
-    const prompt = restart ? `${unpark ? UNPARK_PREAMBLE : RESTART_PREAMBLE}\n${START_PROMPT}` : START_PROMPT;
+      { input: restart ? `${preamble}\n\n${brief}` : brief });
+    const prompt = restart ? `${preamble}\n${START_PROMPT}` : START_PROMPT;
     const argv = launchArgv(cfg, a.vendor, entry, prompt, a.effort);
     const args = argv.filter(arg => arg !== prompt);
     let resumeArgv;
     if (restart && a.session_id) {
-      const again = unpark?.mail ? UNPARK_PROMPT : RESUME_PROMPT;
+      const again = unpark?.paused ? UNPAUSE_PREAMBLE : unpark?.mail ? UNPARK_PROMPT : RESUME_PROMPT;
       if (a.vendor === 'claude') resumeArgv = [...args, '--resume', a.session_id, again];
       if (a.vendor === 'codex') resumeArgv = [args[0], 'resume', ...args.slice(1), a.session_id, again];
     }
@@ -841,19 +944,25 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   async function cleanup(a, state, options) {
     cancelAgentTests(a.id, state, options);
     if (a.slot) {
-      await host.stopWorker(a.slot, a.id, { paused: a.state === 'paused' });
+      await host.stopWorker(a.slot, a.id, { paused: a.state === 'paused' && !isHeld(a) });
       await host.run(a.slot, ['rm', '-rf', a.dir]).catch(() => {});
     }
     await Promise.resolve(host.dropSession?.(a.id)).catch(e => log(`drop session ${a.id}: ${e.message}`));
     kvDel(db, `screen:${a.id}`);
     kvDel(db, `held-gate:${a.id}`);
     kvDel(db, `held-land:${a.id}`);
-    update(a.id, { state, idle: 0, paused_state: null });
+    update(a.id, { state, idle: 0, paused_state: null, parked: 0 });
     setStatus(a.id, `${state}: ${a.title}`.slice(0, STATUS_MAX));
     await startQueued(a.delegator);
   }
 
   // ---------- parking (PRD "Parking") ----------
+  /** The worker's screen with its scrollback (so the parked view shows more than the last page), or null. */
+  async function grabScreen(a) {
+    const read = (fn) => Promise.resolve().then(() => host[fn]?.(a.slot, a.id)).catch(() => null);
+    const [hist, visible] = await Promise.all([read('tmuxHistory'), read('tmuxScreen')]);
+    return typeof visible !== 'string' ? null : `${hist ? `${hist.replace(/\n*$/, '')}\n` : ''}${visible}`;
+  }
   /**
    * A reported (`done`), idle worker gives up its container: last screen and vendor session saved, container removed,
    * slot freed, the next queued agent started. Left alone if it is reworked or merged while this runs.
@@ -865,9 +974,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     changing.add(id);
     try {
       update(id, { idle: 0 }); // wake() types only into idle TUIs: mail arriving now waits for the unpark
-      // With its scrollback, so the parked Screen view shows more than the last page.
-      const [hist, visible] = await Promise.all([Promise.resolve(host.tmuxHistory?.(a.slot, a.id)).catch(() => null), Promise.resolve(host.tmuxScreen?.(a.slot, a.id)).catch(() => null)]);
-      const screen = visible == null ? null : `${hist ? `${hist.replace(/\n*$/, '')}\n` : ''}${visible}`;
+      const screen = await grabScreen(a);
       let saved = [];
       if (a.session_id) saved = await Promise.resolve(host.saveSession?.({ slot: a.slot, vendor: a.vendor, id: a.id, sessionId: a.session_id })).catch(e => { log(`park ${id}: saving the session failed: ${e.message}`); return []; }) || [];
       if (agentRow(id).state !== 'done') { // reworked meanwhile: it keeps its container
@@ -875,7 +982,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
         await wake(id).catch(e => log(`wake ${id}: ${e.message}`));
         return false;
       }
-      if (typeof screen === 'string' && screen) kvSet(db, `screen:${id}`, screen);
+      if (screen) kvSet(db, `screen:${id}`, screen);
       await host.stopWorker(a.slot, a.id);
       const cur = agentRow(id);
       if (ENDED.includes(cur.state)) { await Promise.resolve(host.dropSession?.(id)).catch(() => {}); kvDel(db, `screen:${id}`); return false; }
@@ -907,12 +1014,14 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
       newClone = true;
     }
     const restored = a.session_id ? await Promise.resolve(host.restoreSession?.({ slot: a.slot, vendor: a.vendor, id: a.id, billing: a.billing })).catch(e => { log(`unpark ${a.id}: restoring the session failed: ${e.message}`); return []; }) || [] : [];
-    const options = await workerOptions(a, { restart: true, newClone, unpark: { mail: Boolean(mail.unread(db, a.id)) } });
+    const options = await workerOptions(a, { restart: true, newClone, unpark: { mail: Boolean(mail.unread(db, a.id)), paused: Boolean(a.parked) } });
     if (!restored.length) options.resumeArgv = undefined; // nothing to resume: a fresh launch with the parked preamble
     await host.startWorker(options);
     const why = agentRow(a.id).unpark || 'needed again';
-    update(a.id, { state: 'working', unpark: null, base: a.base, idle: 0, usage_start: a.usage_start ?? JSON.stringify(windowSnapshot(db, a.vendor)) });
-    setStatus(a.id, `working: ${a.title}`.slice(0, STATUS_MAX));
+    // One paused while it waited for your answer still does.
+    const state = a.parked && db.prepare('SELECT 1 FROM asks WHERE agent = ? AND answered_at IS NULL').get(a.id) ? 'blocked' : 'working';
+    update(a.id, { state, unpark: null, parked: 0, base: a.base, idle: 0, usage_start: a.usage_start ?? JSON.stringify(windowSnapshot(db, a.vendor)) });
+    setStatus(a.id, `${state}: ${a.title}`.slice(0, STATUS_MAX));
     emit(a.delegator, a.id, 'unparked', `${a.id} unparked on ${a.slot} (${options.resumeArgv ? 'session resumed' : 'fresh launch: no saved session'}): ${why}`);
   }
 
@@ -1756,7 +1865,13 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     pump().catch(e => log(`test pump: ${e.message}`));
   }
 
-  const pause = ({ agent }) => lifecycle(agent, async a => {
+  /** Pausing only freezes; a queued agent already waiting for the slot then has it parked (`giveWay`). */
+  async function pause(args) {
+    const r = await freeze(args);
+    await startAll();
+    return r;
+  }
+  const freeze = ({ agent }) => lifecycle(agent, async a => {
     if (a.state === 'paused') return { paused: a.id };
     if (a.state === 'queued') { // not started: startQueued skips it until unpaused
       update(a.id, { state: 'paused', paused_state: 'queued' });
@@ -1769,7 +1884,13 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
       return { paused: a.id };
     }
     if (!a.slot || !PAUSABLE.includes(a.state)) throw new Error(`${a.id} is ${a.state}; no worker to pause`);
-    update(a.id, { state: 'paused', paused_state: a.state });
+    // A frozen container can't be read: the screen is saved now, in case it is parked.
+    const screen = await grabScreen(a);
+    if (screen) kvSet(db, `screen:${a.id}`, screen);
+    const cur = agentRow(a.id); // it may have moved on while the screen was read
+    if (!PAUSABLE.includes(cur.state)) throw new Error(`${a.id} is ${cur.state}; no worker to pause`);
+    a = cur;
+    update(a.id, { state: 'paused', paused_state: a.state, paused_at: now() });
     try { await host.pauseWorker(a.slot, a.id); }
     catch (e) {
       update(a.id, { state: a.state, paused_state: null });
@@ -1786,6 +1907,13 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
       update(a.id, { state: 'queued', paused_state: null });
       await releaseHeldWork(a.id);
       emit(a.delegator, a.id, 'resumed', `${a.id} resumed (queued)`);
+      await startQueued(a.delegator);
+      return { resumed: a.id };
+    }
+    if (a.parked) { // parked to give way: back to the front of the queue, to resume where it was
+      unpark(a, 'unpaused');
+      emit(a.delegator, a.id, 'resumed', `${a.id} resumed (queued to unpark)`);
+      await releaseHeldWork(a.id);
       await startQueued(a.delegator);
       return { resumed: a.id };
     }
@@ -1808,7 +1936,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   });
 
   const restart = ({ agent }) => lifecycle(agent, async a => {
-    if (a.state === 'parked' || (a.state === 'paused' && (['parked', 'unpark'].includes(a.paused_state) || (a.paused_state === 'queued' && a.unpark)))) {
+    if (a.state === 'parked' || (isHeld(a) && (a.paused_state !== 'queued' || a.unpark))) {
       // No container: unpark it (front of the queue, any free slot); its saved session resumes.
       unpark(a, 'restart');
       await startQueued(a.delegator);
@@ -2097,7 +2225,10 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
       const cols = Object.keys(fields).filter(k => MIRROR_FIELDS.includes(k));
       if (cols.length) db.prepare(`UPDATE agents SET ${cols.map(k => `${k} = ?`).join(', ')}, updated_at = ? WHERE id = ?`).run(...cols.map(k => fields[k] ?? null), now(), a.id);
       if (typeof status === 'string' && status) mail.setStatus(db, a.id, status.slice(0, STATUS_MAX));
-      if ('state' in fields && (!ACTIVE.includes(fields.state) || fields.paused_state === 'queued')) placeSoon(); // a place freed up
+      const cur = agentRow(a.id);
+      if (cur.state !== 'paused' || isHeld(cur)) yielding.delete(a.id);
+      // A place freed up, or a paused worker now holds one a queued agent may need.
+      if (('state' in fields && (!ACTIVE.includes(fields.state) || fields.state === 'paused')) || fields.parked || ['queued', 'parked', 'unpark'].includes(fields.paused_state)) placeSoon();
       bus.emit('agents');
       return;
     }
@@ -2138,6 +2269,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
 
   /** On the hub: a command's answer. A spawn the satellite refused fails the agent here. */
   function commandDone(name, c, r) {
+    if (c.type === 'park' && !(r?.ok && r.result?.parked)) yielding.delete(c.agent);
     if (c.type !== 'spawn' || r?.ok) return;
     const a = agentRow(c.agent?.id);
     if (!a || a.host !== name || a.state !== 'spawning') return;
@@ -2153,6 +2285,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
       case 'spawn': return accept(c);
       case 'kill': return kill({ agent });
       case 'pause': return pause({ agent });
+      case 'park': return { parked: await lifecycle(agent, a => parkPaused(a.id, c.for)).then(async (done) => { await startAll(); return done; }) };
       case 'resume': return unpause({ agent });
       case 'restart': return restart({ agent });
       case 'merge': return merge({ agent });
@@ -2204,7 +2337,8 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     },
     'attach': ({ agent }) => {
       const a = mustAgent(agent);
-      if (a.state === 'parked' || (a.state === 'queued' && a.unpark) || (a.state === 'paused' && (['parked', 'unpark'].includes(a.paused_state) || a.unpark && a.paused_state === 'queued'))) {
+      if (isHeld(a) && a.parked) throw new Error(`${a.id} is paused and parked: its container was removed to free its slot. \`hauptling unpause ${a.id}\` brings it back with its session.`);
+      if (a.state === 'parked' || (a.state === 'queued' && a.unpark) || (isHeld(a) && (a.paused_state !== 'queued' || a.unpark))) {
         throw new Error(`${a.id} is parked: its container was removed after it reported, to free its slot. \`hauptling restart ${a.id}\` brings it back with its session; mail to it does too.`);
       }
       if (a.host !== 'hub') {
@@ -2289,5 +2423,5 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   hub?.bind({ receive, onState: placeSoon, onResult: commandDone });
   if (satellite) syncTests();
 
-  return { call, authenticate, emit, keyOut, ceiling, command, startAll, syncTests, freeSlots, headroomNote, spend, testProgress, poll, watch, watchTests, startQueued, bus, askForPage, answer, pump, recover, gpuReady, refreshUsage, refreshAllUsage, lastRefresh, holdSignin, recordUsage, budgetState, billingFor };
+  return { call, authenticate, emit, keyOut, ceiling, command, startAll, syncTests, freeSlots, headroomNote, blockerNote, spend, testProgress, poll, watch, watchTests, startQueued, bus, askForPage, answer, pump, recover, gpuReady, refreshUsage, refreshAllUsage, lastRefresh, holdSignin, recordUsage, budgetState, billingFor };
 }

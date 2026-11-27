@@ -3,7 +3,7 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join, normalize } from 'node:path';
 import { cpus, freemem, hostname, totalmem } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { kvGet, kvSet, QUEUE_ORDER, IN_QUEUE } from './db.mjs';
+import { kvGet, kvSet, QUEUE_ORDER, IN_QUEUE, HELD, isHeld } from './db.mjs';
 import { readOnlyQuery } from './dbquery.mjs';
 import { createTerminals, HISTORY_MAX, SCREEN_MAX } from './terminal.mjs';
 import { token as newToken } from './util.mjs';
@@ -58,10 +58,14 @@ export function headline(a) {
   if (a.host_state === 'offline') return `Host offline: ${a.host}`;
   if (a.state === 'parked') return `${headline({ ...a, state: 'done' })} (parked)`;
   switch (a.state) {
-    case 'paused': return 'Paused by you';
+    case 'paused': return isHeld(a) && a.paused_state !== 'queued' ? 'Paused by you (parked, slot freed)' : 'Paused by you';
     case 'restarting': return 'Restarting its session';
     case 'blocked': return a.ask ? `Needs your answer: ${a.ask.question}` : `Stuck${why ? `: ${why}` : ''}; attach or message it`;
-    case 'queued': return a.headroom ? cap(a.headroom) : a.unpark ? `Unparking (${a.unpark}): waiting for a free ${a.vendor} slot` : 'Queued: waiting for a free worker slot';
+    case 'queued': {
+      if (a.headroom) return cap(a.headroom);
+      if (a.unpark) return `Unparking (${a.unpark}): ${a.blocker || `waiting for a free ${a.vendor} slot`}`;
+      return `Queued: ${a.blocker || 'waiting for a free worker slot'}`;
+    }
     case 'waiting': return `Waiting for its spec tests${a.depends_on ? ` from ${a.depends_on}` : ''}`;
     case 'spawning': return 'Starting its container';
     case 'working':
@@ -247,6 +251,7 @@ export function createDashboard({ db, dbPath, core, host, hub = null, updater = 
         usage: a.usage ? JSON.parse(a.usage) : null,
         spend: a.usage_start != null && core.spend ? core.spend(a) : null,
         headroom: core.headroomNote?.(a) ?? null,
+        blocker: core.blockerNote?.(a) ?? null,
         status: db.prepare('SELECT text FROM status WHERE identity = ?').get(a.id)?.text || null,
         test: t ? { id: t.id, state: t.state, gpu: Boolean(t.gpu), purpose: t.purpose, status: r?.status || null, passed: r?.passed ?? null, failed: r?.failed ?? null, at: t.done_at || t.created_at,
           position: t.state === 'queued' ? ((t.gpu ? gpuLine : tq.line).indexOf(t.id) + 1 || null) : null, retry: retryLabel(t),
@@ -399,7 +404,7 @@ export function createDashboard({ db, dbPath, core, host, hub = null, updater = 
     const keyOf = new Map(all.filter(l => l.key).map(l => [l.vendor, l.key]));
     const rows = db.prepare('SELECT * FROM slot_usage ORDER BY at DESC').all();
     // A slot runs one worker per vendor: key by both, or a codex worker would hide the claude one on the same slot.
-    const busy = new Map(db.prepare("SELECT slot, id, vendor FROM agents WHERE slot IS NOT NULL AND host = 'hub' AND state IN ('spawning','restarting','paused','working','blocked','done')").all().map(r => [`${r.slot}:${r.vendor}`, r.id]));
+    const busy = new Map(db.prepare(`SELECT slot, id, vendor FROM agents WHERE slot IS NOT NULL AND host = 'hub' AND state IN ('spawning','restarting','paused','working','blocked','done') AND NOT ${HELD}`).all().map(r => [`${r.slot}:${r.vendor}`, r.id]));
     // One account per vendor (signed in on every slot, or one API key): the newest reading of each window, from any slot.
     const vendors = VENDOR_LIST.map(vendor => {
       const latest = new Map();
@@ -434,7 +439,7 @@ export function createDashboard({ db, dbPath, core, host, hub = null, updater = 
 
   /** The Hosts panel: each satellite's link state, sign-ins, free slots, GPU and live workers against its cap. */
   function hostsPanel(sats) {
-    const live = db.prepare(`SELECT COUNT(*) n FROM agents WHERE host = ? AND slot IS NOT NULL AND state IN (${WORKER_LIVE.map(() => '?').join(',')})`);
+    const live = db.prepare(`SELECT COUNT(*) n FROM agents WHERE host = ? AND slot IS NOT NULL AND state IN (${WORKER_LIVE.map(() => '?').join(',')}) AND NOT ${HELD}`);
     return sats.map(h => {
       const c = h.capabilities || {};
       return {

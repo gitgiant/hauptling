@@ -868,3 +868,19 @@ test('the satellite answers rpcs only for its own agents, never login sessions',
   await assert.rejects(sat.dash.remote('term.keys', { agent: 'nobody', keys: [] }), /No agent/);
   await assert.rejects(sat.dash.remote('exec', { agent: id }), /Unknown rpc/);
 });
+
+test('a paused satellite worker gives way: the hub asks its satellite to park it and then places the queued agent', async (t) => {
+  const { hub, sat, d, spawn, hubRow, satRow, events } = await twoHosts(t);
+  hub.db.prepare('UPDATE delegators SET max_agents = 1 WHERE id = ?').run(d);
+  const { id } = await spawn();
+  await hub.api('pause', { agent: id });
+  await waitFor(() => hubRow(id).state === 'paused', 'paused, mirrored');
+  assert.equal(hubRow(id).parked, 0, 'nobody waits: only frozen');
+  const next = await spawn(); // waits until it works on sat1
+  assert.equal(satRow(id).parked, 1);
+  await waitFor(() => hubRow(id).parked === 1, 'parked, mirrored on the hub');
+  assert.ok(sat.host.calls.some(c => c[0] === 'stop' && c[1] === id));
+  await waitFor(async () => (await events()).some(e => e.kind === 'parked' && e.text.includes(`slot needed by ${next.id}`)), '[parked] on the hub');
+  await hub.api('unpause', { agent: id });
+  await waitFor(() => hubRow(id).state === 'working' && !hubRow(id).parked, 'resumed on sat1');
+});

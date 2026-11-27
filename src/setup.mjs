@@ -7,6 +7,7 @@ import { createInterface } from 'node:readline/promises';
 import { BROKER_PORT, VENDORS, home } from './util.mjs';
 import { call, ensureBroker } from './client.mjs';
 import { readBrokerFile } from './brokerfile.mjs';
+import { isHeld } from './db.mjs';
 import { platform } from './platform/index.mjs';
 import { getBudget, getUpTo, keyHints } from './keys.mjs';
 import { loadModels, tierName } from './models.mjs';
@@ -225,7 +226,7 @@ export async function login(slot, vendor, { force = false } = {}) {
   if (!/^hl-w\d+$/.test(slot || '') || !LOGIN[vendor]) throw new Error('login <hl-wN> <claude|codex|agy>');
   // Refresh tokens rotate: signing in while a worker of this vendor runs on the slot can sign that worker out.
   const busy = force ? null : (await call('agents', { all: true }).catch(() => []))
-    .find(a => a.slot === slot && a.vendor === vendor && ['spawning', 'restarting', 'paused', 'working', 'blocked', 'done'].includes(a.state));
+    .find(a => a.slot === slot && a.vendor === vendor && ['spawning', 'restarting', 'paused', 'working', 'blocked', 'done'].includes(a.state) && !isHeld(a));
   if (busy) throw new Error(`${busy.id} is running on ${slot} with this ${vendor} sign-in; signing in again now could sign it out mid-task. Wait until it ends (or kill it), or pass --force.`);
   const held = await call('signin.begin', { slot, vendor }).then(() => true, (e) => {
     if (/Unknown call|Broker/.test(e.message)) return false; // an older or stopped broker: nothing refreshes then
