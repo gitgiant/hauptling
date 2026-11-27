@@ -1,6 +1,5 @@
 # Handoff — 2026-11-27
 ## Needs a real run to confirm
-
 - Update button (PRD "Update from the dashboard"): temp-repo git with build/restart stubbed. Going live needs a manual `git pull --ff-only`, `hauptling image`, `hauptling broker restart` once (satellites too). Then check on the next merge: real detached restart, image build from the broker, the ⋯ dot, menu and self-reload (unseen in a browser).
 - Queue pause and reorder (PRD "Queue priority", 2026-11-27): unit-tested with a fake host only. Needs `hauptling broker restart` (hub and satellites; no image). Drag and drop (mouse and touch), the drop line and Alt+↑/↓/Home are unseen in a browser (`node scripts/dash-preview.mjs` shows the queued card; moves need a real broker).
 - Paused workers give way (PRD, 2026-11-27): fake hosts and two in-process brokers only. Needs `hauptling broker restart` (hub and satellites; no image). Unchecked on real Docker/TUIs: removing a frozen container, resuming a session saved mid-turn (`--resume` / `codex resume`), and the paused-parked card and saved screen in a browser. A satellite-parked agent resumes there without waiting for the delegator's `max_agents` (as any satellite unpark).
@@ -25,7 +24,6 @@
 - Several hosts parts 1–2 (PRD "Several hosts", "Part 2"): link, placement, commands and the hub mirror are tested with two brokers in one process (Docker and `gh` stubbed) only. Needs `hauptling image` (the CLI gained `--host`/`--gpu`) and `hauptling broker restart`, then a real join from a second host through the `tailscale serve` URL: SSE through the proxy, a real spawn → PR → merge on the satellite with its own `gh`, and a satellite stall notification reaching this machine. Several hosts part 3 (PRD "Part 3"): host chips, offline/lost headlines, Hosts panel (Add host, Revoke), terminal/diff/events relayed over the link, `hauptling attach` relay, per-host usage chips. Tested with two in-process brokers only; the browser UI is unseen (no headless browser in the worker: `node scripts/dash-preview.mjs --hosts --shots DIR --only usage-1366x768`). Needs `hauptling broker restart` on the hub and every satellite; check that "Add host" through `tailscale serve` shows the https URL (`X-Forwarded-Host`/`Host`), and that the relayed terminal feels responsive (250 ms polls).
 - Parking (PRD "Parking", branch `hl/claude_opus-5-5_985e5`): stubbed tests only. Needs `hauptling broker restart`. Unchecked on real TUIs: that a Claude/Codex session copied into another slot resumes (`--resume` / `codex resume`), that mail arrives via SessionStart/first prompt after resume, the 3 s park delay vs. the TUI's last transcript write, and the saved screen in the Terminal tab.
 - Web terminal size (PRD "Web terminal size"): unit-tested, tmux commands checked on a local tmux 3.4; dashboard measuring unseen in a browser. Needs `hauptling broker restart` (hub and satellites; no image). Check a narrow pane with real Claude/Codex/agy TUIs, and whether narrow screens upset the stall watcher's screen matches.
-
 ## Open
 - Placement's `startable` only knows the hub's own accounts; satellites' usage readings are shown on the Usage page but not used for placement.
 - nullpunkt: commit `b9a0f6e8` (drops the coagent mailbox for `hauptling mail`) sits in `nullpunkt/.worktrees/claude_opus-5-5_d72c0`, unpushed. Before `node scripts/worktree.mjs sync claude_opus-5-5_d72c0`, discard the main checkout's local edits to `.mcp.json` and `.codex/hooks.json` (the commit replaces both). Sync restarts the user's game.
@@ -34,7 +32,6 @@
 - agy's own sign-in token rotation is unconfirmed (PRD "Open").
 - macOS / Ubuntu install untested; only WSL so far.
 - Merged branches to delete: `phase-1`, `phase-3`, `phase-4`, `phase-4b`, `signin-guard`, `api-keys`, `handoff-rule`, `usage-per-vendor`, `egress-race`, `cli-fixes`.
-
 ## This machine now
 - Slots `hl-w1..3` signed in to claude, codex and agy; no API keys set.
 - Host has `codegraph` (npm, telemetry on unless `CODEGRAPH_TELEMETRY=0`), `uv` and `graphify` (`~/.local/bin`); this repo is indexed (`.codegraph-wsl/`, git hooks resync it).
