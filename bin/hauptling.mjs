@@ -45,6 +45,8 @@ Setup:
                                            everything: skill, Docker, worker image, egress proxy, broker, sign-ins, doctor
   doctor                                   check tools, Docker, image, egress, broker and sign-ins
   image                                    build the worker image if hauptling changed
+  update [--check]                         update this checkout to origin/main, rebuild the image if needed, restart
+                                           the broker (--check: only report)
   key set VENDOR | key rm VENDOR | key list   API key instead of slot sign-ins (one key for all slots; billed per token)
   key budget VENDOR USD|off [--resets-on DAY] API first up to USD a month (new API spawns stop at 90%), then slot sign-ins
   key up-to VENDOR TIER|MODEL|off          the key pays only for models up to this tier (also --up-to on set/budget); above it: plan
@@ -62,7 +64,7 @@ const [cmd, ...rest] = process.argv.slice(2);
 
 async function main() {
   const { call } = await import('../src/client.mjs');
-  const args = parseArgs(rest, { repeat: ['choice', 'artifacts'], bool: ['test-writer', 'allow-tier', 'until-event', 'host', 'all', 'gpu', 'force', 'no-host', 'no-login', 'now', 'print', 'new-token', 'no-gate', 'no-automerge', 'once', 'top', 'bottom'] });
+  const args = parseArgs(rest, { repeat: ['choice', 'artifacts'], bool: ['test-writer', 'allow-tier', 'until-event', 'host', 'all', 'gpu', 'force', 'no-host', 'no-login', 'now', 'print', 'new-token', 'no-gate', 'no-automerge', 'once', 'top', 'bottom', 'check'] });
   const text = () => args._.join(' ');
   /** The agent id to use for what was typed; says so when it is the old id of a renamed agent. */
   const target = async (agent) => {
@@ -320,6 +322,27 @@ async function main() {
     case 'image': {
       const { ensureBaseImage } = await import('../src/docker.mjs');
       return out(await ensureBaseImage({ log: out, stdio: ['ignore', 'inherit', 'inherit'] }));
+    }
+    case 'update': {
+      if (process.env.HAUPTLING_AGENT) throw new Error('update runs on the host, not in a worker');
+      const { createUpdater, runCli } = await import('../src/update.mjs');
+      const { appendFileSync, mkdirSync } = await import('node:fs');
+      const show = { stdio: 'inherit' };
+      const updater = createUpdater({
+        log: (m) => { mkdirSync(home(), { recursive: true }); appendFileSync(join(home(), 'broker.log'), `${new Date().toISOString()} ${m}\n`); },
+        announce: (from, to) => call('update.announce', { from, to }),
+        build: () => runCli(['image'], show),
+        restart: () => runCli(['broker', 'restart'], show),
+      });
+      if (args.check) return out(await updater.check());
+      const { run, ...r } = await updater.start();
+      if (!run) return out(`Up to date (${r.current})`);
+      out(`${r.from} → ${r.to}\n${r.commits.map(c => `  ${c}`).join('\n')}`);
+      updater.onChange((s) => { if (!s.error) out(`${s.phase}…`); });
+      await run();
+      const end = updater.status();
+      if (end.error) throw new Error(end.error);
+      return out(`Updated to ${r.to}`);
     }
     case 'init': {
       const { detect } = await import('../src/detect.mjs');

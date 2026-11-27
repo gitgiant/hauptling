@@ -148,10 +148,13 @@ function agyBinary() {
   } catch { return null; }
 }
 
+/** The checkout's paths the golden image is built from (`hauptling update` rebuilds it when one changed). */
+export const IMAGE_INPUTS = ['bin', 'src', 'skills', 'docker', 'models.json', 'package.json'];
+
 /** Golden image tag: hash of hauptling's own files, the Dockerfile and the agy binary. */
 export function baseImageTag() {
   const h = createHash('sha256');
-  for (const f of ['bin', 'src', 'skills', 'docker', 'models.json', 'package.json'].flatMap(p => (statSync(join(ROOT, p)).isDirectory() ? walk(join(ROOT, p)) : [join(ROOT, p)]))) {
+  for (const f of IMAGE_INPUTS.flatMap(p => (statSync(join(ROOT, p)).isDirectory() ? walk(join(ROOT, p)) : [join(ROOT, p)]))) {
     h.update(f.slice(ROOT.length)); h.update(readFileSync(f));
   }
   const agy = agyBinary();

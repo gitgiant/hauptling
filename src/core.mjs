@@ -2244,6 +2244,12 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     'gpu.pause': gpuPause, 'gpu.resume': gpuResume, 'gpu.status': gpuStatus,
     'models.prefer': ({ value }) => (value ? savePrefer(value) : preferOf(models())),
     'slots.get': () => slots(),
+    // `src/update.mjs`, just before it restarts the broker (the events are stored, so they outlive it).
+    'update.announce': ({ from, to }) => {
+      const active = db.prepare('SELECT id FROM delegators WHERE active = 1').all();
+      for (const d of active) emit(d.id, null, 'updated', `${from} → ${to}`);
+      return { delegators: active.length };
+    },
     'slots.set': ({ slots: s }) => { kvSet(db, 'slots', JSON.stringify(s)); return s; },
     'hub.token': () => mustHub().issueToken(),
     'satellite.list': () => mustHub().list(),
