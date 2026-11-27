@@ -6,6 +6,7 @@ import { keyFor, TOUCH_KEYS } from './termkeys.js';
 import { testProgress } from './progress.js';
 import { updateView, afterHello } from './update.js';
 import { movable, canDrop, dropSide, keyMove } from './queue.js';
+import { starting, spinner, wheel, startFailure, tickWheels } from './wheel.js';
 import { STACKED_QUERY, HANDLE_PX, DRAG_IGNORE, STRIP_PX, clampRatio, defaultRatio, splitKey, keyRatio, dragSplit, keySplit, readSplit, writeSplit, hiddenAfter, collapseAfterDrag, HEADER_STEPS, stepClasses, pickStep, handleKey } from './layout.js';
 // Text from the store is always set with textContent (h() below), never parsed as HTML.
 
@@ -392,7 +393,12 @@ function render() {
     if (a) {
       const detail = $('#detail');
       renderDetailHead(a, detail);
-      if (state.sub === 'terminal' && TERMINAL_STATES.includes(a.state) && (!state.term || state.term.ended)) renderSub(detail, a);
+      if (state.sub === 'terminal') {
+        // A starting agent shows the wheel where the terminal will be; swap it when the step changes or the start ends.
+        const waiting = detail.querySelector('.body > .wheel');
+        if (starting(a)) { if (waiting) waiting.replaceWith(wheel(h, a, { centred: true })); else renderSub(detail, a); }
+        else if (waiting || (TERMINAL_STATES.includes(a.state) && (!state.term || state.term.ended))) renderSub(detail, a);
+      }
     }
   }
 }
@@ -533,6 +539,7 @@ function card(a) {
     h('span', { class: 'title', title: a.headline || a.title, text: a.headline || a.title }),
     h('span', { class: 'elapsed', title: `started ${clock(a.created_at)}`, text: ago(a.created_at) }),
     a.headline ? h('div', { class: 'prompt', title: `Prompt: ${a.title}`, text: a.title }) : null,
+    wheel(h, a), startFailure(h, a),
     h('div', { class: 'meta' }, movable(a) ? queueBadge(a, () => el) : null, meta),
   );
   if (movable(a)) dragSource(el, a);
@@ -706,7 +713,7 @@ function renderBoard(b) {
       idle
         ? (shut ? null : h('p', { class: 'empty', text: `No agents running · started ${ago(delegator.created_at)} ago${delegator.handoff_waiting ? ' · handoff waiting' : ''}` }))
         : shut
-          ? h('div', { class: 'dots' }, list.map(a => h('button', { type: 'button', class: `dotbtn${state.selected === a.id ? ' selected' : ''}`, title: `${a.id} · ${a.host_state ? `host ${a.host_state}` : a.state}`, 'aria-label': `${a.id}, ${a.host_state ? `host ${a.host_state}` : a.state}`, onclick: () => select(a.id) }, h('span', { class: `dot ${dotState(a)}` }))))
+          ? h('div', { class: 'dots' }, list.map(a => h('button', { type: 'button', class: `dotbtn${state.selected === a.id ? ' selected' : ''}`, title: `${a.id} · ${a.host_state ? `host ${a.host_state}` : a.state}`, 'aria-label': `${a.id}, ${a.host_state ? `host ${a.host_state}` : a.state}`, onclick: () => select(a.id) }, starting(a) ? spinner(h) : h('span', { class: `dot ${dotState(a)}` }))))
           : h('div', { class: 'cards' }, list.map(card))));
   }
   if (recent.length) {
@@ -732,7 +739,7 @@ function miniButton(a) {
   const label = `${a.headline || a.title} · ${status}`, on = state.selected === a.id;
   return h('button', { type: 'button', class: `minibtn ${dotState(a)}${on ? ' selected' : ''}`, 'data-id': a.id, title: label, 'aria-label': `${v.label}: ${label}`, 'aria-current': on ? 'true' : null, onclick: () => select(a.id) },
     h('span', { class: `vbadge v-${v.key}`, 'aria-hidden': 'true', text: v.glyph }),
-    h('span', { class: `dot ${dotState(a)}`, 'aria-hidden': 'true' }));
+    starting(a) ? spinner(h) : h('span', { class: `dot ${dotState(a)}`, 'aria-hidden': 'true' }));
 }
 /** @param {object[][]} lists  agents per group, in board order */
 function miniBoard(lists) {
@@ -791,6 +798,7 @@ function renderDetailHead(a, el) {
   put(head, 
     h('h2', { text: a.headline || a.title }),
     a.headline ? h('p', { class: 'prompt', title: 'Prompt (spawn title)', text: a.title }) : null,
+    wheel(h, a), startFailure(h, a),
     h('div', { class: 'meta' },
       h('span', { class: 'aid' }, vbadge(a.vendor), h('span', { class: 'mono', text: a.id })), hostChip(a), h('span', { text: a.host_state ? `host ${a.host_state}` : a.state }), h('span', { text: `${a.vendor} · ${a.model}${a.billing ? ` · ${a.billing === 'api' ? 'API' : 'plan'}` : ''}` }),
       h('span', { class: 'mono', text: `${a.branch} → ${a.base}` }), h('span', { class: 'mono', text: a.repo }),
@@ -833,9 +841,10 @@ function renderSub(el, a) {
   if (state.sub === 'terminal') {
     // Same live states as the server's terminal (src/terminal.mjs); otherwise the stream would retry forever.
     const pausedParked = a.state === 'paused' && (a.parked || ['parked', 'unpark'].includes(a.paused_state));
-    if (a.slot && TERMINAL_STATES.includes(a.state) && !pausedParked && a.paused_state !== 'queued') state.term = openTerminal(body, a.id);
+    if (starting(a)) put(body, wheel(h, a, { centred: true }));
+    else if (a.slot && TERMINAL_STATES.includes(a.state) && !pausedParked && a.paused_state !== 'queued') state.term = openTerminal(body, a.id);
     else if (a.state === 'parked' || pausedParked) loadParkedScreen(a, body);
-    else put(body, h('p', { class: 'empty', text: `No live session (${a.state})` }));
+    else put(body, startFailure(h, a), h('p', { class: 'empty', text: `No live session (${a.state})` }));
   }
 }
 
@@ -1268,6 +1277,7 @@ $('#db-query textarea').addEventListener('keydown', (e) => { if (e.key === 'Ente
 // ---------- start ----------
 renderUpdate();
 setInterval(() => { if (state.board && state.view === 'board') renderBoard(state.board); }, 30e3); // elapsed times
+setInterval(() => tickWheels(document), 1000); // seconds in a start step
 const hash = location.hash.slice(1);
 connect();
 loadUsage();

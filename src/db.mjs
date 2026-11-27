@@ -91,6 +91,10 @@ export function openDb(path) {
   for (const col of ["role TEXT NOT NULL DEFAULT 'impl'", 'depends_on TEXT', 'start_from TEXT', 'usage TEXT', 'billing TEXT', 'usage_start TEXT', 'effort TEXT', 'paused_state TEXT', 'unpark TEXT', 'auto TEXT', 'parked INTEGER NOT NULL DEFAULT 0', 'paused_at TEXT']) {
     try { db.exec(`ALTER TABLE agents ADD COLUMN ${col}`); } catch {}
   }
+  // Start progress (PRD "Start progress"): the step a starting agent is at, since when, and why a start failed there.
+  for (const col of ['step TEXT', 'step_at TEXT', 'step_error TEXT']) {
+    try { db.exec(`ALTER TABLE agents ADD COLUMN ${col}`); } catch {}
+  }
   try { db.exec('ALTER TABLE asks ADD COLUMN nonce TEXT'); } catch {}
   // Test watchdog: attempt counts reruns after a lost runner; retry_note says why ("retrying (2/3): …").
   for (const col of ['attempt INTEGER NOT NULL DEFAULT 1', 'retry_note TEXT']) {
