@@ -46,7 +46,7 @@ const delegators = [
   { id: 'd_f1c20a', repo: 'example/docs', cli: 'codex', created_at: ago(120), handoff_waiting: true },
 ];
 const board = { agents, delegators, blocked: 1, gpu: { available: true, paused: false, freeMB: 6210, running: [{ id: 'g12', agent: agents[0].id }], queued: [{ id: 'g13', waiting_since: ago(1) }] } };
-const host = { cpu: 37, mem: 61, gpu: 88, every_s: 5, hist: { cpu: wave(120, i => 30 + 20 * Math.sin(i / 9)), mem: wave(120, i => 55 + i / 20), gpu: wave(120, i => (i % 40 < 25 ? 90 : 5)) } };
+const host = { name: 'preview-host-with-a-long-name', cpu: 37, mem: 61, gpu: 88, every_s: 5, hist: { cpu: wave(120, i => 30 + 20 * Math.sin(i / 9)), mem: wave(120, i => 55 + i / 20), gpu: wave(120, i => (i % 40 < 25 ? 90 : 5)) } };
 const vendor = (v, l5, lw, extra = {}) => ({ vendor: v, key: null, limits: [{ window: '5h', used_pct: l5, resets_at: ago(-90) }, { window: '7d', used_pct: lw, resets_at: ago(-3000) }],
   slots: ['hl-w1', 'hl-w2', 'hl-w3'].map((s, i) => ({ slot: s, signed_in: i < 3, busy: i === 0 ? agents[0].id : null, login: `${v} login` })), ...extra });
 const row = (key, n) => ({ key, agents: n, cost_usd: n * 2.37, unknown: 0, estimated: 0, tokens_in: n * 310e3, tokens_out: n * 21e3 });

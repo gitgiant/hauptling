@@ -95,10 +95,10 @@ export const DRAG_IGNORE = 'button, a, input, textarea, select, label, [role=tab
 
 /**
  * How the header degrades as the window narrows, one step at a time; each step keeps the ones before it.
- * Steps 0–3 keep the header on one row; the last (`phone`) uses two: title, tabs and theme, then a
+ * Steps 0–4 keep the header on one row; the last (`phone`) uses two: title, tabs and theme, then a
  * horizontally scrolling strip of usage chips, CPU, Mem and GPU.
  */
-export const HEADER_STEPS = ['full', 'no-spark', 'short', 'brief', 'phone'];
+export const HEADER_STEPS = ['full', 'no-host', 'no-spark', 'short', 'brief', 'phone'];
 
 /** The header's classes for a step: every degrade up to and including it (`h-no-spark`, `h-short`, …). */
 export function stepClasses(step) {

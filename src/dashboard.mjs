@@ -1,7 +1,7 @@
 import { createHash, timingSafeEqual, randomUUID } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { join, normalize } from 'node:path';
-import { cpus, freemem, totalmem } from 'node:os';
+import { cpus, freemem, hostname, totalmem } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { kvGet, kvSet } from './db.mjs';
 import { readOnlyQuery } from './dbquery.mjs';
@@ -168,7 +168,7 @@ export function createDashboard({ db, dbPath, core, host, hub = null, log = () =
     return gpuCache.value;
   }
 
-  // Host load: CPU % since the previous sample (summed over cores), memory % in use, GPU utilization %.
+  // Host name and load: CPU % since the previous sample (summed over cores), memory % in use, GPU utilization %.
   // Sampled every 5 s from the first dashboard visit on; the last 10 min feed the header's graphs.
   const cpuTimes = () => cpus().reduce((t, c) => { const v = c.times; t.idle += v.idle; t.all += v.user + v.nice + v.sys + v.idle + v.irq; return t; }, { idle: 0, all: 0 });
   let cpuPrev = cpuTimes();
@@ -180,7 +180,7 @@ export function createDashboard({ db, dbPath, core, host, hub = null, log = () =
     const cpu = all > 0 ? Math.round(100 * (1 - (now.idle - cpuPrev.idle) / all)) : null;
     cpuPrev = now;
     const gpu = await host.gpuUtil?.().catch(() => null) ?? null;
-    return { cpu, mem: Math.round(100 * (1 - freemem() / totalmem())), gpu };
+    return { name: hostname(), cpu, mem: Math.round(100 * (1 - freemem() / totalmem())), gpu };
   }
   let sampler = null;
   let lastHost = '';
