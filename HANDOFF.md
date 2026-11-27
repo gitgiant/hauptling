@@ -26,6 +26,7 @@
 - Web terminal size (PRD "Web terminal size"): unit-tested, tmux commands checked on a local tmux 3.4; dashboard measuring unseen in a browser. Needs `hauptling broker restart` (hub and satellites; no image). Check a narrow pane with real Claude/Codex/agy TUIs, and whether narrow screens upset the stall watcher's screen matches.
 - agy Claude models and split meters (PRD "Claude and GPT models on the agy plan"): unit-tested; the `/usage` parser was checked against the host's real agy 1.5.16 answer. Never run: an `agy --model claude-…` worker (does `--mode auto` work with it, what model name its status line and hooks report: `poolOf` expects one starting with "claude"/"gpt"), the four agy meters and the wide labels in a browser. The installed delegator skill needs `hauptling setup --no-host --no-login` to get its new line.
 - Sign out (PRD "Sign out"): fake host and temp dirs only; the Usage page button is unseen in a browser. Unknown: whether agy asks for an account once `antigravity-oauth-token` is gone (if it signs in silently, its keyring holds the token). Dashboard sign-in was broken for every vendor (`join` shadowed in `src/terminal.mjs`), now fixed; check "Sign in" opens the terminal, and that Ctrl+V and the Paste button put the auth code in (unseen in a browser).
+- Shared sign-ins (PRD "Shared sign-ins", default 1 per vendor): unit-tested (mapping, mounts, guards, Codex log by session id). Never run: two workers of one vendor at once on one sign-in (watch for a worker signed out mid-task, hourly for agy, about 8 h for Claude; agy's shared `daemon/` dir), the −/+ control on the Usage page, `hauptling signins`. If a vendor misbehaves: `hauptling signins <vendor> 3`.
 ## Open
 - Placement's `startable` only knows the hub's own accounts; satellites' usage readings are shown on the Usage page but not used for placement.
 - nullpunkt: commit `b9a0f6e8` (drops the coagent mailbox for `hauptling mail`) sits in `nullpunkt/.worktrees/claude_opus-5-5_d72c0`, unpushed. Before `node scripts/worktree.mjs sync claude_opus-5-5_d72c0`, discard the main checkout's local edits to `.mcp.json` and `.codex/hooks.json` (the commit replaces both). Sync restarts the user's game.
@@ -35,7 +36,7 @@
 - macOS / Ubuntu install untested; only WSL so far.
 - Merged branches to delete: `phase-1`, `phase-3`, `phase-4`, `phase-4b`, `signin-guard`, `api-keys`, `handoff-rule`, `usage-per-vendor`, `egress-race`, `cli-fixes`.
 ## This machine now
-- Slots `hl-w1..3` signed in to claude, codex and agy; no API keys set.
+- One sign-in per vendor (in `hl-w1`) serves slots `hl-w1..3`; older sign-ins in `hl-w2`/`hl-w3` are unused. No API keys set.
 - Host has `codegraph` (npm, telemetry on unless `CODEGRAPH_TELEMETRY=0`), `uv` and `graphify` (`~/.local/bin`); this repo is indexed (`.codegraph-wsl/`, git hooks resync it).
 - Tailscale serve is on: `https://old.tailff0f31.ts.net/` → the dashboard. Off: `"/mnt/c/Program Files/Tailscale/tailscale.exe" serve --https=443 off`.
 - GPU jobs wait for 6144 MiB free; with the desktop open about 6.2–6.7 GB is free, so they may queue.

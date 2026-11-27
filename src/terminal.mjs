@@ -88,7 +88,7 @@ export function clampSize(size) {
 }
 
 /** `rpc(host, op, args)`: on the hub, a request to a satellite over its link (hub.rpc); null elsewhere. */
-export function createTerminals({ db, host, slotDir, loginTmux = tmux, hold = () => () => {}, rpc = null, log = () => {}, now = () => Date.now(), later = (fn, ms) => { const t = setTimeout(fn, ms); t.unref?.(); return () => clearTimeout(t); } }) {
+export function createTerminals({ db, host, slotDir, signinSlot = (slot) => slot, loginTmux = tmux, hold = () => () => {}, rpc = null, log = () => {}, now = () => Date.now(), later = (fn, ms) => { const t = setTimeout(fn, ms); t.unref?.(); return () => clearTimeout(t); } }) {
   const inputUntil = new Map(); // session → epoch ms
   /** session → { views: viewer → size|null, sent: last applied key, held: a web size may be in force, at, busy, cancel, fails } */
   const sizing = new Map();
@@ -181,8 +181,9 @@ export function createTerminals({ db, host, slotDir, loginTmux = tmux, hold = ()
     return { ok: true };
   }
 
-  /** A worker of this vendor running on the slot: it refreshes the same credential file. */
-  const runningOn = (slot, vendor) => db.prepare(`SELECT id FROM agents WHERE slot = ? AND vendor = ? AND state IN ('spawning','restarting','paused','working','blocked','done') AND NOT ${HELD}`).get(slot, vendor)?.id || null;
+  /** A worker of this vendor running on the slot, or on one sharing its sign-in: it refreshes the same credential file. */
+  const runningOn = (slot, vendor) => db.prepare(`SELECT id, slot FROM agents WHERE slot IS NOT NULL AND vendor = ? AND (host IS NULL OR host = 'hub') AND state IN ('spawning','restarting','paused','working','blocked','done') AND NOT ${HELD}`).all(vendor)
+    .find(a => signinSlot(a.slot, vendor) === signinSlot(slot, vendor))?.id || null;
 
   // ---------- window size ----------
   const sizeEntry = (sid) => {
@@ -279,15 +280,16 @@ export function createTerminals({ db, host, slotDir, loginTmux = tmux, hold = ()
   async function startLogin(slot, vendor) {
     if (!/^hl-[\w-]+$/.test(slot) || !LOGIN[vendor]) throw new Error('slot and vendor (claude, codex, agy) are required');
     // Refresh tokens rotate (Claude, Codex; agy's MCP tokens): a second process refreshing the same file signs the other out.
+    slot = signinSlot(slot, vendor); // the slot that holds this sign-in
     const busy = runningOn(slot, vendor);
-    if (busy) throw new Error(`${busy} is running on ${slot} with this ${vendor} sign-in; signing in again now could sign it out mid-task. Wait until it ends (or kill it), then sign in.`);
+    if (busy) throw new Error(`${busy} is running with this ${vendor} sign-in (${slot}); signing in again now could sign it out mid-task. Wait until it ends (or kill it), then sign in.`);
     const release = hold(slot, vendor); // not while a usage refresh runs this sign-in
     try { return await openLogin(slot, vendor); } finally { release(); }
   }
   async function openLogin(slot, vendor) {
     const sid = `login-${slot}-${vendor}`;
     await loginTmux(['kill-session', '-t', sid]).catch(() => {});
-    const dir = slotDir(slot);
+    const dir = slotDir(slot, vendor);
     const env = vendor === 'claude' ? { CLAUDE_CONFIG_DIR: pathJoin(dir, 'claude') } : vendor === 'codex' ? { CODEX_HOME: pathJoin(dir, 'codex') } : {};
     if (vendor === 'agy') {
       const fake = pathJoin(dir, 'agy-home');

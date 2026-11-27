@@ -9,7 +9,7 @@ import { createDashboard } from './dashboard.mjs';
 import { createHub } from './hub.mjs';
 import { createSatellite, readSatellite } from './satellite.mjs';
 import { platform } from './platform/index.mjs';
-import { config as dockerConfig, dockerHost, gpuAvailable, slotDir, signOutSlot, WORKER_BROKER_URL } from './docker.mjs';
+import { config as dockerConfig, dockerHost, gpuAvailable, vendorRoot, signinSlot, signOutSlot, WORKER_BROKER_URL } from './docker.mjs';
 import { logins } from './setup.mjs';
 import { createUpdater } from './update.mjs';
 import { signingIn, stopSignin } from './terminal.mjs';
@@ -126,7 +126,7 @@ export async function runBroker({ port = BROKER_PORT } = {}) {
   const core = createCore({ db, host, github, notify: plat.notify, workerUrl: WORKER_BROKER_URL, publicUrl: base, runnerToken, hub, satellite, log });
   const updater = createUpdater({ log, announce: (from, to) => core.call('update.announce', { from, to }) });
   // The dashboard's host features (Hosts panel, relayed terminal/diff) are the hub's; a joined satellite has none.
-  const dash = createDashboard({ db, dbPath, core, host, hub: joined ? null : hub, updater, log, slotDir, logins, report: { gh: github.gh, logPath, config: dockerConfig, secrets: () => [adminToken, runnerToken] } });
+  const dash = createDashboard({ db, dbPath, core, host, hub: joined ? null : hub, updater, log, slotDir: vendorRoot, signinSlot, logins, report: { gh: github.gh, logPath, config: dockerConfig, secrets: () => [adminToken, runnerToken] } });
 
   const recovery = core.recover();
   recovery.then(() => dash.terms.restoreSizes()).catch(e => log(`terminal sizes: ${e.message}`)); // nobody is watching yet

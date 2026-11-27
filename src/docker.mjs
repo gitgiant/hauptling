@@ -277,8 +277,12 @@ async function ensureNetworkOnce({ log = () => {}, force = false, dk = docker, b
 export const proxyEnv = () => ['HTTPS_PROXY', 'HTTP_PROXY', 'https_proxy', 'http_proxy'].flatMap(k => ['-e', `${k}=${PROXY_URL}`])
   .concat(['-e', `NO_PROXY=${PROXY},localhost,127.0.0.1`, '-e', `no_proxy=${PROXY},localhost,127.0.0.1`, '-e', 'NODE_USE_ENV_PROXY=1']);
 
-/** Last `token_count` payload of the newest rollout log under these session roots written since `since` (ISO), or null. */
-async function codexRollout(roots, since) {
+/**
+ * Last `token_count` payload of the newest rollout log under these session roots written since `since` (ISO), or
+ * null. With `sessionId`: only that session's log (its file name carries the id), since workers sharing a
+ * sign-in write their logs into the same dir.
+ */
+export async function codexRollout(roots, since, sessionId = null) {
   const t0 = Date.parse(since || 0) || 0;
   let newest = null;
   const days = [];
@@ -289,7 +293,7 @@ async function codexRollout(roots, since) {
   }
   for (const dir of days) {
     for (const f of readdirSync(dir)) {
-      if (!f.startsWith('rollout-') || !f.endsWith('.jsonl')) continue;
+      if (!f.startsWith('rollout-') || !f.endsWith('.jsonl') || (sessionId && !f.includes(sessionId))) continue;
       const st = statSync(join(dir, f));
       if (st.mtimeMs >= t0 && (!newest || st.mtimeMs > newest.mtime)) newest = { path: join(dir, f), mtime: st.mtimeMs, size: st.size };
     }
@@ -351,6 +355,37 @@ export function slotDir(slot) {
   return d;
 }
 
+/*
+ * Shared sign-ins (PRD "Shared sign-ins"). A vendor has `signins` sign-ins (config.json, default 1), kept in the
+ * first slots' dirs; every worker slot uses one of them: hl-wN → hl-w((N-1) mod signins + 1). With 1, every
+ * worker of the vendor mounts hl-w1's dirs, so one sign-in serves them all.
+ */
+/** How many sign-ins a vendor has: `signins` in config.json, a number or `{ vendor: n }`; default 1. */
+export function signins(vendor, cfg = config()) {
+  const s = cfg.signins;
+  const n = Math.floor(Number(s && typeof s === 'object' ? s[vendor] : s));
+  return n >= 1 ? n : 1;
+}
+/** The slot whose sign-in a worker slot uses for this vendor. */
+export function signinSlot(slot, vendor, cfg = config()) {
+  const m = /^hl-w(\d+)$/.exec(String(slot));
+  return m ? `hl-w${((Number(m[1]) - 1) % signins(vendor, cfg)) + 1}` : slot;
+}
+/** The dir holding the vendor's config dirs for a worker slot: its sign-in slot's dir. */
+export const vendorRoot = (slot, vendor) => slotDir(signinSlot(slot, vendor));
+/** Sets a vendor's number of sign-ins in ~/.hauptling/config.json, keeping everything else in it. */
+export function setSignins(vendor, n) {
+  if (!CREDS[vendor]) throw new Error(`Unknown vendor ${vendor}`);
+  if (!Number.isInteger(n) || n < 1 || n > 64) throw new Error('sign-ins: a whole number from 1');
+  const p = join(home(), 'config.json');
+  const c = existsSync(p) ? JSON.parse(readFileSync(p, 'utf8') || '{}') : {};
+  const old = c.signins;
+  c.signins = { ...Object.fromEntries(Object.keys(CREDS).map(v => [v, signins(v, { signins: old })])), [vendor]: n };
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify(c, null, 2) + '\n');
+  return n;
+}
+
 /** Credential file per vendor inside a slot dir: present and non-empty means signed in. */
 export const CREDS = { claude: 'claude/.credentials.json', codex: 'codex/auth.json', agy: 'gemini/antigravity-cli/antigravity-oauth-token' };
 
@@ -358,7 +393,7 @@ export const CREDS = { claude: 'claude/.credentials.json', codex: 'codex/auth.js
  * Signs a slot out of a vendor: removes its credential file (nothing else; settings and sessions stay), so the
  * next sign-in asks for an account. Returns whether it was signed in.
  */
-export function signOutSlot(slot, vendor, dir = slotDir(slot)) {
+export function signOutSlot(slot, vendor, dir = vendorRoot(slot, vendor)) {
   if (!CREDS[vendor]) throw new Error(`Unknown vendor ${vendor}`);
   const p = join(dir, CREDS[vendor]);
   const was = existsSync(p);
@@ -370,7 +405,7 @@ export function signOutSlot(slot, vendor, dir = slotDir(slot)) {
 export function vendorMounts(slot, vendor) {
   const dirs = VENDOR_DIRS[vendor];
   if (!dirs) throw new Error(`Unknown vendor ${vendor}`);
-  const d = slotDir(slot);
+  const d = vendorRoot(slot, vendor);
   return dirs.flatMap(v => ['-v', `${join(d, v)}:/home/worker/.vendor/${v}`]);
 }
 
@@ -571,8 +606,8 @@ export function dockerHost({ log = () => {}, docker: dockerCmd = docker } = {}) 
     },
     attachArgv: (_slot, id) => dockerArgv(['exec', '-it', container(id), 'tmux', 'attach', '-t', 'main']),
     // Parked workers (PRD "Parking"): the vendor session transcript, copied between a slot and ~/.hauptling/sessions/<agent>/.
-    saveSession: ({ slot, vendor, id, sessionId }) => sessions.saveSession({ slotRoot: slotDir(slot), store: sessionStore(id), vendor, sessionId }),
-    restoreSession: ({ slot, vendor, id, billing }) => sessions.restoreSession({ slotRoot: slotDir(slot), store: sessionStore(id), vendor, billing }),
+    saveSession: ({ slot, vendor, id, sessionId }) => sessions.saveSession({ slotRoot: vendorRoot(slot, vendor), store: sessionStore(id), vendor, sessionId }),
+    restoreSession: ({ slot, vendor, id, billing }) => sessions.restoreSession({ slotRoot: vendorRoot(slot, vendor), store: sessionStore(id), vendor, billing }),
     dropSession: (id) => sessions.dropSession(sessionStore(id)),
 
     /**
@@ -650,6 +685,9 @@ export function dockerHost({ log = () => {}, docker: dockerCmd = docker } = {}) 
       try { return JSON.parse(readFileSync(join(live.art, 'progress.json'), 'utf8')); } catch { return null; }
     },
     headroomPct: () => config().headroomPct,
+    signinSlot: (slot, vendor) => signinSlot(slot, vendor),
+    signins: (vendor) => signins(vendor),
+    setSignins,
     testWatchdog: () => { const c = config(); return { stallSec: c.testStallSec, retries: c.testRetries }; },
 
     /** `gpu pause --now`: stop a running test job's container (the broker has already requeued it). */
@@ -662,9 +700,9 @@ export function dockerHost({ log = () => {}, docker: dockerCmd = docker } = {}) 
     },
     gpuAvailable, gpuFreeMB, gpuUtil,
     /** Last `token_count` payload of the newest Codex session log in the slot written since `since` (ISO), or null. */
-    async codexUsage(slot, since) {
+    async codexUsage(slot, since, sessionId = null) {
       // codex: subscription sign-in; codex-key: API key mode (separate CODEX_HOME).
-      return codexRollout(['codex', 'codex-key'].map(h => join(slotDir(slot), h, 'sessions')), since);
+      return codexRollout(['codex', 'codex-key'].map(h => join(vendorRoot(slot, 'codex'), h, 'sessions')), since, sessionId);
     },
     /** The same for the host's own Codex (a Codex delegator; token economy). */
     async hostCodexUsage(since) {

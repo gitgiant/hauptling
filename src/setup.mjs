@@ -11,7 +11,7 @@ import { isHeld } from './db.mjs';
 import { platform } from './platform/index.mjs';
 import { getBudget, getUpTo, keyHints } from './keys.mjs';
 import { loadModels, tierName } from './models.mjs';
-import { NET, PROXY, WORKER_BROKER_URL, baseImageTag, docker, proxyEnv, dockerReady, ensureBaseImage, ensureNetwork, slotDir, CREDS, config, hasGpu, gpuAvailable } from './docker.mjs';
+import { NET, PROXY, WORKER_BROKER_URL, baseImageTag, docker, proxyEnv, dockerReady, ensureBaseImage, ensureNetwork, slotDir, vendorRoot, signinSlot, signins, CREDS, config, hasGpu, gpuAvailable } from './docker.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const step = (m) => console.log(`\n▶ ${m}`);
@@ -102,7 +102,7 @@ async function restartBroker() {
  */
 export const logins = (slots, vendors) => {
   const keys = keyHints();
-  const signedIn = (slot, v) => spawnSync('test', ['-s', join(slotDir(slot), CREDS[v])]).status === 0;
+  const signedIn = (slot, v) => spawnSync('test', ['-s', join(vendorRoot(slot, v), CREDS[v])]).status === 0;
   return slots.flatMap(slot => vendors.map(v => {
     if (!keys[v]) return { slot, vendor: v, ok: signedIn(slot, v) };
     const budget = getBudget(v), upTo = getUpTo(v);
@@ -112,7 +112,7 @@ export const logins = (slots, vendors) => {
 };
 
 async function loginMissing(slots, vendors) {
-  step('Vendor sign-in (each slot signs in once per vendor; kept across containers)');
+  step('Vendor sign-in (one per vendor serves every slot; more: `hauptling signins`)');
   const missing = logins(slots, vendors).filter(l => !l.ok);
   if (!missing.length) return ok('every slot is signed in to every vendor');
   if (!process.stdin.isTTY) {
@@ -121,6 +121,7 @@ async function loginMissing(slots, vendors) {
   }
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   for (const m of missing) {
+    if (logins([m.slot], [m.vendor])[0].ok) continue; // an earlier sign-in in this loop serves this slot too
     const answer = (await rl.question(`  ${m.slot} → ${m.vendor}: sign in now? [Y/n/q] `)).trim().toLowerCase();
     if (answer === 'q') break;
     if (answer === 'n') continue;
@@ -137,7 +138,7 @@ async function loginMissing(slots, vendors) {
  */
 function runLogin(slot, vendor) {
   console.log(`    ${LOGIN_HINT[vendor]}`);
-  const dir = slotDir(slot);
+  const dir = vendorRoot(slot, vendor);
   const env = { ...process.env };
   if (vendor === 'claude') env.CLAUDE_CONFIG_DIR = join(dir, 'claude');
   if (vendor === 'codex') env.CODEX_HOME = join(dir, 'codex');
@@ -222,10 +223,14 @@ function report(all) {
 /** Signs one slot in to one vendor, in this terminal. */
 export async function login(slot, vendor, { force = false } = {}) {
   if (!/^hl-w\d+$/.test(slot || '') || !LOGIN[vendor]) throw new Error('login <hl-wN> <claude|codex|agy>');
+  const own = signinSlot(slot, vendor);
+  if (own !== slot) console.log(`  ${slot} uses ${own}'s ${vendor} sign-in (${signins(vendor)} sign-in${signins(vendor) === 1 ? '' : 's'}; change: hauptling signins ${vendor} N): signing ${own} in.`);
+  const group = (s) => signinSlot(s, vendor) === own;
+  slot = own;
   // Refresh tokens rotate: signing in while a worker of this vendor runs on the slot can sign that worker out.
   const busy = force ? null : (await call('agents', { all: true }).catch(() => []))
-    .find(a => a.slot === slot && a.vendor === vendor && ['spawning', 'restarting', 'paused', 'working', 'blocked', 'done'].includes(a.state) && !isHeld(a));
-  if (busy) throw new Error(`${busy.id} is running on ${slot} with this ${vendor} sign-in; signing in again now could sign it out mid-task. Wait until it ends (or kill it), or pass --force.`);
+    .find(a => a.slot && group(a.slot) && a.vendor === vendor && ['spawning', 'restarting', 'paused', 'working', 'blocked', 'done'].includes(a.state) && !isHeld(a));
+  if (busy) throw new Error(`${busy.id} is running on ${busy.slot} with this ${vendor} sign-in; signing in again now could sign it out mid-task. Wait until it ends (or kill it), or pass --force.`);
   const held = await call('signin.begin', { slot, vendor }).then(() => true, (e) => {
     if (/Unknown call|Broker/.test(e.message)) return false; // an older or stopped broker: nothing refreshes then
     throw e;

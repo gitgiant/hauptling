@@ -147,8 +147,8 @@ export function joinLine(headers, tok) {
 }
 
 /** `hub`: on the hub, its satellites (src/hub.mjs), for the Hosts panel and the relayed terminal, diff and timeline. */
-export function createDashboard({ db, dbPath, core, host, hub = null, updater = null, log = () => {}, slotDir = () => { throw new Error('no slots'); }, logins = () => [], report = {} }) {
-  const terms = createTerminals({ db, host, slotDir, log, rpc: hub ? (name, op, args) => hub.rpc(name, op, args) : null, hold: core.holdSignin });
+export function createDashboard({ db, dbPath, core, host, hub = null, updater = null, log = () => {}, slotDir = () => { throw new Error('no slots'); }, signinSlot = (slot) => slot, logins = () => [], report = {} }) {
+  const terms = createTerminals({ db, host, slotDir, signinSlot, log, rpc: hub ? (name, op, args) => hub.rpc(name, op, args) : null, hold: core.holdSignin });
   const satellites = () => db.prepare('SELECT name, online, lost_at FROM hosts ORDER BY name').all();
   const offline = (e) => /is offline/.test(e.message);
   const json = (res, code, body) => { res.writeHead(code, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(body)); };
@@ -417,10 +417,13 @@ export function createDashboard({ db, dbPath, core, host, hub = null, updater = 
         out_of_credit: core.keyOut?.(vendor) || null, // the API refused the key: { at, until }
         limits: [...latest.values()],
         refresh: core.lastRefresh?.(vendor) || null, // the Refresh button's last result: { status, note, at }
-        slots: slotNames.map(slot => ({
+        // One row per sign-in (PRD "Shared sign-ins"): the slot that holds it, busy while any slot using it runs a worker.
+        signins: { count: Math.min(host.signins?.(vendor) ?? slotNames.length, slotNames.length), max: slotNames.length, adjustable: Boolean(host.setSignins) },
+        slots: [...new Set(slotNames.map(s => signinSlot(s, vendor)))].map(slot => ({
           slot,
+          serves: slotNames.filter(s => signinSlot(s, vendor) === slot),
           signed_in: Boolean(signedIn.get(`${slot}:${vendor}`)),
-          busy: busy.get(`${slot}:${vendor}`) || null,
+          busy: slotNames.filter(s => signinSlot(s, vendor) === slot).map(s => busy.get(`${s}:${vendor}`)).find(Boolean) || null,
           login: `hauptling login ${slot} ${vendor}`,
         })),
       };
@@ -634,6 +637,7 @@ export function createDashboard({ db, dbPath, core, host, hub = null, updater = 
           run?.(); // after the response: it ends with this broker restarting
           return true;
         }
+        if (p === '/dash/signins') { json(res, 200, await core.call('signin.count', { vendor: body.vendor, n: body.n })); return true; }
         if (p === '/dash/signout') { json(res, 200, await core.call('signin.out', { slot: body.slot, vendor: body.vendor })); return true; }
         if (p === '/dash/term/login') { json(res, 200, await terms.startLogin(body.slot, body.vendor)); return true; }
         if (p === '/dash/hosts/token') {

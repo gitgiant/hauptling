@@ -1086,18 +1086,23 @@ async function loadUsage() {
         v.out_of_credit && !v.budget ? h('div', { class: 'no', title: `Add funds, then: hauptling key set ${v.vendor} (or give it a budget: hauptling key budget ${v.vendor} USD)`, text: `✗ API key ${v.key}: credit ran out (${clock(v.out_of_credit.at)}) · new ${v.vendor} spawns ${v.up_to ? `${upTo(v)} ` : ''}are refused` })
         : v.key && !v.budget ? h('div', { class: 'ok', title: `${v.up_to ? `Billed per token for models ${upTo(v)}.` : 'Every slot uses this key; billed per token.'} hauptling key rm ${v.vendor} switches back to sign-ins.`, text: `✓ API key ${v.key}` }) : null,
         v.key && !v.budget && !v.up_to ? null
-          : h('div', { class: signed === v.slots.length ? 'ok' : 'no', text: `${signed === v.slots.length ? '✓' : '✗'} signed in on ${signed}/${v.slots.length} slots${v.budget ? ' (after the API budget)' : ''}` }),
+          : h('div', { class: signed === v.slots.length ? 'ok' : 'no', text: `${signed === v.slots.length ? '✓' : '✗'} ${v.slots.length === 1 ? (signed ? 'signed in' : 'not signed in') : `signed in on ${signed}/${v.slots.length} sign-ins`}${v.signins && v.signins.max > v.slots.length ? ` · shared by ${v.signins.max} slots` : ''}${v.budget ? ' (after the API budget)' : ''}` }),
         v.limits.length ? sortWindows(v.limits).map(l => meter(l, v.vendor)) : h('p', { class: 'resets', text: 'No usage reported yet; workers report it while they run.' }),
         freshness(v),
         (v.hosts || []).map(x => h('div', { class: 'hostusage' }, h('span', { class: 'chip host', title: x.online ? 'online' : 'offline: last reading', text: x.host }),
           sortWindows(x.limits).map(l => meter(l, v.vendor)))),
         v.key && !v.budget && !v.up_to ? null : h('details', { class: 'slots', open: signed < v.slots.length },
-          h('summary', { text: 'Slot sign-ins' }),
+          h('summary', { text: 'Sign-ins' }),
+          v.signins?.adjustable ? h('div', { class: 'slotrow', title: `How many separate ${v.vendor} sign-ins the ${v.signins.max} worker slots use. 1: sign in once, every worker shares it. More: workers are spread over them, so fewer share one. Applies to workers started from now on.` },
+            h('span', { text: 'Sign-ins' }),
+            h('button', { 'aria-label': `Fewer ${v.vendor} sign-ins`, disabled: v.signins.count <= 1, onclick: () => setSignins(v.vendor, v.signins.count - 1) }, '−'),
+            h('span', { class: 'mono', text: `${v.signins.count} of ${v.signins.max}` }),
+            h('button', { 'aria-label': `More ${v.vendor} sign-ins`, disabled: v.signins.count >= v.signins.max, onclick: () => setSignins(v.vendor, v.signins.count + 1) }, '+')) : null,
           v.slots.map(s => h('div', { class: 'slotrow' },
-            h('span', { class: 'mono', text: s.slot }),
+            h('span', { class: 'mono', title: s.serves?.length > 1 ? `Used by ${s.serves.join(', ')}` : null, text: s.slot }),
             s.signed_in ? h('span', { class: 'ok', text: '✓' }) : h('span', { class: 'no', text: '✗' }),
             h('button', { disabled: Boolean(s.busy), title: s.busy ? `Locked while ${s.busy} runs: refresh tokens rotate, so a second sign-in could sign it out mid-task.` : s.login, onclick: () => startLogin(s.slot, v.vendor) }, s.signed_in ? 'Sign in again' : 'Sign in'),
-            s.signed_in ? h('button', { disabled: Boolean(s.busy), title: s.busy ? `Locked while ${s.busy} runs.` : `Removes ${s.slot}'s ${v.vendor} sign-in, so "Sign in" asks for an account. To switch accounts, do it on every slot.`, onclick: () => signOut(s.slot, v.vendor) }, 'Sign out') : null,
+            s.signed_in ? h('button', { disabled: Boolean(s.busy), title: s.busy ? `Locked while ${s.busy} runs.` : `Removes ${s.slot}'s ${v.vendor} sign-in, so "Sign in" asks for an account. To switch accounts, do it for every sign-in listed here.`, onclick: () => signOut(s.slot, v.vendor) }, 'Sign out') : null,
             s.busy ? h('span', { class: 'resets', text: `locked: ${s.busy} running` }) : null))));
     })));
     renderSpend(u.spend);
@@ -1201,6 +1206,11 @@ function renderSpend(sp) {
   put($('#spend'),
     h('div', { class: 'figure' }, money(t.cost_usd, t.estimated > 0), ' ', h('small', { text: `${t.agents} agents · ${kfmt(t.tokens_in)} in / ${kfmt(t.tokens_out)} out tokens${t.unknown ? ` · ${t.unknown} with unknown cost` : ''}` })),
     spendTable('By vendor', sp.byVendor), spendTable('By repo', sp.byRepo), spendTable('By day', sp.byDay));
+}
+async function setSignins(vendor, n) {
+  try { const r = await api.post('/dash/signins', { vendor, n }); toast(`${vendor}: ${r.signins} sign-in${r.signins === 1 ? '' : 's'} for ${r.slots} slots`); }
+  catch (e) { toast(e.message, true); }
+  loadUsage();
 }
 async function signOut(slot, vendor) {
   if (!confirm(`Sign ${slot} out of ${vendor}? Its saved sign-in is removed; new ${vendor} workers skip this slot until you sign in again.`)) return;

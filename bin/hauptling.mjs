@@ -51,6 +51,7 @@ Setup:
   key budget VENDOR USD|off [--resets-on DAY] API first up to USD a month (new API spawns stop at 90%), then slot sign-ins
   key up-to VENDOR TIER|MODEL|off          the key pays only for models up to this tier (also --up-to on set/budget); above it: plan
   login SLOT VENDOR [--force]              sign one slot in to claude|codex|agy (refused while a worker of that vendor runs on the slot)
+  signins [VENDOR|all [N]]                 sign-ins per vendor (default 1: one sign-in serves every slot); N sets it, up to the number of slots
   logout SLOT|all VENDOR                   sign a slot (or every slot) out of a vendor, to sign in with another account
   init [DIR]                               write the detected hauptling.json
   broker start|stop|restart|status|run
@@ -420,10 +421,19 @@ async function main() {
       throw new Error('key set VENDOR [--budget USD [--resets-on DAY]] [--up-to TIER|MODEL] (reads the key from stdin or a hidden prompt) | key budget VENDOR USD|off [--resets-on DAY] [--up-to …] | key up-to VENDOR TIER|MODEL|off | key rm VENDOR | key list');
     }
     case 'login': { const { login } = await import('../src/setup.mjs'); return login(args._[0], args._[1], { force: Boolean(args.force) }); }
+    case 'signins': {
+      const [which = 'all', n] = args._;
+      const { VENDORS } = await import('../src/util.mjs');
+      for (const vendor of which === 'all' ? VENDORS : [which]) {
+        const r = await call('signin.count', { vendor, ...(n == null ? {} : { n: Number(n) }) });
+        out(`${vendor.padEnd(7)}${r.signins} sign-in${r.signins === 1 ? '' : 's'} for ${r.slots} slots (${r.signin_slots.join(', ')})`);
+      }
+      return;
+    }
     case 'logout': {
       const [slot, vendor] = args._;
       if (!slot || !vendor) throw new Error('logout <hl-wN|all> <claude|codex|agy>');
-      const names = slot === 'all' ? await call('slots.get') : [slot];
+      const names = slot === 'all' ? (await call('signin.count', { vendor })).signin_slots : [slot];
       for (const s of names) {
         const r = await call('signin.out', { slot: s, vendor }).catch(e => ({ error: e.message }));
         out(r.error ? `${s} ${vendor}: not signed out (${r.error})` : `${s} ${vendor}: ${r.was_signed_in ? 'signed out' : 'was not signed in'}. Sign in: hauptling login ${s} ${vendor}`);

@@ -332,8 +332,9 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
    * claude and a codex worker on one slot never share a refresh token. `except`: an agent to ignore (restart).
    */
   function freeSlots(vendor, except = null) {
+    const signinOf = (slot) => host.signinSlot?.(slot, vendor) ?? slot;
     const used = new Set(db.prepare(`SELECT slot FROM agents WHERE slot IS NOT NULL AND host = 'hub' AND vendor = ? AND ${notIn} AND ${inActive}`).all(vendor, ids(except), ...ACTIVE).map(r => r.slot));
-    return slots().filter(s => !used.has(s) && held.get(`${s}:${vendor}`) !== 'refreshing usage');
+    return slots().filter(s => !used.has(s) && held.get(`${signinOf(s)}:${vendor}`) !== 'refreshing usage');
   }
   /** Live worker containers on this host, across every delegator. */
   const workerCount = (except = null) => db.prepare(`SELECT COUNT(*) n FROM agents WHERE slot IS NOT NULL AND host = 'hub' AND ${notIn} AND ${inActive}`).get(ids(except), ...ACTIVE).n;
@@ -815,7 +816,9 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     }
     for (const a of db.prepare("SELECT * FROM agents WHERE vendor = 'codex' AND slot IS NOT NULL AND host = 'hub' AND state IN ('working','blocked','done')").all()) {
       try {
-        const p = await host.codexUsage(a.slot, a.created_at);
+        // Workers sharing a sign-in write their logs into one dir: only this session's log is this agent's.
+        if (!a.session_id && sharers(a.slot, 'codex').length > 1) continue;
+        const p = await host.codexUsage(a.slot, a.created_at, a.session_id);
         if (p) recordUsage(a, p);
       } catch (e) { log(`codex usage ${a.id}: ${e.message} (format changed? usage shows unknown)`); }
     }
@@ -826,9 +829,14 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   const held = new Map();
   /** A sign-in in the user's own terminal (`hauptling login`) is recorded in kv, and forgotten after this long. */
   const CLI_SIGNIN_MS = 30 * 60e3;
-  const cliSignin = (slot, vendor) => Date.now() - Date.parse(kvGet(db, `signin:${slot}:${vendor}`) || 0) < CLI_SIGNIN_MS;
+  /** The slot whose sign-in a worker slot uses (PRD "Shared sign-ins"); itself on a host that doesn't share. */
+  const signinOf = (slot, vendor) => host.signinSlot?.(slot, vendor) ?? slot;
+  /** The worker slots using the same sign-in as `slot`. */
+  const sharers = (slot, vendor) => slots().filter(s => signinOf(s, vendor) === signinOf(slot, vendor));
+  const cliSignin = (slot, vendor) => Date.now() - Date.parse(kvGet(db, `signin:${signinOf(slot, vendor)}:${vendor}`) || 0) < CLI_SIGNIN_MS;
   /** Takes a slot's sign-in for `why` (synchronously, so check-and-take can't race); returns the release. */
   function holdSignin(slot, vendor, why = 'signing in') {
+    slot = signinOf(slot, vendor);
     const key = `${slot}:${vendor}`;
     if (held.get(key) === 'refreshing usage') throw new Error(`${slot}'s ${vendor} usage is being refreshed; try again in a minute`);
     if (held.has(key)) throw new Error(`${slot} ${vendor} is ${held.get(key)}`);
@@ -838,8 +846,10 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
 
   /** Why a refresh must leave this slot's sign-in alone, or null. One process per refresh token (PRD "Security"). */
   function signinBusy(slot, vendor) {
-    const w = db.prepare(`SELECT id FROM agents WHERE slot = ? AND vendor = ? AND host = 'hub' AND ${inActive}`).get(slot, vendor, ...ACTIVE);
+    const group = sharers(slot, vendor);
+    const w = db.prepare(`SELECT id, slot FROM agents WHERE slot IS NOT NULL AND vendor = ? AND host = 'hub' AND ${inActive}`).all(vendor, ...ACTIVE).find(a => a.slot === slot || group.includes(a.slot));
     if (w) return `${w.id} is running`;
+    slot = signinOf(slot, vendor);
     if (held.has(`${slot}:${vendor}`)) return held.get(`${slot}:${vendor}`);
     return cliSignin(slot, vendor) ? 'signing in' : null;
   }
@@ -850,6 +860,8 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
    */
   async function signOut({ slot, vendor }) {
     if (!slots().includes(slot) || !isFamily(vendor)) throw new Error('sign out: a slot (hl-wN) and a vendor (claude, codex, agy) are required');
+    const group = sharers(slot, vendor);
+    slot = signinOf(slot, vendor);
     const busy = signinBusy(slot, vendor);
     if (busy) throw new Error(`${slot} ${vendor}: ${busy}; sign out when it has ended`);
     const release = holdSignin(slot, vendor, 'signing out');
@@ -857,10 +869,25 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
       // A sign-in left open on the Usage page is the user's own: signing out closes it.
       if (await host.signingIn?.(slot, vendor)) await host.stopSignin?.(slot, vendor);
       const was = Boolean(await host.signOut(slot, vendor));
-      db.prepare('DELETE FROM slot_usage WHERE slot = ? AND vendor = ?').run(slot, vendor);
+      for (const s of new Set([slot, ...group])) db.prepare('DELETE FROM slot_usage WHERE slot = ? AND vendor = ?').run(s, vendor);
       log(`signed out ${slot} ${vendor}`);
       return { slot, vendor, was_signed_in: was };
     } finally { release(); }
+  }
+
+  /** A vendor's number of sign-ins (PRD "Shared sign-ins"); `n` sets it. Running workers keep the dirs they mounted. */
+  function signinCount({ vendor, n }) {
+    if (!isFamily(vendor)) throw new Error(`Vendor must be claude, codex or agy, got "${vendor}"`);
+    if (!host.signins) throw new Error('This host has no shared sign-ins');
+    if (n != null) {
+      const want = Math.floor(Number(n));
+      if (!(want >= 1 && want <= slots().length)) throw new Error(`sign-ins: 1 to ${slots().length} (the number of slots)`);
+      host.setSignins(vendor, want);
+      log(`sign-ins ${vendor}: ${want}`);
+      later('start queued after a sign-in change', startAll);
+    }
+    const count = Math.min(host.signins(vendor), slots().length);
+    return { vendor, signins: count, slots: slots().length, signin_slots: [...new Set(slots().map(s => signinOf(s, vendor)))] };
   }
 
   /** One vendor: the first signed-in slot nobody else is using, its CLI asked once, the windows stored on that slot. */
@@ -872,7 +899,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     const signed = await host.signedIn(slots(), vendor);
     if (!signed.length) return skipped('not signed in on any slot');
     let why = null;
-    for (const slot of signed) {
+    for (const slot of new Set(signed.map(s => signinOf(s, vendor)))) {
       const busy = signinBusy(slot, vendor);
       if (busy) { why ||= busy; continue; }
       const release = holdSignin(slot, vendor, 'refreshing usage');
@@ -2400,9 +2427,10 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     },
     'usage.refresh': () => refreshAllUsage(),
     // `hauptling login` runs in the user's terminal: it says so, so no refresh touches that sign-in meanwhile.
-    'signin.begin': ({ slot, vendor }) => { const release = holdSignin(slot, vendor); kvSet(db, `signin:${slot}:${vendor}`, now()); release(); return { ok: true }; },
+    'signin.begin': ({ slot, vendor }) => { const release = holdSignin(slot, vendor); kvSet(db, `signin:${signinOf(slot, vendor)}:${vendor}`, now()); release(); return { ok: true }; },
     'signin.out': signOut,
-    'signin.end': ({ slot, vendor }) => { kvDel(db, `signin:${slot}:${vendor}`); return { ok: true }; },
+    'signin.count': signinCount,
+    'signin.end': ({ slot, vendor }) => { kvDel(db, `signin:${signinOf(slot, vendor)}:${vendor}`); return { ok: true }; },
     'dashboard.token': ({ rotate = false }) => ({ token: dashToken(db, { rotate }), url: publicUrl }),
     'gpu.pause': gpuPause, 'gpu.resume': gpuResume, 'gpu.status': gpuStatus,
     'models.prefer': ({ value }) => (value ? savePrefer(value) : preferOf(models())),
