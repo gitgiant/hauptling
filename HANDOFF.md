@@ -1,5 +1,4 @@
-# Handoff — 2026-11-27
-## Needs a real run to confirm
+# Handoff — 2026-11-27 · needs a real run to confirm
 - Splitter strip (PRD "Collapse to a strip", 2026-11-27): logic unit-tested, UI never run in a browser (drag snap, double-click, arrows, Board icons and “+N”, History search button, stacked top strip). Reload only.
 - Update button (PRD "Update from the dashboard"): temp-repo git with build/restart stubbed. Going live needs a manual `git pull --ff-only`, `hauptling image`, `hauptling broker restart` once (satellites too). Then check on the next merge: real detached restart, image build from the broker, the ⋯ dot, menu and self-reload (unseen in a browser).
 - Queue pause and reorder (PRD "Queue priority", 2026-11-27): unit-tested with a fake host only. Needs `hauptling broker restart` (hub and satellites; no image). Drag and drop (mouse and touch), the drop line and Alt+↑/↓/Home are unseen in a browser (`node scripts/dash-preview.mjs` shows the queued card; moves need a real broker).
