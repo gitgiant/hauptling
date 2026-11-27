@@ -102,7 +102,7 @@ window.fetch = async (url) => {
 // Size label (bottom left): red when the page or a card, pane or header item sticks out on the right.
 function probe() {
   const w = innerWidth, sw = document.documentElement.scrollWidth;
-  const out = [...document.querySelectorAll('.top > *, .split > *, .card, .panel, .usage, .split')].filter(e => { const r = e.getBoundingClientRect(); return r.width && r.right > w + 0.5; });
+  const out = [...document.querySelectorAll('.top > *, .top .more-btn, .split > *, .card, .panel, .usage, .split')].filter(e => { const r = e.getBoundingClientRect(); return r.width && r.right > w + 0.5; });
   const bad = sw > w || out.length;
   const el = document.getElementById('probe') || document.body.appendChild(Object.assign(document.createElement('div'), { id: 'probe' }));
   el.textContent = w + '×' + innerHeight + ' · page ' + sw + 'px' + (out.length ? ' · past the right edge: ' + out.slice(0, 3).map(e => e.id ? '#' + e.id : e.className).join(', ') : '');

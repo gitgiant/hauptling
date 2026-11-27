@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { clampRatio, parseRatio, defaultRatio, splitKey, keyRatio, collapseAfterDrag, HEADER_STEPS, stepClasses, pickStep, handleKey } from '../web/dashboard/layout.js';
 
 test('clampRatio keeps both panes at their minimum', () => {
@@ -47,7 +48,7 @@ test('collapseAfterDrag: header collapses on a long drag or a flick up', () => {
   assert.equal(open(0), false, 'a click on the header does nothing');
   assert.equal(open(-10), false, 'short drag springs back');
   assert.equal(open(-24), true, 'a third of 48 px is 16; the floor is 24 px');
-  assert.equal(open(-40, 0, 150), false, 'a tall (wrapped) header needs a third of its height');
+  assert.equal(open(-40, 0, 150), false, 'a tall header needs a third of its height');
   assert.equal(open(-50, 0, 150), true);
   assert.equal(open(-10, -0.8), true, 'flick up');
   assert.equal(open(-5, -0.8), false, 'a twitch is no flick');
@@ -68,11 +69,11 @@ test('stepClasses: each header step keeps the degrades before it', () => {
   assert.deepEqual(stepClasses(0), []);
   assert.deepEqual(stepClasses(1), ['h-no-host'], 'the host name goes first');
   assert.deepEqual(stepClasses(4), ['h-no-host', 'h-no-spark', 'h-short', 'h-brief']);
-  assert.deepEqual(stepClasses(HEADER_STEPS.length - 1), ['h-no-host', 'h-no-spark', 'h-short', 'h-brief', 'h-phone']);
+  assert.deepEqual(stepClasses(HEADER_STEPS.length - 1), ['h-no-host', 'h-no-spark', 'h-short', 'h-brief', 'h-minis', 'h-icons', 'h-tight', 'h-min']);
 });
 
 test('pickStep: the least degraded step whose row fits at a given width', () => {
-  const needs = [1800, 1700, 1450, 1250, 700]; // row width at full, no host name, no sparklines, short labels, brief GPU
+  const needs = [1800, 1700, 1450, 1250, 900, 760, 680, 480, 400]; // row width at each of HEADER_STEPS
   const at = (width, current = 0) => pickStep((s) => width - needs[s], current);
   assert.equal(at(3440), 0, 'ultrawide: everything');
   assert.equal(at(1920), 0, '1920: everything on one row');
@@ -80,8 +81,11 @@ test('pickStep: the least degraded step whose row fits at a given width', () => 
   assert.equal(at(1600), 2, 'then the sparklines');
   assert.equal(at(1366), 3, 'then shorten labels');
   assert.equal(at(1000), 4, 'then hide GPU details');
-  assert.equal(at(768), 4);
-  assert.equal(at(390), 5, 'phone: two rows');
+  assert.equal(at(768), 5, 'bare usage bars');
+  assert.equal(at(700), 6, 'Report as an icon');
+  assert.equal(at(500), 7, 'tight');
+  assert.equal(at(390), 8, 'phone: the last step');
+  assert.equal(at(280), 8, 'never past the last step');
 });
 
 test('pickStep: going back needs a margin, so a ticking number cannot flip the step', () => {
@@ -103,3 +107,15 @@ test('handleKey: Enter/Space toggle, Up collapses, Down expands', () => {
   assert.equal(handleKey('a', false), null);
   assert.equal(handleKey('ArrowLeft', false), null);
 });
+
+test('header markup: the title leads to the board, no nav tabs, never a second row', () => {
+  const read = (f) => readFileSync(new URL(`../web/dashboard/${f}`, import.meta.url), 'utf8');
+  const header = /<header[^]*?<\/header>/.exec(read('index.html'))[0];
+  assert.match(header, /<h1><a id="home" href="#board" title="Board"/);
+  assert.doesNotMatch(header, /<nav|role="tab/);
+  const css = read('style.css');
+  assert.match(css, /\.top \{[^}]*flex-wrap: nowrap/);
+  assert.doesNotMatch(css, /\.top[^{]*\{[^}]*flex-wrap: wrap|h-phone|\.tabs/);
+  for (const s of HEADER_STEPS.slice(1)) assert.ok(css.includes(`.top.h-${s} `) || css.includes(`.top.h-${s},`), `h-${s} has a style`);
+});
+
