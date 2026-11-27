@@ -8,6 +8,7 @@ Design and every decision: `PRD.md`. Current state and open items: `HANDOFF.md` 
 - Record decisions in `PRD.md` before building. Design interviews: one question per message, lettered options and a recommendation.
 - Work on a branch; fast-forward `main` when the user says "merge to main".
 - Code that runs inside workers (`vendors.mjs` prepare, `runner.mjs`, the CLI) is baked into the worker image: after changing it, run `hauptling image`, then `hauptling broker restart`.
+- The egress proxy (`src/egress.mjs`) runs the worker image too, but is only replaced when no worker or test container runs. To roll it out now: `hauptling setup --no-host --no-login` (add `--slots N` if not 3); it rebuilds the image, replaces the proxy (open connections drop) and restarts the broker.
 
 ## Gotchas on this host (WSL2)
 

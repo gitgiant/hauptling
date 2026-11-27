@@ -42,7 +42,9 @@ function agy(j, price, api) {
     const window = /5h$/.test(name) ? '5h' : /week/.test(name) ? 'week' : null;
     if (!window || num(q?.remaining_fraction) == null) continue;
     const used = pct((1 - q.remaining_fraction) * 100);
-    const resets = q.reset_time || (num(q.reset_in_seconds) != null ? new Date(Date.now() + q.reset_in_seconds * 1000).toISOString() : null);
+    // An unset reset comes as "", 0 or the epoch ("1970-01-01T00:00:00Z"): none of them is a time.
+    // (`Date.parse` reads "0" and 0 as the year 2000, hence the date shape.)
+    const resets = /^\d{4}-/.test(q.reset_time) && Date.parse(q.reset_time) > 0 ? q.reset_time : num(q.reset_in_seconds) > 0 ? new Date(Date.now() + q.reset_in_seconds * 1000).toISOString() : null;
     if (!byWindow[window] || used > byWindow[window].used_pct) byWindow[window] = { window, used_pct: used, resets_at: resets };
   }
   const u = { model: j.model?.id || null, tokens_in: num(cw.total_input_tokens), tokens_out: num(cw.total_output_tokens), context_pct: pct(cw.used_percentage), limits: Object.values(byWindow) };
@@ -142,6 +144,9 @@ export function statusText(u) {
   for (const l of u.limits) parts.push(`${l.window} ${Math.round(l.used_pct)}%`);
   return `hauptling · ${parts.join(' · ') || 'usage pending'}`;
 }
+
+/** What to show for a window with no reset time. Nothing used and no reset: the window hasn't started. */
+export const noReset = (usedPct) => (usedPct === 0 ? 'not started' : 'no reset time');
 
 /** Newest reading of each of a vendor's account windows, from any slot: { [window]: { used_pct, resets_at } }. */
 export function windowSnapshot(db, vendor) {

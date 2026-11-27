@@ -69,7 +69,7 @@ function agy(stdout) {
     if (typeof v.remaining_fraction === 'number' && !v.disabled) {
       const name = [v.window, v.id, v.name].filter(Boolean).join(' ');
       const window = /(^|[^\d])5[ _-]?h|five.?hour/i.test(name) ? '5h' : /week|(^|[^\d])7[ _-]?d/i.test(name) ? 'week' : null;
-      if (window) quota[`${n++}-${window === 'week' ? 'weekly' : '5h'}`] = { remaining_fraction: v.remaining_fraction, reset_time: v.reset_time };
+      if (window) quota[`${n++}-${window === 'week' ? 'weekly' : '5h'}`] = { remaining_fraction: v.remaining_fraction, reset_time: v.reset_time, reset_in_seconds: v.reset_in_seconds };
     }
     Object.values(v).forEach(walk);
   };

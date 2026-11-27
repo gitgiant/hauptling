@@ -195,7 +195,8 @@ async function main() {
     case 'usage': {
       if (args._[0] === 'refresh') {
         const { vendors } = await call('usage.refresh');
-        return out(vendors.map(v => `${v.vendor.padEnd(7)}${v.status === 'ok' ? `${v.limits.map(l => `${l.window} ${Math.round(l.used_pct)}%${l.resets_at ? ` (resets ${new Date(l.resets_at).toLocaleString()})` : ''}`).join(' · ')}  [${v.slot}]` : `${v.status}: ${v.note}`}`).join('\n'));
+        const { noReset } = await import('../src/usage.mjs');
+        return out(vendors.map(v => `${v.vendor.padEnd(7)}${v.status === 'ok' ? `${v.limits.map(l => `${l.window} ${Math.round(l.used_pct)}%${l.resets_at ? ` (resets ${new Date(l.resets_at).toLocaleString()})` : ` (${noReset(l.used_pct)})`}`).join(' · ')}  [${v.slot}]` : `${v.status}: ${v.note}`}`).join('\n'));
       }
       // A worker's status line command: forward the vendor's JSON, print a short line. Never blocks the TUI for long.
       let raw = '';
@@ -274,7 +275,7 @@ async function main() {
     // ----- internal / setup -----
     case 'hook': return hook(args._[0], args._[1], call);
     case 'prepare': { const { prepare, installDeps } = await import('../src/vendors.mjs'); prepare(args._[0], args._[1]); installDeps(args._[1]); return; }
-    case 'egress': { const { runEgress } = await import('../src/egress.mjs'); runEgress({ allow: args.allow, log: args.log, relay: args.relay }); return new Promise(() => {}); }
+    case 'egress': { const { runEgress, keepServing } = await import('../src/egress.mjs'); keepServing(); runEgress({ allow: args.allow, log: args.log, relay: args.relay }); return new Promise(() => {}); }
     case 'runner': {
       if (args._[0] === 'token') {
         const { readBrokerFile } = await import('../src/brokerfile.mjs');

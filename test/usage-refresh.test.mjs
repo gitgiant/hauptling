@@ -9,6 +9,7 @@ import * as keyStore from '../src/keys.mjs';
 import { createDashboard, dashToken } from '../src/dashboard.mjs';
 import { loadModels } from '../src/models.mjs';
 import { claudeReset, parseProbe, shortError } from '../src/usage-refresh.mjs';
+import { noReset, normalizeUsage } from '../src/usage.mjs';
 import { codexRateLimits } from '../src/docker.mjs';
 
 const NOW = Date.parse('2026-11-27T08:00:00Z');
@@ -33,6 +34,18 @@ test('probe parsers: each vendor answer → 5h and week windows', () => {
   assert.throws(() => parseProbe('claude', JSON.stringify({ num_turns: 1, result: '' })), /model turn/);
   assert.throws(() => parseProbe('agy', '{"status":"ERROR","error":"authentication failed"}'), /authentication failed/);
   assert.equal(shortError('visit https://accounts.example/o?x=1\nnow'), 'visit <url> now');
+});
+
+test('agy: an unset reset time (empty, missing, 0, the epoch) is null, never 1969', () => {
+  const unset = ['', undefined, 0, '0', '1970-01-01T00:00:00Z', '0001-01-01T00:00:00Z'];
+  for (const reset_time of unset) {
+    const out = JSON.stringify({ quota: { groups: [{ name: 'Gemini', buckets: [{ id: 'gemini-5h', window: '5h', remaining_fraction: 1, reset_time, reset_in_seconds: 0 }] }] } });
+    assert.deepEqual(parseProbe('agy', out), [{ window: '5h', used_pct: 0, resets_at: null }], String(reset_time));
+    assert.equal(normalizeUsage('agy', { quota: { 'gemini-5h': { remaining_fraction: 1, reset_time } } }).limits[0].resets_at, null, String(reset_time));
+  }
+  const relative = JSON.stringify({ quota: [{ window: '5h', remaining_fraction: 0.5, reset_time: '', reset_in_seconds: 60 }] });
+  assert.ok(Date.parse(parseProbe('agy', relative)[0].resets_at) > Date.now());
+  assert.deepEqual([noReset(0), noReset(12)], ['not started', 'no reset time']);
 });
 
 test('codex app-server exchange: initialize, then rate limits; errors surface', async () => {

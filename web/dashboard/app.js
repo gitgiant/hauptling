@@ -840,7 +840,7 @@ function meter(l) {
   return h('div', { class: 'acct' },
     h('div', { class: `meter ${cls}`, role: 'meter', 'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-valuenow': String(l.used_pct), 'aria-label': `${label} window used` },
       h('span', { text: label }), h('span', { class: 'track' }, h('span', { class: 'fill', style: `width:${Math.min(100, l.used_pct)}%` })), h('span', { class: 'val', text: `${Math.round(l.used_pct)}%` })),
-    h('span', { class: 'resets', text: l.resets_at ? `resets ${clock(l.resets_at)}` : 'reset time unknown' }));
+    h('span', { class: 'resets', text: l.resets_at ? `resets ${clock(l.resets_at)}` : l.used_pct === 0 ? 'not started' : 'no reset time' }));
 }
 async function loadUsage() {
   clearTimeout(usageTimer);
