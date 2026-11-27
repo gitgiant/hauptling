@@ -200,8 +200,13 @@ export function createDashboard({ db, dbPath, core, host, hub = null, updater = 
   let lastLoad = null;
   async function hostInfo() {
     const sys = host.sysInfo?.() || {};
-    const gpu = await host.gpuInfo?.().catch(() => null) ?? null;
+    // Each probe on its own: one that fails or is missing leaves its part of the panel out.
+    const probe = (f) => Promise.resolve().then(f).then(v => v ?? null, () => null);
+    const [gpu, containers, egress, dockerDisk, wsl, waits] = await Promise.all([() => host.gpuInfo?.(), () => host.containerStats?.(), () => host.egressState?.(),
+      () => host.dockerDisk?.(), () => host.wslMemory?.(), () => core.testWaits?.()].map(probe));
+    const log = await probe(() => host.logTail?.(20));
     return {
+      containers, egress, dockerDisk, wsl, waits, log,
       name: hostname(), ...sys, cpu: lastLoad?.cpu ?? null, gpu,
       broker: { pid: process.pid, uptime_s: Math.round((Date.now() - startedAt) / 1000), node: process.versions.node, version, image: host.imageTag?.() ?? null },
       ...(core.hostCounts?.() || { workers: { running: 0, max: 0, slots: 0, queued: 0 }, tests: { running: 0, queued: 0 } }),

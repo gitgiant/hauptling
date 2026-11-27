@@ -2,7 +2,7 @@
 import { ansiFragment } from './ansi.js';
 import { vendorBadge } from './vendors.js';
 import { windowLabel, sortWindows } from './windows.js';
-import { gauges, facts, repoRows } from './hostinfo.js';
+import { gauges, facts, repoRows, containerRows, dockerDisk, logLines } from './hostinfo.js';
 import { openReport, shouldOpenReport, terminalInputFocused } from './report.js';
 import { keyFor, TOUCH_KEYS } from './termkeys.js';
 import { testProgress } from './progress.js';
@@ -462,6 +462,12 @@ async function openHostInfo() {
       const i = await api.get('/dash/hostinfo');
       if (!$('#hostinfo')) return;
       const rows = repoRows(i);
+      const table = (heads, lines) => h('table', { class: 'grid' },
+        h('thead', {}, h('tr', {}, heads.map(t => h('th', { text: t })))),
+        h('tbody', {}, lines.map(r => h('tr', {}, r.map(c => h('td', { title: c, text: c }))))));
+      const boxes = containerRows(i), disk = dockerDisk(i), log = logLines(i);
+      const logBox = log.length ? h('pre', { class: 'hi-log', tabindex: '0', 'aria-label': 'Broker log, last lines' }, log.map(l => h('span', { class: l.bad ? 'bad' : '', text: `${l.text}\n` }))) : null;
+      const was = $('.hi-log'), logAt = was ? [was.scrollLeft, was.scrollTop] : null;
       put(body,
         h('div', { class: 'hi-gauges' }, gauges(i).map(g => h('div', { class: 'acct' },
           h('div', { class: `meter wide ${g.level}`, role: 'meter', 'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-valuenow': String(Math.round(g.pct ?? 0)), 'aria-label': g.label },
@@ -473,7 +479,11 @@ async function openHostInfo() {
         rows.length ? h('table', { class: 'grid' },
           h('thead', {}, h('tr', {}, ['Repo', 'Tests', 'GPU tests', 'Implementation', 'Start'].map(t => h('th', { text: t })))),
           h('tbody', {}, rows.map(r => h('tr', {}, r.map(c => h('td', { title: c, text: c }))))))
-          : h('p', { class: 'empty', text: 'Nothing measured yet.' }));
+          : h('p', { class: 'empty', text: 'Nothing measured yet.' }),
+        i.containers ? [h('h3', { text: 'Containers' }), boxes.length ? table(['Container', 'What', 'CPU now', 'Memory now'], boxes) : h('p', { class: 'empty', text: 'No Hauptling container is running.' })] : null,
+        disk.rows.length ? [h('h3', { text: 'Docker disk' }), table(['Kind', 'Count', 'Size', 'Reclaimable'], disk.rows), disk.hint ? h('p', { class: 'empty', text: disk.hint }) : null] : null,
+        logBox ? [h('h3', { text: 'Broker log' }), logBox] : null);
+      if (logBox) [logBox.scrollLeft, logBox.scrollTop] = logAt || [0, logBox.scrollHeight]; // opens at the newest line
     } catch (e) { put(body, h('p', { class: 'no', text: e.message })); }
     hostInfoTimer = setTimeout(load, 5000);
   };

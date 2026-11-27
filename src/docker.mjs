@@ -116,6 +116,95 @@ export function sysInfo() {
   };
 }
 
+// ---------- debug probes for the host info panel (PRD "Host info: debug") ----------
+const UNIT = { b: 1, kb: 1e3, mb: 1e6, gb: 1e9, tb: 1e12, kib: 2 ** 10, mib: 2 ** 20, gib: 2 ** 30, tib: 2 ** 40 };
+/** Docker's sizes ("12.21MiB", "4.49GB (99%)", "0B") in MiB, or null. */
+export function sizeMB(text) {
+  const m = /^\s*([\d.]+)\s*([a-zA-Z]+)/.exec(String(text));
+  const unit = m && UNIT[m[2].toLowerCase()];
+  return unit ? Math.round((Number(m[1]) * unit) / 2 ** 20 * 10) / 10 : null;
+}
+
+/** The last `bytes` of a file as text, without its first (cut) line; '' when it can't be read. */
+export function tailText(path, bytes = 65536) {
+  let fd;
+  try {
+    const size = statSync(path).size, from = Math.max(0, size - bytes);
+    fd = openSync(path, 'r');
+    const buf = Buffer.alloc(size - from);
+    const text = buf.subarray(0, readSync(fd, buf, 0, buf.length, from)).toString('utf8');
+    return from ? text.slice(text.indexOf('\n') + 1) : text;
+  } catch { return ''; } finally { if (fd !== undefined) closeSync(fd); }
+}
+
+/** Anything shaped like a key or token is cut out of log lines before they reach the dashboard. */
+const SECRET = /\b(sk-[\w-]{8,}|gh[pousr]_\w{16,}|github_pat_\w{16,}|AIza[\w-]{16,}|ya29\.[\w.-]{16,}|eyJ[\w-]{16,}\.[\w.-]+)|\b(token|secret|password|authorization|api[-_]?key)(["']?\s*[=:]\s*["']?)(?:Bearer\s+)?[^\s"',;]{6,}/gi;
+/** The last `n` lines of a log, long lines cut and secrets removed. */
+export function logTail(text, n = 20) {
+  return String(text).split('\n').filter(Boolean).slice(-n).map(l => (l.length > 400 ? `${l.slice(0, 400)}…` : l).replace(SECRET, (m, key, name, sep) => (key ? '[removed]' : `${name}${sep}[removed]`)));
+}
+
+/**
+ * What the tail of `egress.log` says ("<ISO time> BLOCK|ERROR <host> …"): the hosts blocked most recently
+ * ([{ host, n, last }], newest first) and the tunnel errors of the last hour.
+ */
+export function egressLog(text, at = Date.now(), top = 8) {
+  const blocked = new Map();
+  let errors = 0, lastError = null;
+  for (const line of String(text).split('\n')) {
+    const [time, verdict, host, ...rest] = line.split(' ');
+    if (!host) continue;
+    if (verdict === 'BLOCK') {
+      const b = blocked.get(host) || { host, n: 0, last: time };
+      blocked.delete(host); // re-inserted: the map stays ordered by last sighting
+      blocked.set(host, { host, n: b.n + 1, last: time });
+    } else if (verdict === 'ERROR' && at - Date.parse(time) < 3600e3) { errors += 1; lastError = `${host} ${rest.join(' ')}`.trim(); }
+  }
+  return { blocked: [...blocked.values()].reverse().slice(0, top), errors, lastError };
+}
+
+/** `memory=` of the `[wsl2]` section of a `.wslconfig`, in MiB, or null when it isn't set. */
+export function wslConfigMemMB(text) {
+  let section = '';
+  for (const raw of String(text).split('\n')) {
+    const line = raw.replace(/[#;].*/, '').trim();
+    const head = /^\[(.+)\]$/.exec(line);
+    if (head) { section = head[1].toLowerCase(); continue; }
+    const m = section === 'wsl2' && /^memory\s*=\s*([\d.]+)\s*([a-z]*)$/i.exec(line);
+    if (m) return sizeMB(`${m[1]}${m[2] || 'B'}`.replace(/^([\d.]+)([kmgt])b$/i, '$1$2iB'));
+  }
+  return null;
+}
+
+/** A probe whose answer is reused for `ms`; calls made while one runs share it. A failed probe answers null. */
+const cached = (ms, probe) => {
+  let at = 0, last = null, running = null;
+  return () => {
+    if (running) return running;
+    if (Date.now() - at < ms) return Promise.resolve(last);
+    running = Promise.resolve().then(probe).catch(() => null).then((v) => { last = v; at = Date.now(); running = null; return v; });
+    return running;
+  };
+};
+
+/**
+ * WSL only: the VM's memory against the `.wslconfig` setting and Windows' total and free memory (asked of
+ * PowerShell through WSL interop), or null elsewhere and when Windows can't be asked.
+ */
+export const wslMemory = cached(30e3, async () => {
+  if (!/microsoft/i.test(release())) return null;
+  const ps = ['powershell.exe', '/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe'];
+  const ask = (bin) => new Promise((resolve, reject) => execFile(bin, ['-NoProfile', '-NonInteractive', '-Command',
+    '$o = Get-CimInstance Win32_OperatingSystem; "$($o.TotalVisibleMemorySize) $($o.FreePhysicalMemory) $env:USERPROFILE"'], { timeout: 15e3 }, (err, out) => (err ? reject(err) : resolve(String(out).trim()))));
+  const out = await ask(ps[0]).catch(() => ask(ps[1]));
+  const m = /^(\d+) (\d+) (.*)$/.exec(out);
+  if (!m) return null;
+  const profile = /^([a-zA-Z]):\\(.*)$/.exec(m[3]);
+  let configuredMB = null;
+  if (profile) try { configuredMB = wslConfigMemMB(readFileSync(`/mnt/${profile[1].toLowerCase()}/${profile[2].replace(/\\/g, '/')}/.wslconfig`, 'utf8')); } catch {}
+  return { vmMB: Math.round(totalmem() / 2 ** 20), configuredMB, winTotalMB: Math.round(Number(m[1]) / 1024), winFreeMB: Math.round(Number(m[2]) / 1024) };
+});
+
 /** GPU utilization % of the first GPU (for the dashboard's load graph), or null. */
 export function gpuUtil() {
   const bin = nvidiaSmi();
@@ -741,6 +830,45 @@ export function dockerHost({ log = () => {}, docker: dockerCmd = docker } = {}) 
       if (ids.length) await dockerCmd(['rm', '-f', ...ids]);
     },
     gpuAvailable, gpuFreeMB, gpuUtil, gpuInfo, sysInfo,
+    wslMemory,
+    /** The last lines of the broker's log. */
+    logTail: (n = 20) => logTail(tailText(join(home(), 'broker.log')), n),
+    /**
+     * Running Hauptling containers with what they use now, heaviest first:
+     * [{ name, kind, id, state, cores, memMB, limitMB, pids }]. `docker stats` takes about 2 s.
+     */
+    containerStats: cached(4e3, async () => {
+      const ps = (await dockerCmd(['ps', '--format', '{{.Names}}\t{{.State}}\t{{.Label "hauptling.agent"}}\t{{.Label "hauptling.test"}}\t{{.Label "hauptling"}}'], { timeout: 15e3 })).stdout;
+      const mine = new Map();
+      for (const line of ps.split('\n')) {
+        const [name, state, agent, test, own] = line.split('\t');
+        const kind = agent ? 'worker' : test ? 'test job' : own === 'egress' ? 'egress proxy' : name?.startsWith('hauptling-usage-') ? 'usage probe' : null;
+        if (kind) mine.set(name, { name, kind, id: agent || test || null, state });
+      }
+      if (!mine.size) return [];
+      const stats = (await dockerCmd(['stats', '--no-stream', '--format', '{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.PIDs}}', ...mine.keys()], { timeout: 20e3 })).stdout;
+      for (const line of stats.split('\n')) {
+        const [name, cpu, mem, pids] = line.split('\t');
+        const c = mine.get(name);
+        if (!c) continue;
+        const [used, limit] = String(mem).split('/');
+        Object.assign(c, { cores: Number.isFinite(parseFloat(cpu)) ? Math.round(parseFloat(cpu)) / 100 : null, memMB: sizeMB(used), limitMB: sizeMB(limit), pids: Number(pids) || null });
+      }
+      return [...mine.values()].sort((a, b) => (b.memMB ?? -1) - (a.memMB ?? -1));
+    }),
+    /** The egress proxy: is it up, since when, Docker's restart count, and what its log says (see `egressLog`). */
+    egressState: cached(4e3, async () => {
+      const log = egressLog(tailText(join(home(), 'egress', 'egress.log')));
+      const out = await dockerCmd(['inspect', PROXY, '--format', '{{.State.Running}} {{.RestartCount}} {{.State.StartedAt}}'], { timeout: 15e3 }).then(r => r.stdout.trim(), () => null);
+      if (out == null) return { running: false, missing: true, ...log };
+      const [running, restarts, startedAt] = out.split(' ');
+      return { running: running === 'true', restarts: Number(restarts) || 0, startedAt, ...log };
+    }),
+    /** `docker system df`: [{ type, count, active, sizeMB, reclaimMB }], read at most once a minute. */
+    dockerDisk: cached(60e3, async () => (await dockerCmd(['system', 'df', '--format', '{{json .}}'], { timeout: 60e3 })).stdout.split('\n').filter(Boolean).map((l) => {
+      const d = JSON.parse(l);
+      return { type: d.Type, count: Number(d.TotalCount) || 0, active: Number(d.Active) || 0, sizeMB: sizeMB(d.Size), reclaimMB: sizeMB(d.Reclaimable) };
+    })),
     imageTag: () => { try { return baseImageTag(); } catch { return null; } },
     /** Last `token_count` payload of the newest Codex session log in the slot written since `since` (ISO), or null. */
     async codexUsage(slot, since, sessionId = null) {

@@ -1227,6 +1227,39 @@ test('tests scale with the host: jobs start while measured RAM and cores fit; un
   assert.equal(g.core.testScale().scaling, false);
 });
 
+test('host info: why the next queued test job of each queue waits', async () => {
+  const g = await gpuSetup({ gpu: ['run-gpu'] }, { free: 7000 });
+  const res = { memFreeMB: 6200, memTotalMB: 8000, cores: 8, load1: 0 };
+  g.host.resources = () => res;
+  g.host.testLimits = (gpu) => (gpu ? { memMB: 2000, cpus: 2 } : { memMB: 2560, cpus: 3 });
+  assert.deepEqual(await g.core.testWaits(), [], 'nothing queued');
+  const a = await g.core.call('test.request', {}, g.who), b = await g.core.call('test.request', {}, g.who), c = await g.core.call('test.request', {}, g.who), d = await g.core.call('test.request', {}, g.who);
+  await settle();
+  assert.deepEqual([a, b, c, d].map(t => g.state(t.id).state), ['running', 'running', 'queued', 'queued']);
+  let [w] = await g.core.testWaits();
+  assert.deepEqual([w.queue, w.id, w.repo, w.agent, w.queued], ['cpu', c.id, 'gitgiant/demo', g.who.agent, 2]);
+  assert.match(w.reason, /^short on RAM: needs 2560 MiB, 56 MiB to spare$/, '6200 free less 2 young jobs and the margin');
+  res.memFreeMB = 30000; res.load1 = 7;
+  assert.equal((await g.core.testWaits())[0].reason, 'short on cores: needs 3, 1 idle');
+  res.load1 = 0;
+  g.host.testConcurrency = () => 2;
+  assert.equal((await g.core.testWaits())[0].reason, 'all 2 CPU job slots are in use');
+  g.host.testConcurrency = () => 0;
+  assert.equal((await g.core.testWaits())[0].reason, 'short on cores: needs 3, 2 idle', 'two running jobs count as 3 cores each');
+  res.cores = 16;
+  assert.equal((await g.core.testWaits())[0].reason, 'nothing: it starts on the next check');
+  // GPU: one runs (counted as 6144 MiB of the 7000 free), the next has no VRAM beside it.
+  const x = await g.core.call('test.request', { gpu: true }, g.who), y = await g.core.call('test.request', { gpu: true }, g.who);
+  await settle();
+  assert.deepEqual([g.state(x.id).state, g.state(y.id).state], ['running', 'queued']);
+  const gpu = async () => (await g.core.testWaits()).find(t => t.queue === 'gpu');
+  assert.equal((await gpu()).id, y.id);
+  assert.equal((await gpu()).reason, 'short on VRAM: needs 6144 MiB, 7000 MiB free, 6144 MiB of it held for running jobs');
+  await g.core.call('gpu.pause', {});
+  assert.equal((await gpu()).reason, 'the GPU queue is paused (`hauptling gpu resume`)');
+  assert.equal(g.state(y.id).state, 'queued', 'asking changes nothing');
+});
+
 test('gpu in parallel: a repo measured alone is counted by its VRAM peak; a second job starts only when it fits beside the first', async () => {
   const g = await gpuSetup({ gpu: ['run-gpu'] }, { free: 7000 });
   g.host.resources = () => ({ memFreeMB: 30000, memTotalMB: 32000, cores: 16, load1: 0 });

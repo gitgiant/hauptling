@@ -1504,21 +1504,22 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   }
   const localTests = () => db.prepare("SELECT id, repo, gpu, claimed_at FROM tests WHERE state = 'running' AND host = 'hub'").all();
   /**
-   * Does the host have room for this job beside the running ones? Always for the first job. RAM: what is free
-   * now, less a margin and the estimates of jobs too young to have claimed theirs. CPU: cores less the higher of
-   * the load and the running jobs' estimates.
+   * What the host is short of for this job beside the running ones ({ what, need, have }), or null when it fits.
+   * It always fits as the first job. RAM: what is free now, less a margin and the estimates of jobs too young to
+   * have claimed theirs. CPU: cores less the higher of the load and the running jobs' estimates.
    */
-  function fits(t, at = Date.now()) {
-    if (!scaling()) return true;
+  function shortOf(t, at = Date.now()) {
+    if (!scaling()) return null;
     const running = localTests();
-    if (!running.length) return true;
+    if (!running.length) return null;
     const res = host.resources(), e = estimate(t);
     const young = running.filter(r => at - Date.parse(r.claimed_at) < SETTLE_MS).reduce((n, r) => n + estimate(r).memMB, 0);
     const margin = Math.max(1024, res.memTotalMB * 0.1);
-    if (res.memFreeMB - young - margin < e.memMB) return false;
+    if (res.memFreeMB - young - margin < e.memMB) return { what: 'RAM', need: e.memMB, have: Math.max(0, Math.round(res.memFreeMB - young - margin)) };
     const busy = Math.max(Number(res.load1) || 0, running.reduce((n, r) => n + estimate(r).cores, 0));
-    return res.cores - busy >= e.cores;
+    return res.cores - busy >= e.cores ? null : { what: 'cores', need: e.cores, have: Math.max(0, Math.round((res.cores - busy) * 10) / 10) };
   }
+  const fits = (t, at = Date.now()) => !shortOf(t, at);
   const median = (xs) => { const s = xs.filter(n => n != null && Number.isFinite(n)).sort((a, b) => a - b); return s.length ? s[Math.floor(s.length / 2)] : null; };
   /**
    * What work costs per repo (host info panel): test jobs (measured RAM, cores, VRAM and the usual run time),
@@ -1781,6 +1782,8 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     kvSet(db, `gpu:measured:${r.repo}`, JSON.stringify([...gpuPeaks(r.repo), peak].slice(-GPU_PEAKS)));
     log(`gpu measured ${r.repo}: ${peak} MiB (job ${id}); need now ${measuredNeed(r.repo)} MiB`);
   }
+  /** VRAM (MiB) the running GPU jobs are counted as but haven't claimed yet, given what is free now. */
+  const gpuReserved = (running, free) => Math.max(0, running.reduce((n, r) => n + gpuNeed(r), 0) - Math.max(0, Number(kvGet(db, 'gpu:baseline') || 0) - free));
   const nextGpuJob = () => db.prepare(`SELECT q.* FROM tests q WHERE q.state = 'queued' AND q.gpu = 1 AND q.host = 'hub' AND ${TEST_ELIGIBLE} ORDER BY q.created_at, q.rowid LIMIT 1`).get();
 
   /**
@@ -1806,9 +1809,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
         // Beside running jobs: what they are counted as but haven't claimed yet stays reserved for them. Our own
         // jobs holding the memory is not "GPU busy": no wait clock.
         if (free == null) return false;
-        const claimed = Math.max(0, Number(kvGet(db, 'gpu:baseline') || 0) - free);
-        const reserved = Math.max(0, running.reduce((n, r) => n + gpuNeed(r), 0) - claimed);
-        if (free - reserved < need) return false;
+        if (free - gpuReserved(running, free) < need) return false;
         kvDel(db, `gpu:wait:${t.id}`);
         gpuCheck = { id: t.id, free };
         return true;
@@ -1936,6 +1937,52 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
       if (at - Date.parse(t.created_at) >= STARVE_MS) return undefined;
     }
     return undefined;
+  }
+
+  /**
+   * Why the oldest queued job of each queue hasn't started (host info panel): the checks of `nextCpuJob` and
+   * `gpuReady` in their order, read-only. [{ queue, id, repo, agent, waited_s, queued, reason }], a queue with
+   * nothing waiting left out.
+   */
+  async function testWaits(at = Date.now()) {
+    const out = [];
+    const short = (s) => (s.what === 'RAM' ? `short on RAM: needs ${s.need} MiB, ${s.have} MiB to spare` : `short on cores: needs ${s.need}, ${s.have} idle`);
+    const external = 'waits for an external runner (`hauptling runner`)';
+    for (const gpu of [0, 1]) {
+      const all = db.prepare(`SELECT q.*, a.base, a.state agent_state FROM tests q LEFT JOIN agents a ON a.id = q.agent
+        WHERE q.state = 'queued' AND q.gpu = ? AND q.host = 'hub' ORDER BY q.created_at, q.rowid`).all(gpu);
+      if (!all.length) continue;
+      const t = all.find(q => !['paused', 'restarting'].includes(q.agent_state));
+      const first = t || all[0];
+      let reason = null;
+      if (!t) reason = `its agent is ${first.agent_state}`;
+      else if (!host.runTestJob) reason = external;
+      else if (gpu) {
+        const running = gpuRunning();
+        const s = shortOf(t, at);
+        if (kvGet(db, 'gpu:paused')) reason = 'the GPU queue is paused (`hauptling gpu resume`)';
+        else if (host.gpuRunner?.() === 'host') reason = 'left to the host GPU runner (`hauptling runner --gpu`)';
+        else if (running.length >= gpuLimit()) reason = `all ${gpuLimit()} GPU job slots are in use`;
+        else if (s) reason = short(s);
+        else {
+          const need = gpuNeed(t), free = await host.gpuFreeMB?.().catch(() => null) ?? null;
+          const held = running.length && free != null ? gpuReserved(running, free) : 0;
+          if (running.length && free == null) reason = 'free VRAM is unknown while another GPU job runs';
+          else if (free != null && free - held < need) {
+            reason = `short on VRAM: needs ${need} MiB, ${free} MiB free${held ? `, ${held} MiB of it held for running jobs` : ` (fails as "GPU busy" after ${gpuCfg().waitMinutes} min)`}`;
+          }
+        }
+      } else {
+        const s = shortOf(t, at);
+        const cpu = db.prepare("SELECT COUNT(*) n FROM tests WHERE state = 'running' AND gpu = 0 AND host = 'hub'").get().n;
+        const mine = db.prepare("SELECT COUNT(*) n FROM tests WHERE state = 'running' AND gpu = 0 AND host = 'hub' AND repo = ?").get(t.repo).n;
+        if (cpu >= concurrency()) reason = `all ${concurrency()} CPU job slots are in use`;
+        else if (mine >= repoLimit(t)) reason = `${t.repo} already runs its limit of ${repoLimit(t)}`;
+        else if (s) reason = short(s);
+      }
+      out.push({ queue: gpu ? 'gpu' : 'cpu', id: first.id, repo: first.repo, agent: first.agent, waited_s: Math.max(0, Math.round((at - Date.parse(first.created_at)) / 1000)), queued: all.length, reason: reason || 'nothing: it starts on the next check' });
+    }
+    return out;
   }
 
   /** Claims the oldest queued job of a queue (CPU: skipping repos at their limit). */
@@ -2700,5 +2747,5 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   hub?.bind({ receive, onState: placeSoon, onResult: commandDone });
   if (satellite) syncTests();
 
-  return { call, authenticate, emit, keyOut, ceiling, command, startAll, syncTests, freeSlots, headroomNote, blockerNote, spend, testProgress, testScale, repoCosts, hostCounts, gpuSample, poll, watch, watchTests, startQueued, bus, askForPage, answer, pump, recover, gpuReady, refreshUsage, refreshAllUsage, lastRefresh, holdSignin, recordUsage, budgetState, billingFor };
+  return { call, authenticate, emit, keyOut, ceiling, command, startAll, syncTests, freeSlots, headroomNote, blockerNote, spend, testProgress, testScale, testWaits, repoCosts, hostCounts, gpuSample, poll, watch, watchTests, startQueued, bus, askForPage, answer, pump, recover, gpuReady, refreshUsage, refreshAllUsage, lastRefresh, holdSignin, recordUsage, budgetState, billingFor };
 }
