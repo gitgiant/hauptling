@@ -67,11 +67,12 @@ async function setup({ probe = async (_s, v) => OUTPUT[v], signingIn = async () 
   const dir = mkdtempSync(join(tmpdir(), 'hl-refresh-'));
   const dbPath = join(dir, 'hauptling.db');
   const db = openDb(dbPath);
-  const probes = [], signedOut = [];
+  const probes = [], signedOut = [], stopped = [];
   const host = {
     workRoot: '/hl/work', async run() { return { stdout: '' }; }, async startWorker() {}, async stopWorker() {}, async tmuxType() {}, async hostGit() { return 'main'; },
     signedIn: async (slots) => slots,
     signingIn,
+    stopSignin: (slot, vendor) => { stopped.push(`${slot}:${vendor}`); },
     signOut: (slot, vendor) => { signedOut.push(`${slot}:${vendor}`); return true; },
     usageProbe: (slot, vendor, o) => { probes.push(`${slot}:${vendor}`); return probe(slot, vendor, o); },
   };
@@ -79,7 +80,7 @@ async function setup({ probe = async (_s, v) => OUTPUT[v], signingIn = async () 
   const dash = createDashboard({ db, dbPath, core, host });
   const { delegator } = await core.call('delegator.start', { repo: 'gitgiant/demo' });
   const readings = () => db.prepare('SELECT slot, vendor, window, used_pct FROM slot_usage ORDER BY vendor, window').all().map(r => `${r.slot} ${r.vendor} ${r.window} ${r.used_pct}`);
-  return { db, core, dash, probes, signedOut, delegator, readings, done: () => { db.close(); rmSync(dir, { recursive: true, force: true }); } };
+  return { db, core, dash, probes, signedOut, stopped, delegator, readings, done: () => { db.close(); rmSync(dir, { recursive: true, force: true }); } };
 }
 const byVendor = (r) => Object.fromEntries(r.vendors.map(v => [v.vendor, v]));
 const tick = () => new Promise(r => setTimeout(r, 20));
@@ -167,7 +168,7 @@ test('POST /dash/usage/refresh: cookie and X-Hauptling required; 429 when repeat
   s.done();
 });
 
-test('sign out: removes the sign-in of a slot and its readings; refused while a refresh or sign-in uses it', async () => {
+test('sign out: removes the sign-in of a slot and its readings; refused while `hauptling login` runs', async () => {
   const s = await setup({ signingIn: async (slot) => slot === 'hl-w3' });
   await s.core.call('usage.refresh');
   assert.ok(s.readings().some(r => r.startsWith('hl-w1 agy')));
@@ -175,11 +176,12 @@ test('sign out: removes the sign-in of a slot and its readings; refused while a 
   assert.deepEqual(s.signedOut, ['hl-w1:agy']);
   assert.ok(!s.readings().some(r => r.startsWith('hl-w1 agy')), 'the old account\'s windows are gone');
   assert.ok(s.readings().some(r => r.startsWith('hl-w1 claude')), 'other vendors keep theirs');
-  await assert.rejects(s.core.call('signin.out', { slot: 'hl-w3', vendor: 'agy' }), /signing in/);
+  await s.core.call('signin.out', { slot: 'hl-w3', vendor: 'agy' });
+  assert.deepEqual(s.stopped, ['hl-w3:agy'], 'a sign-in left open on the Usage page is closed, not a reason to refuse');
   await assert.rejects(s.core.call('signin.out', { slot: 'hl-w9', vendor: 'agy' }), /slot .* and a vendor/);
   await s.core.call('signin.begin', { slot: 'hl-w2', vendor: 'agy' });
   await assert.rejects(s.core.call('signin.out', { slot: 'hl-w2', vendor: 'agy' }), /signing in/);
-  assert.deepEqual(s.signedOut, ['hl-w1:agy']);
+  assert.deepEqual(s.signedOut, ['hl-w1:agy', 'hl-w3:agy']);
   s.done();
 });
 

@@ -314,6 +314,8 @@ export function createTerminals({ db, host, slotDir, loginTmux = tmux, hold = ()
 
 /** Whether a dashboard sign-in for this slot × vendor is still running (tmux on this host). */
 export const signingIn = (slot, vendor) => tmux(['display-message', '-p', '-t', `login-${slot}-${vendor}:`, '#{pane_dead}']).then(o => o.trim() === '0', () => false);
+/** Ends a dashboard sign-in for this slot × vendor, if one is open. */
+export const stopSignin = (slot, vendor) => tmux(['kill-session', '-t', `login-${slot}-${vendor}`]).then(() => true, () => false);
 
 /**
  * `hauptling attach` on the hub for an agent on a satellite (PRD "Part 3"): redraws the relayed screen when it

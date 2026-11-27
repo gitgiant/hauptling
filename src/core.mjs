@@ -846,14 +846,16 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
 
   /**
    * Signs a slot out of a vendor (PRD "Sign out"), to sign in with another account. Refused while a worker, a
-   * usage refresh or a sign-in uses it. The slot's readings go too: they are the old account's.
+   * usage refresh or `hauptling login` uses it; a sign-in open on the Usage page is closed. The slot's readings go too: they are the old account's.
    */
   async function signOut({ slot, vendor }) {
     if (!slots().includes(slot) || !isFamily(vendor)) throw new Error('sign out: a slot (hl-wN) and a vendor (claude, codex, agy) are required');
-    const busy = signinBusy(slot, vendor) || (await host.signingIn?.(slot, vendor) ? 'signing in' : null);
+    const busy = signinBusy(slot, vendor);
     if (busy) throw new Error(`${slot} ${vendor}: ${busy}; sign out when it has ended`);
     const release = holdSignin(slot, vendor, 'signing out');
     try {
+      // A sign-in left open on the Usage page is the user's own: signing out closes it.
+      if (await host.signingIn?.(slot, vendor)) await host.stopSignin?.(slot, vendor);
       const was = Boolean(await host.signOut(slot, vendor));
       db.prepare('DELETE FROM slot_usage WHERE slot = ? AND vendor = ?').run(slot, vendor);
       log(`signed out ${slot} ${vendor}`);
