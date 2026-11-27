@@ -7,7 +7,7 @@ import { openDb } from '../src/db.mjs';
 import { createCore } from '../src/core.mjs';
 import * as keyStore from '../src/keys.mjs';
 import { loadModels } from '../src/models.mjs';
-import { accumulate, estimateCost, lastTokenCount, normalizeUsage, outOfCredit, scrub, statusText, poolOf, windowLabel } from '../src/usage.mjs';
+import { accumulate, estimateCost, lastTokenCount, normalizeUsage, outOfCredit, signedOut, scrub, statusText, poolOf, windowLabel } from '../src/usage.mjs';
 
 // The key store reads and writes under here, never the real ~/.hauptling.
 const HOME = mkdtempSync(join(tmpdir(), 'hl-usage-'));
@@ -372,4 +372,64 @@ test('a worker started before the current key was set does not mark that key', a
   assert.equal(row(db, a.id).state, 'blocked');
   assert.equal(core.keyOut('claude'), null);
   assert.equal(toasts.length, 0);
+});
+
+test('signed-out patterns: each CLI\'s own line, not text that quotes it', () => {
+  assert.ok(signedOut('claude', '> go on\n  ⎿  Not logged in · Please run /login\n'));
+  assert.ok(signedOut('claude', '⏺ OAuth token revoked · Please run /login'));
+  assert.ok(signedOut('codex', '■ Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.'));
+  assert.ok(signedOut('agy', '  Welcome back! You are currently not signed in.'));
+  assert.ok(!signedOut('claude', '  12 + assert.ok(signedOut("claude", "Not logged in · Please run /login"))'));
+  assert.ok(!signedOut('claude', '  ⎿  API Error: 401 Invalid API key · Please run /login'), 'an API key problem is not a lost sign-in');
+  assert.ok(!signedOut('codex', '⏺ Not logged in · Please run /login'));
+});
+
+test('sign-in recovery: one restart per credential file version; told once when that does not help; restarts after a new sign-in', async () => {
+  const { db, host, core, toasts } = setup();
+  await core.call('delegator.start', { repo: 'gitgiant/demo' });
+  const { id } = await spawnOne(core);
+  let stamp = 1000, screen = '';
+  host.signinStamp = () => stamp;
+  host.tmuxCapture = async () => screen;
+  let restarts = 0;
+  host.restartWorker = async () => { restarts++; return true; };
+  const quiet = () => db.prepare('UPDATE identities SET seen_at = ? WHERE identity = ?').run(new Date(Date.now() - 5 * 60e3).toISOString(), id);
+  const lost = () => db.prepare("SELECT text FROM events WHERE kind = 'signin-lost' ORDER BY id").all().map(e => e.text);
+  quiet();
+  await core.watch();
+  assert.deepEqual(lost(), [], 'a quiet worker with a normal screen is left alone');
+  screen = '> continue\n  ⎿  Not logged in · Please run /login\n';
+  db.prepare('UPDATE identities SET seen_at = ? WHERE identity = ?').run(new Date().toISOString(), id);
+  await core.watch();
+  assert.deepEqual(lost(), [], 'not while it is active');
+  quiet();
+  await core.watch();
+  await settle();
+  assert.equal(lost().length, 1);
+  assert.match(lost()[0], /was signed out of claude \(another worker sharing the sign-in refreshed it first\); restarted/);
+  assert.equal(restarts, 1, 'the worker was restarted');
+  quiet();
+  await core.watch();
+  await settle();
+  assert.equal(lost().length, 2);
+  assert.match(lost()[1], /still signed out of claude after a restart.*Sign in again.*hauptling login hl-w1 claude/);
+  assert.equal(row(db, id).state, 'blocked');
+  assert.equal(toasts.filter(t => t.title === 'claude sign-in lost').length, 1);
+  quiet();
+  await core.watch();
+  assert.equal(lost().length, 2, 'told once');
+  stamp = 2000; // the user signed in again
+  quiet();
+  await core.watch();
+  await settle();
+  assert.equal(lost().length, 3);
+  assert.match(lost()[2], /restarted with the current sign-in$/);
+  assert.equal(restarts, 2);
+  assert.notEqual(row(db, id).state, 'blocked');
+  stamp = null; screen = '  Welcome back! You are currently not signed in.';
+  const g = await spawnOne(core, 'agy');
+  db.prepare('UPDATE identities SET seen_at = ? WHERE identity = ?').run(new Date(Date.now() - 5 * 60e3).toISOString(), g.id);
+  screen = '  Welcome back! You are currently not signed in.';
+  await core.watch();
+  assert.match(db.prepare("SELECT text FROM events WHERE kind = 'signin-lost' AND agent = ?").get(g.id).text, /the agy sign-in is gone/);
 });

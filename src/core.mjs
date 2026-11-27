@@ -5,7 +5,7 @@ import * as codegraph from './codegraph.mjs';
 import { checkTier, effortFor, enabledVendors, findModel, launchArgv, loadModels, nextVendor, pick, preferOf, setPrefer, shortModel, tierName } from './models.mjs';
 import { canInject } from './vendors.mjs';
 import { readFileSync } from 'node:fs';
-import { normalizeUsage, scrub, spendLine, statusText, windowSnapshot, accumulate, outOfCredit, reportedCost, poolOf, windowPool, windowLabel, poolLabel } from './usage.mjs';
+import { normalizeUsage, scrub, spendLine, statusText, windowSnapshot, accumulate, outOfCredit, signedOut, reportedCost, poolOf, windowPool, windowLabel, poolLabel } from './usage.mjs';
 import { parseProbe, shortError } from './usage-refresh.mjs';
 import { dashToken } from './dashboard.mjs';
 import { checkKeys } from './terminal.mjs';
@@ -790,6 +790,40 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     }
     emit(a.delegator, a.id, 'api-exhausted', `${a.id}: ${a.vendor} API credit ran out. This worker can't switch billing: kill it (\`hauptling kill ${a.id}\`) and respawn the task. Its work is in the container's working tree (${a.dir}), which kill deletes: save what you need first.`);
     return true;
+  }
+
+  /** A plan worker with no hook activity for this long has its screen checked for a lost sign-in. */
+  const SIGNIN_QUIET_MS = 60e3;
+  /**
+   * A worker whose screen says it is signed out (PRD "Sign-in recovery"). Workers sharing a sign-in can lose a
+   * token refresh to each other; the winner's tokens are in the shared file, so a restart picks them up. One
+   * restart per version of the credential file: if it is missing, or the restarted worker is signed out again,
+   * the user is told once, and the worker restarts by itself when the file changes (a new sign-in).
+   */
+  async function signinLost(a) {
+    const key = `signin:lost:${a.id}`;
+    const s = JSON.parse(kvGet(db, key) || '{}');
+    const own = signinOf(a.slot, a.vendor);
+    if (held.has(`${own}:${a.vendor}`) || cliSignin(own, a.vendor) || await host.signingIn?.(own, a.vendor)) return; // being signed in right now
+    const stamp = await host.signinStamp(a.slot, a.vendor);
+    if (stamp != null && stamp !== s.stamp) {
+      kvSet(db, key, JSON.stringify({ stamp }));
+      log(`sign-in lost ${a.id}: restarting with the current ${a.vendor} sign-in`);
+      try {
+        await restart({ agent: a.id });
+        emit(a.delegator, a.id, 'signin-lost', `${a.id} was signed out of ${a.vendor}${s.told ? '' : ' (another worker sharing the sign-in refreshed it first)'}; restarted with the current sign-in`);
+      } catch (e) { log(`sign-in lost ${a.id}: restart failed: ${e.message}`); }
+      return;
+    }
+    if (s.told) return;
+    kvSet(db, key, JSON.stringify({ stamp: s.stamp ?? null, told: now() }));
+    update(a.id, { state: 'blocked' });
+    setStatus(a.id, 'blocked: signed out');
+    const why = stamp == null ? `the ${a.vendor} sign-in is gone` : `still signed out of ${a.vendor} after a restart, so the sign-in itself is no longer valid`;
+    const text = `${a.id}: ${why}. Sign in again (Usage page, or \`hauptling login ${own} ${a.vendor}\`); the worker restarts by itself then${sharers(a.slot, a.vendor).length > 1 ? `. If it keeps happening: hauptling signins ${a.vendor} ${slots().length}` : ''}`;
+    emit(a.delegator, a.id, 'signin-lost', text);
+    toast(a.id, { title: `${a.vendor} sign-in lost`, body: text, choices: [], links: null, dashboard: `${publicUrl}/#usage` });
+    log(`sign-in lost ${text}`);
   }
 
   /** `hauptling usage <vendor>` from a worker's status line: raw vendor JSON → stored; returns the text to show. */
@@ -2096,6 +2130,11 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
           const screen = await host.tmuxCapture?.(a.slot, a.id, 25).catch(() => '') || '';
           if (!unchanged()) continue;
           if (outOfCredit(a.vendor, screen) && apiOut(a)) continue;
+        } else if (host.signinStamp && at - Date.parse(a.seen_at) >= SIGNIN_QUIET_MS) {
+          // A worker that lost its sign-in makes no hook calls: only quiet ones are looked at.
+          const screen = await host.tmuxCapture?.(a.slot, a.id, 25).catch(() => '') || '';
+          if (!unchanged()) continue;
+          if (signedOut(a.vendor, screen)) { await signinLost(a); continue; }
         }
         if (a.state === 'working' && a.idle) {
           // Ended its turn without `hauptling report` (e.g. asked a question in plain text).

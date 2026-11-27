@@ -686,6 +686,10 @@ export function dockerHost({ log = () => {}, docker: dockerCmd = docker } = {}) 
     },
     headroomPct: () => config().headroomPct,
     signinSlot: (slot, vendor) => signinSlot(slot, vendor),
+    /** When the credential file a worker slot uses was last written (ms), or null when it is missing or empty. */
+    signinStamp(slot, vendor) {
+      try { const st = statSync(join(vendorRoot(slot, vendor), CREDS[vendor])); return st.size > 0 ? st.mtimeMs : null; } catch { return null; }
+    },
     signins: (vendor) => signins(vendor),
     setSignins,
     testWatchdog: () => { const c = config(); return { stallSec: c.testStallSec, retries: c.testRetries }; },

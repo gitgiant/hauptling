@@ -136,6 +136,18 @@ export const OUT_OF_CREDIT = {
 };
 export const outOfCredit = (vendor, screen) => (OUT_OF_CREDIT[vendor] || []).some(re => re.test(String(screen)));
 
+/**
+ * What a vendor's TUI prints when its sign-in is gone or was rejected (PRD "Sign-in recovery"), matched at the
+ * start of a screen line like OUT_OF_CREDIT. Real wording only, read from the CLIs' binaries on 2026-11-27:
+ * claude 2.1.332, codex 0.172.0 (`codex_login::auth::manager`), agy 1.5.16 (its start screen).
+ */
+export const SIGNED_OUT = {
+  claude: [/^[\s⎿│┃●⏺■*!>-]*(?:Not logged in|OAuth token revoked|Login expired|Login reached its time limit) · Please run \/login/im],
+  codex: [/^[\s⎿│┃●⏺■•⚠*>!-]*Your access token could not be refreshed/im],
+  agy: [/^[\s│┃●■*>!-]*Welcome back! You are currently not signed in\./im],
+};
+export const signedOut = (vendor, screen) => (SIGNED_OUT[vendor] || []).some(re => re.test(String(screen)));
+
 /** What a worker forwards: the status line JSON minus personal fields. */
 export function scrub(payload) {
   const { email: _e, user_email: _u, account: _a, ...rest } = payload || {};
