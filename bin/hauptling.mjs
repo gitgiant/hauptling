@@ -23,7 +23,9 @@ Delegator (host): pass --delegator ID on spawn, wait, status, handoff and resume
   status [AGENT] [--all]                   agents of the current delegator (or just AGENT)
   models                                   models.json table (suggest mode reasons over this)
   models prefer [cheap|balanced|best]      show or set the highest tier workers may use (spawn --allow-tier overrides)
-  pause AGENT | unpause AGENT | restart AGENT
+  pause AGENT | unpause AGENT | restart AGENT   (a queued agent too: it is skipped until unpaused)
+  queue [--delegator ID]                   queued agents in the order they start
+  queue move AGENT --before OTHER | --after OTHER | --top | --bottom
   attach AGENT | reply AGENT <text> | kill AGENT | merge AGENT   (merge: local repos, or when automerge is off)
   test request --sha S [--selector X] [--gpu] [--timeout S] | test wait ID | test get ID | test report ID FILE
   dashboard [--print] [--host H] [--new-token]  open the dashboard (--print: show the sign-in link; --host: link via H, e.g. your Tailscale name)
@@ -60,7 +62,7 @@ const [cmd, ...rest] = process.argv.slice(2);
 
 async function main() {
   const { call } = await import('../src/client.mjs');
-  const args = parseArgs(rest, { repeat: ['choice', 'artifacts'], bool: ['test-writer', 'allow-tier', 'until-event', 'host', 'all', 'gpu', 'force', 'no-host', 'no-login', 'now', 'print', 'new-token', 'no-gate', 'no-automerge', 'once'] });
+  const args = parseArgs(rest, { repeat: ['choice', 'artifacts'], bool: ['test-writer', 'allow-tier', 'until-event', 'host', 'all', 'gpu', 'force', 'no-host', 'no-login', 'now', 'print', 'new-token', 'no-gate', 'no-automerge', 'once', 'top', 'bottom'] });
   const text = () => args._.join(' ');
   /** The agent id to use for what was typed; says so when it is the old id of a renamed agent. */
   const target = async (agent) => {
@@ -198,6 +200,16 @@ async function main() {
     }
     case 'reply': { const [agent, ...t] = args._; return out(await call('reply', { agent: await target(agent), text: t.join(' ') })); }
     case 'pause': case 'unpause': case 'restart': case 'kill': case 'merge': return out(await call(cmd, { agent: await target(args._[0]) }));
+
+    case 'queue': {
+      let r;
+      if (args._[0] === 'move') {
+        const other = async (x) => (x ? target(x) : undefined);
+        r = await call('queue.move', { agent: await target(args._[1]), before: await other(args.before), after: await other(args.after), top: args.top, bottom: args.bottom });
+      } else if (args._.length) throw new Error('queue [--delegator ID] | queue move AGENT --before OTHER|--after OTHER|--top|--bottom');
+      else r = await call('queue.list', { delegator: args.delegator });
+      return out(r.queue.map(q => `#${q.position} ${q.id}${q.paused ? ' (paused)' : ''}${q.unparking ? ' (unparking)' : ''}  ${q.title}`).join('\n') || `Nothing queued for ${r.delegator}.`);
+    }
 
     // ----- worker -----
     case 'usage': {

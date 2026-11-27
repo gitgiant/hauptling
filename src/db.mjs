@@ -103,6 +103,12 @@ export function openDb(path) {
   for (const t of ['agents', 'tests']) {
     try { db.exec(`ALTER TABLE ${t} ADD COLUMN host TEXT NOT NULL DEFAULT 'hub'`); } catch {}
   }
+  // Queue order (lower starts first), per delegator; rows from before the column are numbered by creation.
+  try {
+    db.exec('ALTER TABLE agents ADD COLUMN priority INTEGER NOT NULL DEFAULT 0');
+    db.exec(`UPDATE agents SET priority = (SELECT COUNT(*) FROM agents b WHERE b.delegator = agents.delegator
+      AND (b.created_at < agents.created_at OR (b.created_at = agents.created_at AND b.rowid <= agents.rowid)))`);
+  } catch {}
   // Part 2: placement (delegators.host NULL = auto; agents.want_host = a `spawn --host` pin; agents.gpu = `spawn --gpu`),
   // and asks.remote_id = the satellite's own id for a question mirrored to the hub.
   for (const [t, col] of [['delegators', 'host TEXT'], ['agents', 'want_host TEXT'], ['agents', 'gpu INTEGER NOT NULL DEFAULT 0'], ['asks', 'remote_id INTEGER']]) {
@@ -111,6 +117,10 @@ export function openDb(path) {
   return db;
 }
 
+/** A delegator's queue order (PRD "Queue priority"): unparking agents first. */
+export const QUEUE_ORDER = 'unpark IS NULL, priority, created_at, rowid';
+/** In the queue: queued, or paused while queued. */
+export const IN_QUEUE = "(state = 'queued' OR (state = 'paused' AND paused_state IS 'queued'))";
 export const kvGet = (db, key) => db.prepare('SELECT value FROM kv WHERE key = ?').get(key)?.value ?? null;
 export const kvDel = (db, key) => db.prepare('DELETE FROM kv WHERE key = ?').run(key);
 export const kvSet = (db, key, value) => db.prepare('INSERT INTO kv (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value').run(key, String(value));

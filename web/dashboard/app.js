@@ -4,6 +4,7 @@ import { vendorBadge } from './vendors.js';
 import { openReport, shouldOpenReport, terminalInputFocused } from './report.js';
 import { keyFor, TOUCH_KEYS } from './termkeys.js';
 import { testProgress } from './progress.js';
+import { movable, canDrop, dropSide, keyMove } from './queue.js';
 import { STACKED_QUERY, HANDLE_PX, DRAG_IGNORE, clampRatio, parseRatio, defaultRatio, splitKey, keyRatio, collapseAfterDrag, HEADER_STEPS, stepClasses, pickStep, handleKey } from './layout.js';
 // Text from the store is always set with textContent (h() below), never parsed as HTML.
 
@@ -449,15 +450,86 @@ function card(a) {
     a.ended || ['paused', 'restarting'].includes(a.state) ? null : runNow(a.test),
     usageChips(a.usage),
   ];
-  const el = h('div', { class: `card ${dotState(a)}${state.selected === a.id ? ' selected' : ''}`, role: 'button', tabindex: '0', onclick: () => select(a.id), onkeydown: (e) => e.key === 'Enter' && select(a.id) },
+  const el = h('div', { class: `card ${dotState(a)}${state.selected === a.id ? ' selected' : ''}`, 'data-id': a.id, role: 'button', tabindex: '0', onclick: () => select(a.id), onkeydown: (e) => e.key === 'Enter' && select(a.id) },
     h('span', { class: `dot ${dotState(a)}`, title: a.host_state ? `host ${a.host_state}` : a.state }),
     h('span', { class: 'title', title: a.headline || a.title, text: a.headline || a.title }),
     h('span', { class: 'elapsed', title: `started ${clock(a.created_at)}`, text: ago(a.created_at) }),
     a.headline ? h('div', { class: 'prompt', title: `Prompt: ${a.title}`, text: a.title }) : null,
-    h('div', { class: 'meta' }, meta),
+    h('div', { class: 'meta' }, movable(a) ? queueBadge(a, () => el) : null, meta),
   );
+  if (movable(a)) dragSource(el, a);
   return el;
 }
+
+// ---------- queue order: drag a queued card onto another, or Alt+↑/↓/Home on it (PRD "Queue priority") ----------
+let drag = null; // { a, el, over: { id, side } | null } while a card is being dragged; the board isn't re-rendered then
+/** Marks where the dragged card would land under this point: a line on the target card. */
+function dragOver(x, y) {
+  const el = document.elementFromPoint(x, y)?.closest('#board .card');
+  const b = el && state.board.agents.find(a => a.id === el.dataset.id);
+  clearDropLine();
+  const columns = Boolean(el) && el.offsetWidth * 1.5 < el.parentElement.clientWidth;
+  drag.over = b && canDrop(drag.a, b) ? { id: b.id, side: dropSide({ x, y }, el.getBoundingClientRect(), columns) } : null;
+  if (drag.over) el.classList.add(`drop-${drag.over.side}`, ...(columns ? ['drop-side'] : []));
+  return Boolean(drag.over);
+}
+const clearDropLine = () => document.querySelectorAll('.drop-before, .drop-after').forEach(el => el.classList.remove('drop-before', 'drop-after', 'drop-side'));
+function dragStart(el, a) {
+  drag = { a, el, over: null };
+  el.classList.add('dragging');
+}
+function dragEnd(drop) {
+  if (!drag) return;
+  const { a, el, over } = drag;
+  drag = null;
+  el.classList.remove('dragging');
+  clearDropLine();
+  renderBoard(state.board); // updates that arrived during the drag
+  if (drop && over) moveQueued(a.id, { [over.side]: over.id });
+}
+async function moveQueued(id, to) {
+  try { await api.post(`/dash/agents/${encodeURIComponent(id)}/move`, to); }
+  catch (e) { toast(`move: ${e.message}`, true); }
+}
+function dragSource(el, a) {
+  el.draggable = true;
+  el.classList.add('movable');
+  el.setAttribute('aria-keyshortcuts', 'Alt+ArrowUp Alt+ArrowDown Alt+Home');
+  el.addEventListener('dragstart', (e) => {
+    if (drag) { e.preventDefault(); return; } // a touch drag owns it
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', a.id); // Firefox starts no drag without data
+    dragStart(el, a);
+  });
+  el.addEventListener('dragend', () => dragEnd(false));
+  el.addEventListener('keydown', (e) => {
+    const key = e.altKey && { ArrowUp: 'up', ArrowDown: 'down', Home: 'top' }[e.key];
+    if (!key) return;
+    e.preventDefault(); // Alt+Home is the browser's home page
+    const to = keyMove(state.board.agents, a.id, key);
+    if (to) moveQueued(a.id, to);
+  });
+}
+/** "#2": the card's place in its delegator's queue, and the handle for dragging it by touch or pen. */
+function queueBadge(a, card) {
+  return h('span', { class: 'qpos', title: `#${a.queue} in ${a.delegator}'s queue. Drag to reorder, or Alt+↑/↓/Home on the card.`, text: `⠿ #${a.queue}`,
+    onclick: (e) => e.stopPropagation(),
+    onpointerdown: (e) => {
+      if (e.pointerType === 'mouse' || drag) return; // the mouse uses native drag and drop
+      e.preventDefault();
+      const handle = e.currentTarget;
+      handle.setPointerCapture(e.pointerId);
+      dragStart(card(), a);
+      const move = (ev) => { if (drag) dragOver(ev.clientX, ev.clientY); };
+      const end = (ev) => {
+        for (const [type, fn] of [['pointermove', move], ['pointerup', end], ['pointercancel', end]]) handle.removeEventListener(type, fn);
+        dragEnd(ev.type === 'pointerup');
+      };
+      for (const [type, fn] of [['pointermove', move], ['pointerup', end], ['pointercancel', end]]) handle.addEventListener(type, fn);
+    } });
+}
+$('#board').addEventListener('dragover', (e) => { if (drag && dragOver(e.clientX, e.clientY)) e.preventDefault(); });
+$('#board').addEventListener('drop', (e) => { if (drag) { e.preventDefault(); dragEnd(true); } });
 
 function testChip(t) {
   if (!t) return null;
@@ -517,6 +589,8 @@ function mergeToggle(d, delegator, kind) {
     } }, svg);
 }
 function renderBoard(b) {
+  if (drag) return; // replacing the cards would end the drag
+  const focused = document.activeElement?.matches?.('#board .card') ? document.activeElement.dataset.id : null;
   const active = new Map(b.delegators.map(d => [d.id, d]));
   const live = b.agents.filter(a => !a.ended && active.has(a.delegator));
   const recent = b.agents.filter(a => a.ended).sort((x, y) => (x.updated_at < y.updated_at ? 1 : -1));
@@ -536,7 +610,9 @@ function renderBoard(b) {
     const d = key.slice(0, key.indexOf('|')), repo = key.slice(key.indexOf('|') + 1);
     const idle = list.length === 0;
     const delegator = active.get(d);
-    list.sort((x, y) => (ORDER[x.state] ?? 9) - (ORDER[y.state] ?? 9) || (x.created_at < y.created_at ? -1 : 1));
+    // Queued cards (paused ones too) go in queue order.
+    const rank = (a) => (a.queue != null ? ORDER.queued : ORDER[a.state] ?? 9);
+    list.sort((x, y) => rank(x) - rank(y) || (x.queue ?? 0) - (y.queue ?? 0) || (x.created_at < y.created_at ? -1 : 1));
     const shut = shutGroups.has(key);
     const toggleTitle = idle
       ? (shut ? 'Show delegator status' : 'Hide delegator status')
@@ -558,6 +634,7 @@ function renderBoard(b) {
     out.push(det);
   }
   put($('#board'), ...out);
+  if (focused) $(`#board .card[data-id="${CSS.escape(focused)}"]`)?.focus({ preventScroll: true });
 }
 
 // ---------- detail ----------
@@ -614,7 +691,7 @@ function renderDetailHead(a, el) {
       ['paused', 'restarting'].includes(a.state) ? null : runNow(a.test),
       a.state === 'paused'
         ? h('button', { onclick: () => act('unpause', { agent: a.id }, `${a.id} resumed`) }, 'Resume')
-        : ['working', 'blocked', 'done', 'parked'].includes(a.state)
+        : ['queued', 'working', 'blocked', 'done', 'parked'].includes(a.state)
           ? h('button', { onclick: () => act('pause', { agent: a.id }, `${a.id} paused`) }, 'Pause') : null,
       ['working', 'blocked', 'done', 'parked', 'paused', 'exited', 'failed', 'restarting'].includes(a.state) && a.slot
         ? h('button', { onclick: () => confirm(`Restart ${a.id}? Its branch and working tree will be kept.`) && act('restart', { agent: a.id }, `${a.id} restarted`) }, 'Restart') : null,
