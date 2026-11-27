@@ -166,21 +166,30 @@ const imageExists = async (tag) => docker(['image', 'inspect', tag], { timeout: 
 
 /** Image builds in flight: tag → promise. */
 const building = new Map();
+/** Tags being built right now (not just checked). */
+const compiling = new Set();
 /**
  * Runs `build` unless `tag` exists. Concurrent callers for one tag (parallel test jobs, spawns) take turns:
  * whoever follows a successful build finds the image; after a failed one it builds from its own checkout.
+ * `onBuild` is called when this caller builds the image or waits for its build.
  */
-async function buildOnce(tag, exists, build) {
+async function buildOnce(tag, exists, build, onBuild) {
+  if (compiling.has(tag)) onBuild?.();
   while (building.has(tag)) await building.get(tag).catch(() => {});
-  const p = (async () => { if (!await exists(tag)) await build(); })().finally(() => building.delete(tag));
+  const p = (async () => {
+    if (await exists(tag)) return;
+    onBuild?.();
+    compiling.add(tag);
+    try { await build(); } finally { compiling.delete(tag); }
+  })().finally(() => building.delete(tag));
   building.set(tag, p);
   await p;
   return tag;
 }
 
-export async function ensureBaseImage({ log = () => {}, stdio } = {}) {
+export async function ensureBaseImage({ log = () => {}, stdio, onBuild } = {}) {
   const tag = baseImageTag();
-  return buildOnce(tag, imageExists, () => buildBaseImage(tag, { log, stdio }));
+  return buildOnce(tag, imageExists, () => buildBaseImage(tag, { log, stdio }), onBuild);
 }
 
 async function buildBaseImage(tag, { log, stdio }) {
@@ -209,7 +218,7 @@ export async function imageFor(dir, { dk = docker, baseImage, ...opts } = {}) {
   if (!existsSync(file)) return base;
   const tag = `hauptling-repo:${createHash('sha256').update(base).update(readFileSync(file)).digest('hex').slice(0, 12)}`;
   return buildOnce(tag, () => dk(['image', 'inspect', tag], { timeout: 30e3 }).then(() => true, () => false),
-    () => dk(['build', '-f', file, '--build-arg', `BASE=${base}`, '-t', tag, dir], { timeout: 1800e3 }));
+    () => dk(['build', '-f', file, '--build-arg', `BASE=${base}`, '-t', tag, dir], { timeout: 1800e3 }), opts.onBuild);
 }
 
 // ---------- network + egress proxy ----------
@@ -460,9 +469,12 @@ export function dockerHost({ log = () => {}, docker: dockerCmd = docker } = {}) 
     kind: 'docker',
     workRoot,
     run,
-    async startWorker({ slot, id, dir, vendor, argv, resumeArgv, env, apiKey = false, mcp = { mcpServers: {} }, codegraphCache = null }) {
+    async startWorker({ slot, id, dir, vendor, argv, resumeArgv, env, apiKey = false, mcp = { mcpServers: {} }, codegraphCache = null, onStep = () => {} }) {
+      const onBuild = () => onStep('building worker image');
+      await ensureBaseImage({ log, onBuild }); // before the network, which would build it unannounced
       await ensureNetwork({ log });
-      const image = await imageFor(dir, { log });
+      const image = await imageFor(dir, { log, onBuild });
+      onStep('starting container');
       const c = config();
       // Claude's managed MCP list (exclusive: the repo's own .mcp.json servers stay out unless copied in).
       const mcpFile = mcpPath(id);
@@ -475,11 +487,14 @@ export function dockerHost({ log = () => {}, docker: dockerCmd = docker } = {}) 
       await exec(id, ['hauptling', 'prepare', vendor, '/work'], { timeout: (INSTALL_TIMEOUT_S + 120) * 1000 });
       if (codegraphCache) {
         // Before the agent starts, so the saved index is the base commit's. A failure only costs the index.
+        onStep('preparing CodeGraph');
         const t0 = Date.now();
         try { await exec(id, codegraph.SETUP, { timeout: 1800e3 }); codegraph.save(dir, codegraphCache); log(`codegraph ${id}: index ready in ${Math.round((Date.now() - t0) / 1000)} s`); }
         catch (e) { log(`codegraph ${id}: ${e.message}`); }
       }
+      onStep(`launching ${vendor} CLI`);
       await startTui(id, { argv, resumeArgv });
+      onStep(resumeArgv ? 'resuming session' : 'sending brief');
     },
     pauseWorker: (_slot, id) => docker(['pause', container(id)], { timeout: 15e3 }),
     async unpauseWorker(_slot, id) {
@@ -491,11 +506,13 @@ export function dockerHost({ log = () => {}, docker: dockerCmd = docker } = {}) 
       const state = await workerState(id);
       if (state === 'paused') await docker(['unpause', container(id)]);
       else if (state !== 'running') return false;
+      opts.onStep?.(`launching ${opts.vendor} CLI`);
       // Check the saved tmux session inside the container. If only tmux died, recreate it there.
       const { stdout } = await exec(id, ['sh', '-c', 'tmux has-session -t main 2>/dev/null && echo yes || echo no']);
       if (stdout.trim() === 'yes') {
         await exec(id, ['tmux', 'respawn-pane', '-k', '-t', 'main:', '-c', '/work', cliCommand(opts)]);
       } else await startTui(id, opts);
+      opts.onStep?.(opts.resumeArgv ? 'resuming session' : 'sending brief');
       return true;
     },
     async tmuxAlive(_slot, id) {

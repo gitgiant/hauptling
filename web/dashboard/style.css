@@ -189,6 +189,16 @@ body.resizing { user-select: none; }
 .dot.exited, .dot.failed { background: var(--bad); }
 .dot.killed, .dot.closed { background: var(--bad); opacity: .55; }
 @keyframes spin { to { transform: rotate(360deg); } }
+/* Start progress: spinner, step and seconds (wheel.js). */
+.wheel { display: flex; align-items: center; gap: .4rem; min-width: 0; color: var(--accent); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+.card .wheel, .card .startfail { grid-column: 2 / 4; }
+.wheel .wtext { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wheel.centred { flex-direction: column; justify-content: center; gap: .8rem; min-height: 16rem; font-size: 14px; }
+.wheel.centred .spinner { width: 2.4rem; height: 2.4rem; border-width: 4px; }
+.spinner { width: .8rem; height: .8rem; border-radius: 50%; border: 2px solid var(--accent); border-right-color: transparent; flex: none; animation: spin 1s linear infinite; }
+.minibtn .spinner { position: absolute; right: 1px; bottom: 1px; background-color: var(--panel); }
+.startfail { color: var(--bad); font-size: 12.5px; overflow-wrap: anywhere; }
+@media (prefers-reduced-motion: reduce) { .spinner, .minibtn .spinner { animation: none; border: 0; background: var(--accent); } .wheel.centred .spinner { width: 1rem; height: 1rem; } }
 
 .chip { display: inline-block; padding: 0 .4rem; border-radius: 4px; font-size: 12px; border: 1px solid var(--line); }
 .chip.pass { color: var(--ok); border-color: currentColor; }

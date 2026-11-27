@@ -46,7 +46,7 @@ const RUNNER_CALLS = new Set(['test.claim', 'test.report', 'test.heartbeat']);
 /** What a satellite key may call on /api: nothing. It reports through /hub/state and /hub/events (ordered, exactly once). */
 const SATELLITE_CALLS = new Set();
 /** Agent columns a satellite mirrors to the hub (`state` events), plus its status line. */
-const MIRROR_FIELDS = ['state', 'unpark', 'slot', 'dir', 'idle', 'sha', 'report', 'pr_url', 'pr_number', 'gate', 'base', 'usage', 'billing', 'usage_start', 'paused_state', 'parked', 'start_from', 'ci_note'];
+const MIRROR_FIELDS = ['state', 'unpark', 'slot', 'dir', 'idle', 'sha', 'report', 'pr_url', 'pr_number', 'gate', 'base', 'usage', 'billing', 'usage_start', 'paused_state', 'parked', 'start_from', 'ci_note', 'step', 'step_at', 'step_error'];
 /** Test job columns mirrored to the hub (`test` events). */
 const TEST_FIELDS = ['id', 'agent', 'requester', 'repo', 'sha', 'branch', 'selector', 'gpu', 'artifacts', 'timeout_s', 'round', 'purpose', 'state', 'report', 'created_at', 'claimed_at', 'done_at', 'attempt', 'retry_note'];
 /** What a satellite's spawn command carries of the hub's agent row. */
@@ -78,6 +78,10 @@ export function createCore({ db, host, github, notify = () => false, models = lo
     db.prepare(`UPDATE agents SET ${keys.map(k => `${k} = ?`).join(', ')}, updated_at = ? WHERE id = ?`).run(...keys.map(k => fields[k]), now(), id);
     synced(id);
   };
+  /** The step a starting agent is at (PRD "Start progress"); ignored once it is no longer starting. */
+  const step = (id, text) => { if (['spawning', 'restarting'].includes(agentRow(id)?.state)) update(id, { step: text, step_at: now(), step_error: null }); };
+  /** Cleared when a start succeeds. */
+  const STARTED = { step: null, step_at: null, step_error: null };
   const setStatus = (id, text) => { mail.setStatus(db, id, text); synced(id); };
   /** A notification about an agent; a satellite sends it to the hub, which shows it to you. */
   const toast = (agent, n) => {
@@ -366,14 +370,14 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
         }
         if (!a) return null;
         if (place.name !== 'hub') {
-          db.prepare("UPDATE agents SET state = 'spawning', host = ?, updated_at = ? WHERE id = ?").run(place.name, now(), a.id);
+          db.prepare("UPDATE agents SET state = 'spawning', host = ?, step = NULL, step_at = ?, step_error = NULL, updated_at = ? WHERE id = ?").run(place.name, now(), now(), a.id);
           hub.command(place.name, 'spawn', { agent: Object.fromEntries(SPAWN_FIELDS.map(k => [k, a[k] ?? null])), delegator: { id: d, gate: Boolean(drow.gate), automerge: Boolean(drow.automerge) } });
           return { ...a, remote: place.name };
         }
         const slot = slotsFor(a)[0];
         const dir = `${host.workRoot}/${a.id}`;
         const billing = billingFor(a.vendor, a.model);
-        db.prepare("UPDATE agents SET state = 'spawning', slot = ?, dir = ?, billing = ?, auto = NULL, updated_at = ? WHERE id = ?").run(slot, dir, billing, now(), a.id);
+        db.prepare("UPDATE agents SET state = 'spawning', slot = ?, dir = ?, billing = ?, auto = NULL, step = NULL, step_at = ?, step_error = NULL, updated_at = ? WHERE id = ?").run(slot, dir, billing, now(), now(), a.id);
         synced(a.id);
         return { ...a, slot, dir, billing, state: 'spawning' };
       });
@@ -385,7 +389,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
       started.push(next.id);
       if (next.remote) { log(`placed ${next.id} on ${next.remote}`); continue; }
       (next.unpark ? unparkLaunch(next) : launch(next)).catch(e => {
-        update(next.id, { state: 'failed', report: `spawn failed: ${e.message}`.slice(0, 600) });
+        update(next.id, { state: 'failed', report: `spawn failed: ${e.message}`.slice(0, 600), step_error: shortError(e.message) });
         cancelAgentTests(next.id, 'failed');
         emit(next.delegator, next.id, 'failed', `${next.id} failed to start: ${e.message}`);
         startQueued(d).catch(() => {});
@@ -886,6 +890,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   }
 
   async function cloneWorker(a, { restart = false } = {}) {
+    step(a.id, 'cloning');
     await host.run(a.slot, ['rm', '-rf', a.dir]);
     await host.run(a.slot, ['mkdir', '-p', host.workRoot]);
     await host.run(a.slot, ['git', 'clone', '--quiet', cloneUrl(a), a.dir], { env: await authEnv(a) });
@@ -929,7 +934,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
       if (a.vendor === 'claude') resumeArgv = [...args, '--resume', a.session_id, again];
       if (a.vendor === 'codex') resumeArgv = [args[0], 'resume', ...args.slice(1), a.session_id, again];
     }
-    return { slot: a.slot, id: a.id, dir: a.dir, vendor: a.vendor, apiKey: a.billing === 'api', argv, resumeArgv,
+    return { slot: a.slot, id: a.id, dir: a.dir, vendor: a.vendor, apiKey: a.billing === 'api', argv, resumeArgv, onStep: (text) => step(a.id, text),
       mcp, codegraphCache: cg ? codegraph.cacheDir(a.repo) : null,
       env: { HAUPTLING_AGENT: a.id, HAUPTLING_TOKEN: a.token, HAUPTLING_BROKER: workerUrl } };
   }
@@ -937,7 +942,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
   async function launch(a) {
     a = await cloneWorker(a);
     await host.startWorker(await workerOptions(a));
-    update(a.id, { state: 'working', base: a.base, idle: 0, usage_start: JSON.stringify(windowSnapshot(db, a.vendor)) });
+    update(a.id, { ...STARTED, state: 'working', base: a.base, idle: 0, usage_start: JSON.stringify(windowSnapshot(db, a.vendor)) });
     setStatus(a.id, `working: ${a.title}`.slice(0, STATUS_MAX));
   }
 
@@ -1020,7 +1025,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     const why = agentRow(a.id).unpark || 'needed again';
     // One paused while it waited for your answer still does.
     const state = a.parked && db.prepare('SELECT 1 FROM asks WHERE agent = ? AND answered_at IS NULL').get(a.id) ? 'blocked' : 'working';
-    update(a.id, { state, unpark: null, parked: 0, base: a.base, idle: 0, usage_start: a.usage_start ?? JSON.stringify(windowSnapshot(db, a.vendor)) });
+    update(a.id, { ...STARTED, state, unpark: null, parked: 0, base: a.base, idle: 0, usage_start: a.usage_start ?? JSON.stringify(windowSnapshot(db, a.vendor)) });
     setStatus(a.id, `${state}: ${a.title}`.slice(0, STATUS_MAX));
     emit(a.delegator, a.id, 'unparked', `${a.id} unparked on ${a.slot} (${options.resumeArgv ? 'session resumed' : 'fresh launch: no saved session'}): ${why}`);
   }
@@ -1950,7 +1955,7 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
     const slot = a.slot && free.includes(a.slot) ? a.slot : free[0];
     if (!slot) throw new Error(`No slot free for ${a.vendor}`);
     if (!ACTIVE.includes(a.state) && workerCount(a.id) >= maxWorkers()) throw new Error(`maxWorkers (${maxWorkers()}) workers are running; free one first`);
-    update(a.id, { state: 'restarting', slot, idle: 0 });
+    update(a.id, { state: 'restarting', slot, idle: 0, step: null, step_at: now(), step_error: null });
     let newClone = false;
     let attempted = false;
     try {
@@ -1976,9 +1981,10 @@ ${common} Keep the session open afterwards: CI failures and review notes arrive 
         refreshAgent(a, 'exited', 0);
         if (!agentRow(a.id).session_id) update(a.id, { session_id: a.session_id });
       }
+      update(a.id, { step_error: shortError(e.message) });
       throw e;
     }
-    update(a.id, { base: a.base });
+    update(a.id, { ...STARTED, base: a.base });
     refreshAgent(a, 'working', 0);
     emit(a.delegator, a.id, 'restarted', `${a.id} restarted`);
     await releaseHeldWork(a.id);
