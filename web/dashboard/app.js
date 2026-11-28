@@ -458,9 +458,11 @@ async function openHostInfo() {
   close.focus();
   const load = async () => {
     if (!$('#hostinfo')) return;
+    let next = 5000;
     try {
       const i = await api.get('/dash/hostinfo');
       if (!$('#hostinfo')) return;
+      if (i.pending) next = 1000;
       const rows = repoRows(i);
       const table = (heads, lines) => h('table', { class: 'grid' },
         h('thead', {}, h('tr', {}, heads.map(t => h('th', { text: t })))),
@@ -485,7 +487,7 @@ async function openHostInfo() {
         logBox ? [h('h3', { text: 'Broker log' }), logBox] : null);
       if (logBox) [logBox.scrollLeft, logBox.scrollTop] = logAt || [0, logBox.scrollHeight]; // opens at the newest line
     } catch (e) { put(body, h('p', { class: 'no', text: e.message })); }
-    hostInfoTimer = setTimeout(load, 5000);
+    if ($('#hostinfo')) hostInfoTimer = setTimeout(load, next);
   };
   load();
 }

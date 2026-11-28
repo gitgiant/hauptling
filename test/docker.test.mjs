@@ -137,3 +137,51 @@ test('usage probe: runs in the last built worker image when this checkout\'s ima
   built.clear();
   await assert.rejects(host.usageProbe('hl-w1', 'claude', { timeoutMs: 1000 }), /worker image not built/);
 });
+
+test('cached: stale-while-revalidate returns previous answer at once, shares one refresh, failed probe answers null', async () => {
+  const { cached } = await import('../src/docker.mjs');
+  let now = 1000, calls = 0;
+  const pending = [];
+  const fn = cached(100, () => {
+    calls++;
+    return new Promise((resolve, reject) => pending.push({ resolve, reject }));
+  }, () => now);
+
+  // Cold: concurrent callers share the single in-flight run.
+  const c1 = fn(), c2 = fn();
+  await Promise.resolve();
+  assert.equal(calls, 1);
+  pending.shift().resolve('first');
+  assert.deepEqual(await Promise.all([c1, c2]), ['first', 'first']);
+
+  // Fresh: reuses the answer without running the probe again.
+  now += 50;
+  assert.equal(await fn(), 'first');
+  assert.equal(calls, 1);
+
+  // Stale: returns the stale answer at once and starts one background refresh; further calls share it.
+  now += 100;
+  assert.equal(await fn(), 'first');
+  await Promise.resolve();
+  assert.equal(calls, 2);
+  assert.equal(await fn(), 'first');
+  await Promise.resolve();
+  assert.equal(calls, 2, 'second call while refresh runs shares that one refresh');
+  pending.shift().resolve('second');
+  await new Promise(r => setTimeout(r, 0));
+  assert.equal(await fn(), 'second');
+  assert.equal(calls, 2, 'fresh after refresh finished');
+
+  // Failed probe on background refresh answers null (as today) without unhandled rejection.
+  now += 200;
+  assert.equal(await fn(), 'second', 'stale answer still returned immediately');
+  await Promise.resolve();
+  assert.equal(calls, 3);
+  pending.shift().reject(new Error('boom'));
+  await new Promise(r => setTimeout(r, 0));
+  assert.equal(await fn(), null, 'failed refresh stores null');
+
+  // Cold failure also answers null.
+  const failing = cached(100, () => Promise.reject(new Error('nope')), () => now);
+  assert.equal(await failing(), null);
+});

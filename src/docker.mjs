@@ -78,16 +78,36 @@ export function gpuFreeMB() {
   }));
 }
 
+/**
+ * Stale-while-revalidate cache for a probe: reuses an answer for `ms`; once older, returns the previous
+ * answer at once and refreshes in the background (one refresh at a time). Before the first answer arrives,
+ * callers share the in-flight run. A failed probe answers null.
+ */
+export function cached(ms, probe, now = Date.now) {
+  let has = false, at = 0, last = null, running = null;
+  const run = () => {
+    running = Promise.resolve().then(probe).catch(() => null).then((v) => {
+      last = v; has = true; at = now(); running = null; return v;
+    });
+    return running;
+  };
+  return () => {
+    if (!has) return running || run();
+    if (now() - at >= ms && !running) run();
+    return Promise.resolve(last);
+  };
+}
+
 /** The first GPU's name, utilization %, memory (MiB) and temperature, or null. */
-export function gpuInfo() {
+export const gpuInfo = cached(4e3, () => {
   const bin = nvidiaSmi();
-  if (!bin) return Promise.resolve(null);
+  if (!bin) return null;
   return new Promise((resolve) => execFile(bin, ['--query-gpu=name,utilization.gpu,memory.used,memory.total,temperature.gpu', '--format=csv,noheader,nounits'], { timeout: 15e3 }, (err, out) => {
     const [name, util, used, total, temp] = String(out).split('\n')[0].split(',').map(s => s.trim());
     const n = (v) => (Number.isFinite(Number(v)) && v !== '' ? Number(v) : null);
     resolve(err || !name ? null : { name, util: n(util), memUsedMB: n(used), memTotalMB: n(total), tempC: n(temp) });
   }));
-}
+});
 
 /** Host facts for the dashboard's host info panel: addresses, memory, swap, load and the disks Hauptling writes to. */
 export function sysInfo() {
@@ -175,17 +195,6 @@ export function wslConfigMemMB(text) {
   }
   return null;
 }
-
-/** A probe whose answer is reused for `ms`; calls made while one runs share it. A failed probe answers null. */
-const cached = (ms, probe) => {
-  let at = 0, last = null, running = null;
-  return () => {
-    if (running) return running;
-    if (Date.now() - at < ms) return Promise.resolve(last);
-    running = Promise.resolve().then(probe).catch(() => null).then((v) => { last = v; at = Date.now(); running = null; return v; });
-    return running;
-  };
-};
 
 /**
  * WSL only: the VM's memory against the `.wslconfig` setting and Windows' total and free memory (asked of

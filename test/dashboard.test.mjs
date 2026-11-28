@@ -324,3 +324,72 @@ test('report endpoints: need the header, scrub tokens, run gh with the stubbed a
   assert.equal((await post('/dash/report/send', { title: 't', screenshot: big })).code, 200, 'a 3 MB image passes the body limit');
   s.done();
 });
+
+test('hostinfo: answers under 300 ms cold and warm with slow probes, fills in when ready, isolates failures and hangs', async () => {
+  const { cached } = await import('../src/docker.mjs');
+  const s = await setup();
+  const defer = () => { let resolve, reject; const promise = new Promise((res, rej) => { resolve = res; reject = rej; }); return { promise, resolve, reject }; };
+  let now = 1000, statsCalls = 0;
+  const gpuD = defer(), statsD = defer(), diskD = defer(), wslD = defer();
+  s.host.gpuInfo = cached(4e3, () => gpuD.promise, () => now);
+  s.host.containerStats = cached(4e3, () => { statsCalls++; return statsD.promise; }, () => now);
+  s.host.dockerDisk = () => diskD.promise;
+  s.host.wslMemory = () => wslD.promise;
+  s.host.egressState = async () => ({ running: true, restarts: 0, errors: 0, blocked: [] });
+  s.host.logTail = () => { throw new Error('log broken'); };
+
+  // Cold call: slow probes do not block the response past the deadline.
+  const t0 = Date.now();
+  const cold = await s.req('/dash/hostinfo');
+  const coldMs = Date.now() - t0;
+  assert.equal(cold.code, 200);
+  assert.ok(coldMs < 300, `cold /dash/hostinfo took ${coldMs} ms`);
+  assert.equal(cold.json.pending, true);
+  assert.equal(cold.json.gpu, null);
+  assert.equal(cold.json.containers, null);
+  assert.equal(cold.json.dockerDisk, null);
+  assert.equal(cold.json.wsl, null);
+  assert.equal(cold.json.log, null, 'failing probe only leaves its own part out');
+  assert.equal(cold.json.egress.running, true, 'fast probe still included');
+
+  // Resolve slow probes; warm call returns immediately with all parts populated.
+  gpuD.resolve({ name: 'RTX', util: 10, memUsedMB: 500, memTotalMB: 8192, tempC: 50 });
+  statsD.resolve([{ name: 'hl-a', kind: 'worker', id: 'a', state: 'running', cores: 0.5, memMB: 256, limitMB: 2048 }]);
+  diskD.resolve([{ type: 'Images', count: 1, active: 1, sizeMB: 500, reclaimMB: 0 }]);
+  wslD.resolve({ vmMB: 8192, configuredMB: 10240, winTotalMB: 16384, winFreeMB: 4096 });
+  await new Promise(r => setTimeout(r, 10));
+
+  const t1 = Date.now();
+  const warm = await s.req('/dash/hostinfo');
+  const warmMs = Date.now() - t1;
+  assert.equal(warm.code, 200);
+  assert.ok(warmMs < 300, `warm /dash/hostinfo took ${warmMs} ms`);
+  assert.equal(warm.json.pending, false);
+  assert.equal(warm.json.gpu.name, 'RTX');
+  assert.equal(warm.json.containers[0].name, 'hl-a');
+  assert.equal(warm.json.dockerDisk[0].type, 'Images');
+  assert.equal(warm.json.wsl.vmMB, 8192);
+
+  // Stale cached probe still answers at once with the previous value and triggers one background refresh.
+  now += 5000;
+  const statsRefresh = defer();
+  s.host.containerStats = cached(4e3, () => { statsCalls++; return statsRefresh.promise; }, () => now);
+  // Prime with a value, then make it stale:
+  statsRefresh.resolve([{ name: 'hl-b', kind: 'worker', id: 'b', state: 'running', cores: 1, memMB: 512, limitMB: 2048 }]);
+  await s.host.containerStats();
+  now += 5000;
+  const slowRefresh = defer();
+  s.host.gpuInfo = cached(4e3, () => slowRefresh.promise, () => now);
+  // Hanging probe on wslMemory only leaves wsl out; other parts still return under 300 ms.
+  s.host.wslMemory = () => new Promise(() => {});
+  const t2 = Date.now();
+  const stale = await s.req('/dash/hostinfo');
+  const staleMs = Date.now() - t2;
+  assert.equal(stale.code, 200);
+  assert.ok(staleMs < 300, `stale/hanging /dash/hostinfo took ${staleMs} ms`);
+  assert.equal(stale.json.pending, true);
+  assert.equal(stale.json.wsl, null, 'hanging probe leaves its own part out');
+  assert.equal(stale.json.containers[0].name, 'hl-b', 'stale cached probe still returned at once');
+  assert.equal(stale.json.egress.running, true);
+  s.done();
+});

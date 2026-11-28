@@ -198,14 +198,47 @@ export function createDashboard({ db, dbPath, core, host, hub = null, updater = 
   /** The commit this broker runs, read once. */
   const version = (() => { try { return gitSync('git', ['-C', rootUrl(new URL('..', import.meta.url)), 'log', '-1', '--format=%h %cs'], { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { return null; } })();
   let lastLoad = null;
+  const PROBE_DEADLINE_MS = 150;
+  const TIMEOUT = Symbol('timeout');
+  const probeState = new Map();
   async function hostInfo() {
     const sys = host.sysInfo?.() || {};
-    // Each probe on its own: one that fails or is missing leaves its part of the panel out.
-    const probe = (f) => Promise.resolve().then(f).then(v => v ?? null, () => null);
-    const [gpu, containers, egress, dockerDisk, wsl, waits] = await Promise.all([() => host.gpuInfo?.(), () => host.containerStats?.(), () => host.egressState?.(),
-      () => host.dockerDisk?.(), () => host.wslMemory?.(), () => core.testWaits?.()].map(probe));
-    const log = await probe(() => host.logTail?.(20));
+    let pending = false;
+    // Each probe on its own with a short deadline: one that fails, hangs or is still warming up leaves
+    // its part out (and marks the reply pending) instead of blocking the panel.
+    const probe = async (key, f) => {
+      let s = probeState.get(key);
+      if (!s) { s = { running: null, arrived: null }; probeState.set(key, s); }
+      if (s.arrived) { const { v } = s.arrived; s.arrived = null; return v; }
+      let p = s.running;
+      const started = !p;
+      if (!p) p = Promise.resolve().then(f).then(v => v ?? null, () => null);
+      const v = await new Promise((resolve) => {
+        const t = setTimeout(() => resolve(TIMEOUT), PROBE_DEADLINE_MS);
+        p.then((r) => { clearTimeout(t); resolve(r); });
+      });
+      if (v !== TIMEOUT) {
+        if (!started) { s.running = null; s.arrived = null; }
+        return v;
+      }
+      pending = true;
+      if (started) {
+        s.running = p;
+        p.then((r) => { if (s.running === p) { s.running = null; s.arrived = { v: r }; } });
+      }
+      return null;
+    };
+    const [gpu, containers, egress, dockerDisk, wsl, waits, log] = await Promise.all([
+      probe('gpu', () => host.gpuInfo?.()),
+      probe('containers', () => host.containerStats?.()),
+      probe('egress', () => host.egressState?.()),
+      probe('dockerDisk', () => host.dockerDisk?.()),
+      probe('wsl', () => host.wslMemory?.()),
+      probe('waits', () => core.testWaits?.()),
+      probe('log', () => host.logTail?.(20)),
+    ]);
     return {
+      pending,
       containers, egress, dockerDisk, wsl, waits, log,
       name: hostname(), ...sys, cpu: lastLoad?.cpu ?? null, gpu,
       broker: { pid: process.pid, uptime_s: Math.round((Date.now() - startedAt) / 1000), node: process.versions.node, version, image: host.imageTag?.() ?? null },
