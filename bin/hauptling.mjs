@@ -42,7 +42,7 @@ Mailbox (any session):
   mail send <you> <to|family> <text> | mail check <you> | mail status <you> <text>
   mail peers [--all] | mail need <you> <to> <path> [why] | mail give <you> <to> <path> | mail prune [hours] [--force]
 Setup:
-  setup [--slots 3] [--vendors claude,codex,agy] [--no-host] [--no-login]
+  setup [--slots 3] [--vendors claude,codex,agy] [--no-host] [--no-login] [--no-mod]
                                            everything: skill, Docker, worker image, egress proxy, broker, sign-ins, doctor
   doctor                                   check tools, Docker, image, egress, broker and sign-ins
   image                                    build the worker image if hauptling changed
@@ -68,7 +68,7 @@ const [cmd, ...rest] = process.argv.slice(2);
 
 async function main() {
   const { call } = await import('../src/client.mjs');
-  const args = parseArgs(rest, { repeat: ['choice', 'artifacts'], bool: ['test-writer', 'allow-tier', 'until-event', 'host', 'all', 'gpu', 'force', 'no-host', 'no-login', 'now', 'print', 'new-token', 'no-gate', 'no-automerge', 'once', 'top', 'bottom', 'check', 'console'] });
+  const args = parseArgs(rest, { repeat: ['choice', 'artifacts'], bool: ['test-writer', 'allow-tier', 'until-event', 'host', 'all', 'gpu', 'force', 'no-host', 'no-login', 'no-mod', 'now', 'print', 'new-token', 'no-gate', 'no-automerge', 'once', 'top', 'bottom', 'check', 'console'] });
   const text = () => args._.join(' ');
   /** The agent id to use for what was typed; says so when it is the old id of a renamed agent. */
   const target = async (agent) => {
@@ -369,7 +369,7 @@ async function main() {
     }
     case 'setup': {
       const { setup } = await import('../src/setup.mjs');
-      const good = await setup({ slots: Number(args.slots || 3), vendors: args.vendors ? args.vendors.split(',') : undefined, host: !args.noHost, login: !args.noLogin });
+      const good = await setup({ slots: Number(args.slots || 3), vendors: args.vendors ? args.vendors.split(',') : undefined, host: !args.noHost, login: !args.noLogin, mod: !args.noMod });
       if (!good) process.exitCode = 1;
       return;
     }

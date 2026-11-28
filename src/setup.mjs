@@ -1,7 +1,7 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, symlinkSync } from 'node:fs';
+import { accessSync, constants, cpSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, symlinkSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline/promises';
 import { BROKER_PORT, VENDORS, home } from './util.mjs';
@@ -27,10 +27,10 @@ const LOGIN_HINT = {
 };
 
 /**
- * One-shot setup, safe to rerun: delegator skill, host tools + Docker (sudo), worker image,
+ * One-shot setup, safe to rerun: delegator skill, Claude CLI mod (`mod: false` skips it), host tools + Docker (sudo), worker image,
  * network + egress proxy, broker restart, sign-in for every slot × vendor without credentials, doctor.
  */
-export async function setup({ slots = 3, vendors = VENDORS, host = true, login: doLogin = true }) {
+export async function setup({ slots = 3, vendors = VENDORS, host = true, login: doLogin = true, mod = true }) {
   const plat = await platform();
   const [major, minor] = process.versions.node.split('.').map(Number);
   if (major < 22 || (major === 22 && minor < 5)) throw new Error(`Node ${process.versions.node} is too old; need 22.5+ (install.sh installs it)`);
@@ -46,6 +46,10 @@ export async function setup({ slots = 3, vendors = VENDORS, host = true, login: 
   for (const line of installStatusLines()) ok(line);
   for (const line of plat.setupHost({ root: ROOT })) ok(line);
   gitIdentity();
+
+  step('Claude CLI mod (the delegator\'s agents inside Claude Code)');
+  if (mod) for (const [good, line] of installMod()) (good ? ok : bad)(line);
+  else ok('skipped (--no-mod)');
 
   if (host) {
     step('Host (sudo): git, gh, Docker Engine, NVIDIA Container Toolkit (if a GPU), hauptling on PATH');
@@ -67,6 +71,86 @@ export async function setup({ slots = 3, vendors = VENDORS, host = true, login: 
 
   if (doLogin) await loginMissing(slotNames(slots), vendors);
   return doctor({ slots, vendors });
+}
+
+const MARKETPLACE = 'hauptling'; // .claude-plugin/marketplace.json
+const PLUGIN = `hauptling@${MARKETPLACE}`;
+
+/** First `claude` on PATH. In WSL, Windows programs (under /mnt/) don't count: that is the Windows user's Claude. */
+function findClaude(env) {
+  for (const dir of (env.PATH || '').split(delimiter)) {
+    if (!dir || (env.WSL_DISTRO_NAME && dir.startsWith('/mnt/'))) continue;
+    const bin = join(dir, 'claude');
+    try { accessSync(bin, constants.X_OK); if (statSync(bin).isFile()) return bin; } catch { /* not here */ }
+  }
+  return null;
+}
+
+const samePath = (a, b) => {
+  const real = (p) => { try { return realpathSync(p); } catch { return resolve(p); } };
+  return Boolean(a) && real(a) === real(b);
+};
+
+/** Settings that keep an installed mod from loading. Only the user (or their organization) can change them. */
+function modBlockers(env, managed) {
+  const user = join(env.CLAUDE_CONFIG_DIR || join(env.HOME || homedir(), '.claude'), 'settings.json');
+  return [user, managed].flatMap(file => {
+    let settings;
+    try { settings = JSON.parse(readFileSync(file, 'utf8')); } catch { return []; }
+    return ['disableAllHooks', 'allowManagedHooksOnly', 'allowManagedModsOnly']
+      .filter(key => settings?.[key] === true)
+      .map(key => `the mod will not load while ${file} sets "${key}": true; remove it (managed settings: ask your administrator)`);
+  });
+}
+
+/** In WSL, the command that gives the Windows Claude the mod too. It is printed, never run from here. */
+function windowsModHint(root, env) {
+  if (!env.WSL_DISTRO_NAME) return [];
+  const r = spawnSync('wslpath', ['-w', root], { encoding: 'utf8', env });
+  const path = r.status === 0 && r.stdout.trim() || `\\\\wsl.localhost\\${env.WSL_DISTRO_NAME}${root.replaceAll('/', '\\')}`;
+  return [[true, `Claude on Windows too? Run there (Claude Code 2.1.275+): claude plugin install hauptling --marketplace "${path}"`]];
+}
+
+/**
+ * Installs the Claude CLI mod (claude-mod/) into this host's Claude Code plugins, with the checkout as a folder
+ * marketplace: sessions read the mod from the checkout, so an update needs only `/reload-plugins`. Safe to rerun:
+ * a moved checkout is re-pointed, and a mod you disabled stays disabled. Never fails setup.
+ * @returns {Array<[boolean, string]>} lines to print as [fine, text]
+ */
+export function installMod({ root = ROOT, env = process.env, managed = '/etc/claude-code/managed-settings.json' } = {}) {
+  root = resolve(root);
+  const windows = windowsModHint(root, env);
+  const skip = (why) => [[true, `skipped: ${why}`], ...windows];
+  const bin = findClaude(env);
+  if (!bin) return skip('Claude Code is not installed here');
+  const claude = (...args) => {
+    // From the home directory, so no project's settings take part.
+    const r = spawnSync(bin, ['plugin', ...args], { encoding: 'utf8', env, cwd: env.HOME || homedir(), stdio: ['ignore', 'pipe', 'pipe'], timeout: 120e3 });
+    if (r.status === 0) return r.stdout;
+    const why = (r.stderr || r.stdout || r.error?.message || `exit ${r.status}`).trim().split('\n').at(-1);
+    throw new Error(`\`claude plugin ${args.join(' ')}\` failed: ${why}`);
+  };
+  try {
+    // Builds without mods have no `claude plugin test`.
+    if (!/^\s+test\b/m.test(claude('--help'))) return skip('this Claude Code is too old for mods (`claude update`, then rerun setup)');
+    const lines = [];
+    const market = JSON.parse(claude('marketplace', 'list', '--json')).find(m => m.name === MARKETPLACE);
+    if (market?.source === 'directory' && samePath(market.path, root)) lines.push([true, `marketplace ${MARKETPLACE} → ${root}`]);
+    else {
+      claude('marketplace', 'add', root); // also re-points an existing one
+      lines.push([true, `marketplace ${MARKETPLACE} ${market ? 're-pointed' : 'added'} → ${root}`]);
+    }
+    const plugin = JSON.parse(claude('list', '--json')).find(p => p.id === PLUGIN && p.scope === 'user');
+    if (!plugin) {
+      claude('install', PLUGIN, '--scope', 'user');
+      lines.push([true, `${PLUGIN} installed: open sessions load it with /reload-plugins`]);
+    } else lines.push([true, plugin.enabled ? `${PLUGIN} installed and enabled` : `${PLUGIN} is disabled and stays so (on: \`claude plugin enable ${PLUGIN}\`)`]);
+    if (!plugin || plugin.enabled) lines.push([true, `turn it off: \`claude plugin disable ${PLUGIN}\` (setup leaves it off)`]);
+    lines.push(...modBlockers(env, managed).map(text => [false, text]));
+    return [...lines, ...windows];
+  } catch (e) {
+    return [[false, `mod not installed: ${e.message}`], ...windows];
+  }
 }
 
 const gitGet = (bin, key) => spawnSync(bin, ['config', '--global', key], { encoding: 'utf8' }).stdout?.trim() || '';
