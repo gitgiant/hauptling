@@ -1,0 +1,16 @@
+{
+  "name": "hauptling",
+  "version": "0.1.0",
+  "description": "Hauptling's agents above the prompt: status, context and controls for this repo's delegator, without a browser",
+  "author": {
+    "name": "Hauptling"
+  },
+  "license": "UNLICENSED",
+  "types": "./types/index.d.ts",
+  "network": {
+    "hosts": [
+      "127.0.0.1",
+      "localhost"
+    ]
+  }
+}
