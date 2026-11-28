@@ -15,7 +15,7 @@ const linkState = atom({ plugin: 'hauptling', key: 'link' } as const, 'unknown')
 const hereState = atom({ plugin: 'hauptling', key: 'here' } as const, null)
 const tabState = atom({ plugin: 'hauptling', key: 'tab' } as const, null)
 const alertsState = atom({ plugin: 'hauptling', key: 'alerts' } as const, { keys: [], primed: false }, { shape: 'alerts-1' })
-const blinkState = atom({ plugin: 'hauptling', key: 'blink' } as const, false)
+const blinkState = atom({ plugin: 'hauptling', key: 'blink' } as const, true)
 
 type $ = EngineInterface
 

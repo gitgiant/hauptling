@@ -93,7 +93,7 @@ declare module 'claude-code' {
       opened: string | null
       /** Alert keys seen on the last board, and whether the first board has been seen (it toasts nothing). */
       alerts: Shaped<{ keys: string[]; primed: boolean }>
-      /** Blink phase of the red circle. */
+      /** Blink phase of the red circle: true while lit, as it starts. */
       blink: boolean
     }
   }

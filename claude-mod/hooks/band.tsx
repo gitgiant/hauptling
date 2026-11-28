@@ -19,7 +19,7 @@ const linkState = atom({ plugin: 'hauptling', key: 'link' } as const, 'unknown')
 const hereState = atom({ plugin: 'hauptling', key: 'here' } as const, null)
 const tabState = atom({ plugin: 'hauptling', key: 'tab' } as const, null)
 const focusedState = atom({ plugin: 'hauptling', key: 'focused' } as const, null)
-const blinkState = atom({ plugin: 'hauptling', key: 'blink' } as const, false)
+const blinkState = atom({ plugin: 'hauptling', key: 'blink' } as const, true)
 
 /** The `key` of an agent's Button is its id; tabs are `tab:<delegator>`. */
 const TAB = 'tab:'
