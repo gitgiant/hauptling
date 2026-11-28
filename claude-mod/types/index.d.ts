@@ -78,6 +78,21 @@ export type Alert = { key: string; text: string }
 /** How the broker answered the last poll. */
 export type Link = 'unknown' | 'up' | 'down'
 
+/** What the side pane shows (pane.tsx): the table, a view of the selected agent, or the delegator's options. */
+export type PaneView = 'table' | 'diff' | 'events' | 'suggest' | 'claude' | 'answer' | 'options'
+
+/** A kill, restart or merge waiting for y/n (PRD "Confirmation"). */
+export type PanePending = { action: 'kill' | 'restart' | 'merge'; agent: string; name: string }
+
+/** The pane's status line: the last action's result or error. */
+export type PaneStatus = { text: string; isError: boolean }
+
+/** The diff or events of one agent, as lines to draw. */
+export type PaneDetail = { agent: string; kind: 'diff' | 'events'; lines: string[]; note: string | null }
+
+/** `/dash/usage`, the parts the pane header reads: each vendor's windows and the model tier preference. */
+export type PaneUsage = { vendors: { vendor: string; limits: { window: string; used_pct: number }[] }[]; prefer: string | null }
+
 declare module 'claude-code' {
   interface PluginState {
     hauptling: {
@@ -97,6 +112,22 @@ declare module 'claude-code' {
       alerts: Shaped<{ keys: string[]; primed: boolean }>
       /** Blink phase of the red circle: true while lit, as it starts. */
       blink: boolean
+      /** The pane's view. */
+      paneView: PaneView
+      /** The pane lists every agent of the delegator on the board, not only the band's. */
+      paneShowAll: boolean
+      /** The confirmation the pane is asking, or null. */
+      panePending: PanePending | null
+      /** The pane's status line, or null. */
+      paneStatus: PaneStatus | null
+      /** The diff or events view's content, or null. */
+      paneDetail: Shaped<PaneDetail | null>
+      /** Vendor usage and the tier preference for the pane header; null before the first read. */
+      paneUsage: Shaped<PaneUsage | null>
+      /** The host last picked for the delegator's new agents (the board does not carry it), or null. */
+      paneHost: string | null
+      /** A reply the pane refused (too long), put back in the field to shorten. */
+      paneDraft: string | null
     }
   }
 }
