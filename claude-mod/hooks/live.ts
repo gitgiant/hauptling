@@ -7,6 +7,7 @@ import type { EngineInterface, SessionStartInput } from 'claude-code'
 import { alertsOf, bandModel, delegatorsHere, newAlerts, repoSlug } from './board'
 import type { Here } from './board'
 import { board as fetchBoard } from './client'
+import { terminalBoard } from './terminal'
 
 // This file's `$.state` atoms (contract: types/index.d.ts). The scan reads an atom only from a const of the
 // file that uses it, so each file declares its own: keep the initial value and shape tag the same everywhere.
@@ -59,6 +60,7 @@ export async function poll($: $): Promise<void> {
     retryAt = 0
     await update($, boardState, () => b)
     await update($, linkState, () => 'up' as const)
+    await terminalBoard($, b).catch(() => {})
     const here = await read($, hereState)
     const mine = new Set(delegatorsHere(b, here ?? { slug: null, root: null }).map(d => d.id))
     const current = alertsOf(b, mine, now)

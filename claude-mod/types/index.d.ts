@@ -79,7 +79,7 @@ export type Alert = { key: string; text: string }
 export type Link = 'unknown' | 'up' | 'down'
 
 /** What the side pane shows (pane.tsx): the table, a view of the selected agent, or the delegator's options. */
-export type PaneView = 'table' | 'diff' | 'events' | 'suggest' | 'claude' | 'answer' | 'options'
+export type PaneView = 'table' | 'diff' | 'events' | 'suggest' | 'claude' | 'answer' | 'options' | 'terminal'
 
 /** A kill, restart or merge waiting for y/n (PRD "Confirmation"). */
 export type PanePending = { action: 'kill' | 'restart' | 'merge'; agent: string; name: string }
@@ -92,6 +92,29 @@ export type PaneDetail = { agent: string; kind: 'diff' | 'events'; lines: string
 
 /** `/dash/usage`, the parts the pane header reads: each vendor's windows and the model tier preference. */
 export type PaneUsage = { vendors: { vendor: string; limits: { window: string; used_pct: number }[] }[]; prefer: string | null }
+
+/** The pane's terminal view (terminal.tsx): one agent's live screen and its input switch. */
+export type TermView = {
+  agent: string
+  /** The agent's short name, as the pane lists it. */
+  name: string
+  /** The newest screen (`capture-pane -e` text), or null before the first. */
+  frame: string | null
+  /** True while `frame` is the screen saved at parking (`/dash/agent/<id>/screen`), not a live one. */
+  saved: boolean
+  /** Whether keys go to the worker, until when, and the agent's state when that keeps input off. */
+  input: boolean
+  until: string | null
+  state: string | null
+  /** When input went off by itself (the broker's 10 idle minutes), or null. */
+  offAt: string | null
+  /** What the field has sent to the worker's input line since the last Enter. */
+  typed: string
+  /** A passing word from the broker (a satellite offline) or a failed call, or null. */
+  note: string | null
+  /** Why the stream ended (the session exited, the agent ended, the broker went away), or null while live. */
+  ended: string | null
+}
 
 declare module 'claude-code' {
   interface PluginState {
@@ -128,6 +151,8 @@ declare module 'claude-code' {
       paneHost: string | null
       /** A reply the pane refused (too long), put back in the field to shorten. */
       paneDraft: string | null
+      /** The terminal view's screen and input state, or null while it is closed. */
+      term: Shaped<TermView | null>
     }
   }
 }

@@ -160,11 +160,12 @@ test('each key sends its call', async ($, on) => {
   // The GPU queue from the header.
   await ui.press({ key: 'key:gpu' })
   expect(w.posts.at(-1)).toEqual({ path: '/dash/do/gpu.pause', body: {} })
-  // The terminal is the next task: it says so and sends nothing.
-  const n = w.posts.length
+  // The terminal view (terminal.test.tsx tests it): it opens on the selected agent, `b` goes back.
   await ui.press({ key: 'key:terminal' })
-  expect(w.posts).toHaveLength(n)
-  expect(await texts(ui)).toContain('terminal: not built yet')
+  expect(await ui.find({ type: 'Button', key: 'key:kill' })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', key: 'key:back' })).toBeDefined()
+  expect(await texts(ui)).toContain('codex·gate')
+  await ui.press({ key: 'key:back' })
   // Options: gate, auto-merge, host, model tier.
   await ui.press({ key: 'key:options' })
   await ui.press({ key: 'key:gate' })
