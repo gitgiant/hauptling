@@ -384,6 +384,32 @@ Hosts are Linux; Windows runs everything in WSL. Platform-specific code sits beh
 
 macOS stays untested until a Mac is available.
 
+## Claude CLI mod (2026-11-28)
+
+Dashboard controls inside the Claude Code CLI: a Claude Code mod (plugin with a hooks module) that shows the delegator's agents above the prompt and drives them without a browser. Not built yet.
+
+- **Home:** `claude-mod/` in this repo, next to the API it depends on. `hauptling setup` installs it into the host's Claude plugins, so both a Windows and a WSL Claude get it.
+- **Connection:** the dashboard API on `127.0.0.1:47800` (WSL forwards localhost, and the loopback check passes from Windows). It signs in by sending the dashboard token as the `hl_dash` cookie, read once via `hauptling dashboard --print`. POSTs carry `X-Hauptling: 1`. Live data comes from `/dash/stream` (SSE board snapshots), actions from `/dash/do/<call>`, queue moves from `/dash/agents/<id>/move`, the terminal from `/dash/term/<id>/stream|input|keys|size`, and diff and events from `/dash/agent/<id>/diff|events`. No new broker routes.
+- **Activation:** the band shows while the board has an active delegator whose `repo` matches the session's `git remote` (`owner/name`). It hides when that delegator ends or the broker can't be reached. Several active delegators for one repo: one tab each.
+- **Placement:** a one-row **band above the prompt**, always on while active, plus a **side pane** opened on demand (Enter on an agent, or `/h`) holding the full table, controls, terminal, diff and events.
+- **Columns:** short name | model | ctx % | status circle. When the row runs out of room it collapses to circle plus initials (`● cv`). There is no progress %.
+  - **Short name:** vendor plus the first distinctive word of the title, skipping prefixes like `Scenes:` and `Fix:` (`claude·vaporwave`). The 5-char ID suffix is appended only when two names clash. Initials in the collapsed form.
+  - **ctx %:** `usage.context_pct`, already on the board from the workers' status lines (Claude and Codex). Shows `—` where it's missing. Open: whether agy workers report it, and if not, whether Hauptling should read it from agy's session log against the model's window in `models.json`.
+- **Which agents:** queued, running, blocked, paused and in the gate, plus anything finished in the last 30 min. The pane has a "show all" toggle.
+- **Status circles:** ● green running, ◐ yellow idle, ●! red blocked or asking (blinks), ‖ grey paused, ◌ dim queued, ◆ blue in the gate, ✓ merged, ✗ killed or failed.
+- **Navigation:** a mod only gets keys once its site has focus. Ctrl+x tab (or the user's chord) focuses the band, ←/→ or 1–9 selects an agent, Enter opens it in the pane, Esc goes back to the prompt.
+  - **Pane keys:** k kill, p pause/unpause, r restart, m merge, a answer an ask, s / S suggest, t terminal, d diff, e events, shift+↑/↓ queue move (top/bottom too).
+  - **Slash commands** do the same from the prompt without a focus change: `/h kill cv`, `/h pause 2`, `/h reply cv <text>`, `/h gate off` and so on. Agents are named by short name, initials or list number.
+- **Confirmation:** kill, restart and merge ask y/n inline; pressing the same key twice skips the question. Everything else acts at once.
+- **Terminal:** in the pane, a live view of the worker's tmux screen from the broker's term stream, sized to the pane (the same size lease as the web terminal). Ctrl+x i turns input on and keys go through `term/<id>/keys`; the broker's 10-minute idle-off applies. Esc returns focus. No pop-out.
+- **Suggest:** `s` sends typed text straight to the worker (`reply`). When the worker has an open ask, the same key shows its choices and answers it. `S` hands the text to this Claude session as a prompt ("suggest to <agent>: …") so the delegator adds context and sends the reply itself.
+- **Extras (dashboard parity):**
+  - Toasts plus the red circle for asks, blocks, reports and failed gates.
+  - Answering asks from the pane; diff and event views; merge; the PR link.
+  - Queue reorder; delegator settings (gate, automerge, host); model tier preference.
+  - A pane header line with the gate and test queue, GPU pause/resume, and each vendor's 5h and weekly usage %.
+- **Build and test:** `claude plugin validate`, `claude plugin test` and `tsc` against the mod's types, then a live load into a delegator session against a real broker.
+
 ## Open
 
 - **agy session on unpark**: where agy keeps conversations (and whether `agy --conversation <id>` resumes one copied into another slot) is unknown, so a parked agy worker unparks fresh (PRD "Parking").
