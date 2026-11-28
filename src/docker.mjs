@@ -895,7 +895,8 @@ export function dockerHost({ log = () => {}, docker: dockerCmd = docker } = {}) 
       const d = JSON.parse(l);
       return { type: d.Type, count: Number(d.TotalCount) || 0, active: Number(d.Active) || 0, sizeMB: sizeMB(d.Size), reclaimMB: sizeMB(d.Reclaimable) };
     })),
-    imageTag: () => { try { return baseImageTag(); } catch { return null; } },
+    /** Golden worker image tag for the host info panel, cached for 60 s (`baseImageTag()` stays fresh for spawns/builds). */
+    imageTag: cached(60e3, () => baseImageTag()),
     /** Last `token_count` payload of the newest Codex session log in the slot written since `since` (ISO), or null. */
     async codexUsage(slot, since, sessionId = null) {
       // codex: subscription sign-in; codex-key: API key mode (separate CODEX_HOME).

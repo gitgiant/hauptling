@@ -185,3 +185,11 @@ test('cached: stale-while-revalidate returns previous answer at once, shares one
   const failing = cached(100, () => Promise.reject(new Error('nope')), () => now);
   assert.equal(await failing(), null);
 });
+
+test('dockerHost.imageTag returns baseImageTag and caches it', async () => {
+  const { dockerHost, baseImageTag } = await import('../src/docker.mjs');
+  const host = dockerHost({ docker: async () => ({ stdout: '' }) });
+  const tag = await host.imageTag();
+  assert.equal(tag, baseImageTag());
+  assert.equal(await host.imageTag(), tag);
+});

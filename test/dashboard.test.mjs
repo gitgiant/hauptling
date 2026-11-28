@@ -27,13 +27,13 @@ function fakeHost() {
 }
 const gh = { gitAuthEnv: async () => ({}), prFind: async () => null, prCreate: async () => ({ url: 'u', number: 1 }), requiredChecks: async () => [], prAutoMerge: async () => {}, prMerge: async () => {}, prView: async () => ({ state: 'OPEN', statusCheckRollup: [] }) };
 
-async function setup() {
+async function setup({ now } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'hl-dash-'));
   const dbPath = join(dir, 'hauptling.db');
   const db = openDb(dbPath);
   const host = fakeHost();
   const core = createCore({ db, host, github: gh, keys: { ...keyStore, getKey: () => null, getBudget: () => null }, notify: () => true, models: () => loadModels(join(tmpdir(), 'none.json')), workerUrl: 'http://w', publicUrl: 'http://127.0.0.1:47800', runnerToken: 'RUN' });
-  const dash = createDashboard({ db, dbPath, core, host });
+  const dash = createDashboard({ db, dbPath, core, host, ...(now ? { now } : {}) });
   await core.call('delegator.start', { repo: 'gitgiant/demo' });
   const { id } = await core.call('spawn', { brief: 'task brief', vendor: 'claude', mode: 'cheapest' });
   await new Promise(r => setTimeout(r, 20));
@@ -391,5 +391,61 @@ test('hostinfo: answers under 300 ms cold and warm with slow probes, fills in wh
   assert.equal(stale.json.wsl, null, 'hanging probe leaves its own part out');
   assert.equal(stale.json.containers[0].name, 'hl-b', 'stale cached probe still returned at once');
   assert.equal(stale.json.egress.running, true);
+  s.done();
+});
+
+test('hostinfo: blocking imageTag is computed off the request path, fills on a later fetch, and is cached for 60 s', async () => {
+  let now = 1000, calls = 0;
+  const s = await setup({ now: () => now });
+  s.host.imageTag = () => {
+    calls++;
+    const end = Date.now() + 300;
+    while (Date.now() < end) {}
+    return `hauptling-worker:tag${calls}`;
+  };
+
+  // Cold: replies immediately without blocking on imageTag, leaving broker.image null and pending true.
+  const t0 = Date.now();
+  const cold = await s.req('/dash/hostinfo');
+  const coldMs = Date.now() - t0;
+  assert.equal(cold.code, 200);
+  assert.ok(coldMs < 300, `cold /dash/hostinfo took ${coldMs} ms`);
+  assert.equal(cold.json.broker.image, null);
+  assert.equal(cold.json.pending, true);
+  assert.equal(calls, 0, 'imageTag not computed on the request path');
+
+  // Let the deferred setImmediate run; the tag appears on the next fetch.
+  await new Promise(r => setTimeout(r, 10));
+  assert.equal(calls, 1);
+
+  const t1 = Date.now();
+  const warm = await s.req('/dash/hostinfo');
+  const warmMs = Date.now() - t1;
+  assert.equal(warm.code, 200);
+  assert.ok(warmMs < 300, `warm /dash/hostinfo took ${warmMs} ms`);
+  assert.equal(warm.json.broker.image, 'hauptling-worker:tag1');
+  assert.equal(warm.json.pending, false);
+  assert.equal(calls, 1);
+
+  // Within 60 s: reuses cached tag without recomputing.
+  now += 59_999;
+  const stillFresh = await s.req('/dash/hostinfo');
+  await new Promise(r => setTimeout(r, 10));
+  assert.equal(stillFresh.json.broker.image, 'hauptling-worker:tag1');
+  assert.equal(calls, 1, 'computed at most once per 60 s');
+
+  // At 60 s: replies immediately with previous tag and refreshes off the request path.
+  now += 1;
+  const t2 = Date.now();
+  const stale = await s.req('/dash/hostinfo');
+  const staleMs = Date.now() - t2;
+  assert.ok(staleMs < 300, `stale /dash/hostinfo took ${staleMs} ms`);
+  assert.equal(stale.json.broker.image, 'hauptling-worker:tag1');
+  assert.equal(calls, 1, 'refresh deferred off the request path');
+
+  await new Promise(r => setTimeout(r, 10));
+  assert.equal(calls, 2);
+  const refreshed = await s.req('/dash/hostinfo');
+  assert.equal(refreshed.json.broker.image, 'hauptling-worker:tag2');
   s.done();
 });
