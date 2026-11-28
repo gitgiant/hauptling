@@ -16,13 +16,16 @@ git clone https://github.com/gitgiant/hauptling && cd hauptling
 `install.sh` installs Node 22 if needed and runs `hauptling setup`, which does everything and is safe to rerun:
 
 1. `/delegator` skill for Claude, Codex and agy; your git identity (copied from Windows git on WSL if missing).
-2. Host (asks for sudo once): git, gh, Docker Engine (started at WSL boot / by systemd), hauptling on PATH.
-3. Worker image `hauptling-worker` (first build takes a few minutes), internal network `hauptling-int`, egress proxy `hauptling-egress`.
-4. Broker restart.
-5. Sign-in: asks, slot by slot, for every vendor without credentials (stored in `~/.hauptling/slots/<slot>/`, kept across containers).
-6. `hauptling doctor`.
+2. Claude CLI mod ([claude-mod/](claude-mod/README.md): the delegator's agents inside Claude Code), if `claude` is installed and has mods: this checkout is added as a folder marketplace and `hauptling@hauptling` installed from it.
+3. Host (asks for sudo once): git, gh, Docker Engine (started at WSL boot / by systemd), hauptling on PATH.
+4. Worker image `hauptling-worker` (first build takes a few minutes), internal network `hauptling-int`, egress proxy `hauptling-egress`.
+5. Broker restart.
+6. Sign-in: asks, slot by slot, for every vendor without credentials (stored in `~/.hauptling/slots/<slot>/`, kept across containers).
+7. `hauptling doctor`.
 
-Options: `--slots N`, `--vendors claude,codex`, `--no-login`, `--no-host`. Also `gh auth login` once for GitHub repos.
+Options: `--slots N`, `--vendors claude,codex`, `--no-login`, `--no-host`, `--no-mod`. Also `gh auth login` once for GitHub repos.
+
+The mod is read from the checkout: after an update, run `/reload-plugins` in an open Claude session. Moved the checkout? Rerun setup. Turn the mod off with `claude plugin disable hauptling@hauptling` (setup leaves it off; `enable` turns it back on). It does not load while Claude Code settings set `disableAllHooks`, `allowManagedHooksOnly` or `allowManagedModsOnly`; setup says so. For a Claude on Windows, run the `claude plugin install …` command that setup prints in WSL.
 
 Test jobs run one per repo by default, up to 3 on the host (`testConcurrency` in `~/.hauptling/config.json`). A repo whose suite is safe to run in parallel can set `"testConcurrency": N` in its `hauptling.json` (read from the base branch).
 

@@ -1,0 +1,12 @@
+{
+  "name": "hauptling",
+  "owner": { "name": "Hauptling" },
+  "description": "The Hauptling checkout as a folder marketplace: `hauptling setup` installs the Claude CLI mod from claude-mod/",
+  "plugins": [
+    {
+      "name": "hauptling",
+      "source": "./claude-mod",
+      "description": "Hauptling's agents above the prompt: status, context and controls for this repo's delegator, without a browser"
+    }
+  ]
+}
