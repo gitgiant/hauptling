@@ -35,6 +35,8 @@ export type Agent = {
   ended: boolean
   /** Place in its delegator's queue, 1 first; null when not queued. */
   queue: number | null
+  /** Set while the agent waits to be unparked: those queue ahead of the rest, as their own group. */
+  unpark?: string | null
   usage: { context_pct?: number | null; model?: string | null } | null
   test: AgentTest | null
   ask: AgentAsk | null

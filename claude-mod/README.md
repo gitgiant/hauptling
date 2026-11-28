@@ -6,4 +6,6 @@ ctrl+x tab to focus the band, ←/→ or 1–9 to pick an agent, Enter to open i
 the prompt. It talks to the local Hauptling broker's dashboard API on 127.0.0.1:47800 and signs in with the
 token `hauptling dashboard --print` prints. Design: `PRD.md`, section "Claude CLI mod".
 
+`/h help` lists the slash commands that do the same from the prompt (`/h status`, `/h kill cv`, `/h reply 2 <text>`, …).
+
 Checks: `npm run test:mod` from the repo root (validate, tests).
