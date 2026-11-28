@@ -149,7 +149,7 @@ export function joinLine(headers, tok) {
 }
 
 /** `hub`: on the hub, its satellites (src/hub.mjs), for the Hosts panel and the relayed terminal, diff and timeline. */
-export function createDashboard({ db, dbPath, core, host, hub = null, updater = null, log = () => {}, slotDir = () => { throw new Error('no slots'); }, signinSlot = (slot) => slot, logins = () => [], report = {} }) {
+export function createDashboard({ db, dbPath, core, host, hub = null, updater = null, log = () => {}, slotDir = () => { throw new Error('no slots'); }, signinSlot = (slot) => slot, logins = () => [], report = {}, now = Date.now }) {
   const terms = createTerminals({ db, host, slotDir, signinSlot, log, rpc: hub ? (name, op, args) => hub.rpc(name, op, args) : null, hold: core.holdSignin });
   const satellites = () => db.prepare('SELECT name, online, lost_at FROM hosts ORDER BY name').all();
   const offline = (e) => /is offline/.test(e.message);
@@ -199,8 +199,33 @@ export function createDashboard({ db, dbPath, core, host, hub = null, updater = 
   const version = (() => { try { return gitSync('git', ['-C', rootUrl(new URL('..', import.meta.url)), 'log', '-1', '--format=%h %cs'], { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { return null; } })();
   let lastLoad = null;
   const PROBE_DEADLINE_MS = 150;
+  const IMAGE_TAG_TTL_MS = 60e3;
   const TIMEOUT = Symbol('timeout');
   const probeState = new Map();
+  const imageState = { has: false, at: 0, value: null, running: false };
+  /**
+   * Computes `host.imageTag()` off the request path and reuses its answer for 60 s: `baseImageTag()` walks and
+   * hashes the checkout synchronously, so running it inline would block the event loop. Cold callers get `null`
+   * with `pending: true` and schedule one deferred computation after replying; stale callers get the previous
+   * tag immediately and refresh in the background.
+   */
+  function deferredImageTag() {
+    if (typeof host.imageTag !== 'function') return { value: null, pending: false };
+    const stale = !imageState.has || now() - imageState.at >= IMAGE_TAG_TTL_MS;
+    if (stale && !imageState.running) {
+      imageState.running = true;
+      const t = setImmediate(() => {
+        Promise.resolve().then(() => host.imageTag()).then(v => v ?? null, () => null).then((v) => {
+          imageState.value = v;
+          imageState.has = true;
+          imageState.at = now();
+          imageState.running = false;
+        });
+      });
+      t.unref?.();
+    }
+    return { value: imageState.has ? imageState.value : null, pending: !imageState.has };
+  }
   async function hostInfo() {
     const sys = host.sysInfo?.() || {};
     let pending = false;
@@ -237,11 +262,13 @@ export function createDashboard({ db, dbPath, core, host, hub = null, updater = 
       probe('waits', () => core.testWaits?.()),
       probe('log', () => host.logTail?.(20)),
     ]);
+    const img = deferredImageTag();
+    if (img.pending) pending = true;
     return {
       pending,
       containers, egress, dockerDisk, wsl, waits, log,
       name: hostname(), ...sys, cpu: lastLoad?.cpu ?? null, gpu,
-      broker: { pid: process.pid, uptime_s: Math.round((Date.now() - startedAt) / 1000), node: process.versions.node, version, image: host.imageTag?.() ?? null },
+      broker: { pid: process.pid, uptime_s: Math.round((Date.now() - startedAt) / 1000), node: process.versions.node, version, image: img.value },
       ...(core.hostCounts?.() || { workers: { running: 0, max: 0, slots: 0, queued: 0 }, tests: { running: 0, queued: 0 } }),
       scale: core.testScale?.() ?? null, repos: core.repoCosts?.() ?? [],
     };
