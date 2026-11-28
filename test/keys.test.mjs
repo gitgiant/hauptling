@@ -75,3 +75,35 @@ test('budget: stored next to the key, validated, removed with the key; periods s
   assert.equal(keys.periodEnd(28, at), new Date(2026, 10, 28).toISOString());
   assert.equal(keys.periodStart(1, new Date(2026, 0, 5)), new Date(2026, 0, 1).toISOString());
 });
+
+test('Console sign-in as Claude\'s API account: stored as a key, mounted into API workers instead of an env key', async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const keys = await import('../src/keys.mjs');
+  const { workerRunArgs } = await import('../src/docker.mjs');
+  const dir = mkdtempSync(join(tmpdir(), 'hl-console-'));
+  process.env.HAUPTLING_CONSOLE_DIR = dir;
+  try {
+    keys.removeKey('claude');
+    assert.equal(keys.consoleSignin(), null);
+    assert.throws(() => keys.setConsole('claude'), /No Console sign-in on this host/);
+    assert.throws(() => keys.setConsole('codex'), /claude only/);
+    mkdirSync(join(dir, 'credentials'));
+    writeFileSync(join(dir, 'active_config'), 'default\n');
+    writeFileSync(join(dir, 'credentials', 'default.json'), JSON.stringify({ type: 'oauth_token', access_token: 'a', refresh_token: 'r', workspace_name: 'Claude Code', organization_name: 'Org' }));
+    assert.deepEqual(keys.setConsole('claude'), { vendor: 'claude', hint: 'Console sign-in', workspace: 'Claude Code', organization: 'Org' });
+    assert.equal(keys.isConsole('claude'), true);
+    assert.equal(keys.keyHints().claude, 'Console sign-in');
+    assert.deepEqual(keys.workerKeyEnv('claude'), {}, 'no key in the environment');
+    assert.deepEqual(keys.setBudget('claude', 100, 12), { usd: 100, resets_on: 12 }, 'budgets work as for a key');
+    const run = (apiKey) => workerRunArgs({ slot: 'hl-w1', id: 'a', dir: '/hl/work/a', vendor: 'claude', apiKey, mcpFile: '/hl/mcp/a.json', credsMask: '/hl/mcp/a.creds.json', image: 'img', limits: { memory: '1g', cpus: 1 } });
+    const mounts = (argv) => argv.filter((v, i) => argv[i - 1] === '-v');
+    assert.ok(mounts(run(true)).includes(`${dir}:/home/worker/.config/anthropic`));
+    assert.ok(mounts(run(true)).includes('/hl/mcp/a.creds.json:/home/worker/.vendor/claude/.credentials.json'), 'the slot\'s subscription sign-in is hidden');
+    assert.ok(!mounts(run(false)).some(m => m.includes('.config/anthropic') || m.includes('.credentials.json')), 'a plan worker sees neither');
+    assert.throws(() => keys.setKey('claude', keys.CONSOLE), /does not look like an API key/, 'never set by pasting');
+    keys.setKey('claude', 'sk-ant-api03-abcdefghijklmnop');
+    assert.ok(!mounts(run(true)).some(m => m.includes('.config/anthropic')), 'a real key: no Console mounts');
+  } finally { keys.removeKey('claude'); delete process.env.HAUPTLING_CONSOLE_DIR; }
+});

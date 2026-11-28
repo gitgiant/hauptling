@@ -49,6 +49,7 @@ Setup:
   update [--check]                         update this checkout to origin/main, rebuild the image if needed, restart
                                            the broker (--check: only report)
   key set VENDOR | key rm VENDOR | key list   API key instead of slot sign-ins (one key for all slots; billed per token)
+  key set claude --console                 use this host's Claude Console sign-in as the API account (no key to paste)
   key budget VENDOR USD|off [--resets-on DAY] API first up to USD a month (new API spawns stop at 90%), then slot sign-ins
   key up-to VENDOR TIER|MODEL|off          the key pays only for models up to this tier (also --up-to on set/budget); above it: plan
   login SLOT VENDOR [--force]              sign one slot in to claude|codex|agy (refused while a worker of that vendor runs on the slot)
@@ -67,7 +68,7 @@ const [cmd, ...rest] = process.argv.slice(2);
 
 async function main() {
   const { call } = await import('../src/client.mjs');
-  const args = parseArgs(rest, { repeat: ['choice', 'artifacts'], bool: ['test-writer', 'allow-tier', 'until-event', 'host', 'all', 'gpu', 'force', 'no-host', 'no-login', 'now', 'print', 'new-token', 'no-gate', 'no-automerge', 'once', 'top', 'bottom', 'check'] });
+  const args = parseArgs(rest, { repeat: ['choice', 'artifacts'], bool: ['test-writer', 'allow-tier', 'until-event', 'host', 'all', 'gpu', 'force', 'no-host', 'no-login', 'now', 'print', 'new-token', 'no-gate', 'no-automerge', 'once', 'top', 'bottom', 'check', 'console'] });
   const text = () => args._.join(' ');
   /** The agent id to use for what was typed; says so when it is the old id of a renamed agent. */
   const target = async (agent) => {
@@ -419,10 +420,14 @@ async function main() {
       if (sub === 'set') {
         const tier = ceiling(args.upTo);
         // Read the key from stdin (pipe) or a hidden prompt; never from argv, so it stays out of shell history.
-        const key = process.stdin.isTTY ? await hiddenPrompt(`${keys.KEY_ENV[vendor] || 'API key'} for ${vendor}: `) : (await (async () => { let s = ''; for await (const c of process.stdin) s += c; return s; })());
-        const r = keys.setKey(vendor, key);
+        let r;
+        if (args.console) r = keys.setConsole(vendor);
+        else {
+          const key = process.stdin.isTTY ? await hiddenPrompt(`${keys.KEY_ENV[vendor] || 'API key'} for ${vendor}: `) : (await (async () => { let s = ''; for await (const c of process.stdin) s += c; return s; })());
+          r = keys.setKey(vendor, key);
+        }
         if (tier !== undefined) keys.setUpTo(vendor, tier);
-        const stored = `${vendor}: API key ${r.hint} stored (~/.hauptling/keys/${vendor}, mode 600).`;
+        const stored = args.console ? `${vendor}: this host's Console sign-in${r.workspace ? ` (workspace ${r.workspace})` : ''} is now its API account.` : `${vendor}: API key ${r.hint} stored (~/.hauptling/keys/${vendor}, mode 600).`;
         if (args.budget != null) keys.setBudget(vendor, args.budget, args.resetsOn ?? 1);
         if (args.budget != null) return out(`${stored}\n${mode(vendor, r.hint)}. Keep the slots signed in for the fallback.\nKey for every spawn instead: hauptling key budget ${vendor} off`);
         if (keys.getBudget(vendor)) return out(`${stored}\n${mode(vendor, r.hint)}.`);

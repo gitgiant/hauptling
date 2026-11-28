@@ -1,5 +1,6 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { homedir } from 'node:os';
 import { home } from './util.mjs';
 
 /*
@@ -10,6 +11,7 @@ import { home } from './util.mjs';
  *   codex:  OPENAI_API_KEY, stored by `codex login --with-api-key` in a separate CODEX_HOME
  *           (<slot>/codex-key) so the slot's ChatGPT sign-in in <slot>/codex is left alone
  *   agy:    GEMINI_API_KEY
+ * Claude only: the key file may hold `console` instead: the host's Console sign-in is the API account (below).
  * Files: ~/.hauptling/keys/<vendor>, mode 600, directory 700.
  *
  * Budget (optional, ~/.hauptling/keys/<vendor>.budget.json): API first, then the plan. Spawns take the key
@@ -40,6 +42,41 @@ export function setKey(vendor, key) {
   chmodSync(file(vendor), 0o600);
   clearExhausted(vendor);
   return { vendor, hint: hint(k) };
+}
+
+// ---------- Claude's Console sign-in as the API account (PRD "Console sign-in") ----------
+/** What the key file holds when the vendor's API account is a Console sign-in, not a key. */
+export const CONSOLE = 'console';
+/** Where Claude Code keeps a Console sign-in ("Anthropic Console account · API usage billing"): host-wide, outside any config dir. */
+export const consoleDir = () => process.env.HAUPTLING_CONSOLE_DIR || join(homedir(), '.config', 'anthropic');
+/** { workspace, organization } of the host's Console sign-in, or null when there is none. */
+export function consoleSignin(dir = consoleDir()) {
+  try {
+    const active = readFileSync(join(dir, 'active_config'), 'utf8').trim() || 'default';
+    const c = JSON.parse(readFileSync(join(dir, 'credentials', `${active}.json`), 'utf8'));
+    return c.access_token || c.refresh_token ? { workspace: c.workspace_name || null, organization: c.organization_name || null } : null;
+  } catch { return null; }
+}
+/** Makes the host's Console sign-in Claude's API account: the same budget, ceiling and spend rules as a key. */
+export function setConsole(vendor) {
+  if (vendor !== 'claude') throw new Error('--console is for claude only (its "Anthropic Console account" sign-in)');
+  const c = consoleSignin();
+  if (!c) throw new Error(`No Console sign-in on this host (${consoleDir()}). Sign in first: Usage page → Claude → Sign in → "Anthropic Console account · API usage billing"`);
+  mkdirSync(dir(), { recursive: true, mode: 0o700 });
+  chmodSync(dir(), 0o700);
+  writeFileSync(file(vendor), `${CONSOLE}\n`, { mode: 0o600 });
+  clearExhausted(vendor);
+  return { vendor, hint: hint(CONSOLE), ...c };
+}
+export const isConsole = (vendor, key = getKey(vendor)) => vendor === 'claude' && key === CONSOLE;
+/**
+ * Extra `docker run` mounts for an API worker on the Console sign-in: the sign-in itself (read-write: the CLI
+ * refreshes its token there), and `mask`, an empty credential file laid over the slot's own, since a subscription
+ * sign-in in the slot would win over it.
+ */
+export function workerKeyMounts(vendor, mask, key = getKey(vendor)) {
+  if (!isConsole(vendor, key)) return [];
+  return ['-v', `${consoleDir()}:/home/worker/.config/anthropic`, '-v', `${mask}:/home/worker/.vendor/claude/.credentials.json`];
 }
 
 export function removeKey(vendor) {
@@ -135,15 +172,15 @@ export function periodEnd(resetsOn = 1, at = new Date()) {
   return d.toISOString();
 }
 
-/** Last 4 characters, for display. */
-export const hint = (k) => (k ? `…${k.slice(-4)}` : null);
+/** Last 4 characters, for display (a Console sign-in by name). */
+export const hint = (k) => (k === CONSOLE ? 'Console sign-in' : k ? `…${k.slice(-4)}` : null);
 
 /** { claude: '…abcd' | null, … } */
 export const keyHints = () => Object.fromEntries(Object.keys(KEY_ENV).map(v => [v, hint(getKey(v))]));
 
 /** Extra container env for a worker of `vendor`: the key, and Codex's separate home. */
 export function workerKeyEnv(vendor, key = getKey(vendor)) {
-  if (!key) return {};
+  if (!key || isConsole(vendor, key)) return {}; // a Console sign-in is mounted (`workerKeyMounts`), not passed
   const env = { [KEY_ENV[vendor]]: key };
   if (vendor === 'codex') env.CODEX_HOME = '/home/worker/.vendor/codex-key';
   return env;

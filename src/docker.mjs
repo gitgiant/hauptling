@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path';
 import { homedir, availableParallelism, freemem, loadavg, totalmem, networkInterfaces, release, uptime } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { BROKER_PORT, home, shellLine } from './util.mjs';
-import { workerKeyEnv } from './keys.mjs';
+import { workerKeyEnv, workerKeyMounts, isConsole } from './keys.mjs';
 import { INSTALL_TIMEOUT_S } from './vendors.mjs';
 import * as codegraph from './codegraph.mjs';
 import * as sessions from './sessions.mjs';
@@ -556,11 +556,11 @@ export function vendorMounts(slot, vendor) {
  * `docker run` args for a task container: its own clone at /work, its own /home/worker (container-local),
  * and only its vendor's credentials dir(s) from the slot, so workers of other vendors can share the slot.
  */
-export function workerRunArgs({ slot, id, dir, vendor, env = {}, apiKey = false, mcpFile, image, limits = config() }) {
+export function workerRunArgs({ slot, id, dir, vendor, env = {}, apiKey = false, mcpFile, credsMask = null, image, limits = config() }) {
   const git = { GIT_AUTHOR_NAME: `hauptling ${slot}`, GIT_AUTHOR_EMAIL: `${slot}@hauptling.local`, GIT_COMMITTER_NAME: `hauptling ${slot}`, GIT_COMMITTER_EMAIL: `${slot}@hauptling.local` };
   return ['run', '-d', '--name', container(id), '--init', '--user', uid(), '--network', NET,
     '--memory', String(limits.memory), '--cpus', String(limits.cpus), '--label', `hauptling.agent=${id}`, '--label', `hauptling.slot=${slot}`, '--label', `hauptling.vendor=${vendor}`,
-    '-v', `${dir}:/work`, ...vendorMounts(slot, vendor), '-v', `${mcpFile}:/etc/claude-code/managed-mcp.json:ro`, ...proxyEnv(),
+    '-v', `${dir}:/work`, ...vendorMounts(slot, vendor), ...(apiKey && credsMask ? workerKeyMounts(vendor, credsMask) : []), '-v', `${mcpFile}:/etc/claude-code/managed-mcp.json:ro`, ...proxyEnv(),
     ...Object.entries({ ...env, ...(apiKey ? workerKeyEnv(vendor) : {}), ...git }).flatMap(([k, v]) => ['-e', `${k}=${v}`]),
     image, 'sleep', 'infinity'];
 }
@@ -569,6 +569,7 @@ export function workerRunArgs({ slot, id, dir, vendor, env = {}, apiKey = false,
 export const TUI_SIZE = { cols: 220, rows: 50 };
 
 const mcpPath = (id) => join(home(), 'mcp', `${id}.json`);
+const maskPath = (id) => join(home(), 'mcp', `${id}.creds.json`);
 const sessionStore = (id) => join(home(), 'sessions', String(id).replace(/[^a-zA-Z0-9_-]/g, '-'));
 
 export function dockerHost({ log = () => {}, docker: dockerCmd = docker } = {}) {
@@ -673,7 +674,10 @@ export function dockerHost({ log = () => {}, docker: dockerCmd = docker } = {}) 
       writeFileSync(mcpFile, JSON.stringify(mcp, null, 2));
       if (codegraphCache) codegraph.seed(codegraphCache, dir);
       await docker(['rm', '-f', container(id)]).catch(() => {});
-      await docker(workerRunArgs({ slot, id, dir, vendor, env, apiKey, mcpFile, image, limits: c }));
+      // An API worker on the Console sign-in: an empty credential file hides the slot's subscription sign-in from it.
+      let credsMask = null;
+      if (apiKey && isConsole(vendor)) { credsMask = maskPath(id); writeFileSync(credsMask, '{}', { mode: 0o600 }); }
+      await docker(workerRunArgs({ slot, id, dir, vendor, env, apiKey, mcpFile, credsMask, image, limits: c }));
       // Also installs the repo's dependencies (through the proxy; a failure is noted in the brief, never fatal).
       await exec(id, ['hauptling', 'prepare', vendor, '/work'], { timeout: (INSTALL_TIMEOUT_S + 120) * 1000 });
       if (codegraphCache) {
@@ -744,6 +748,7 @@ export function dockerHost({ log = () => {}, docker: dockerCmd = docker } = {}) 
       if (paused) await docker(['unpause', container(id)]).catch(() => {});
       await docker(['rm', '-f', container(id)]).catch(() => {});
       rmSync(mcpPath(id), { force: true });
+      rmSync(maskPath(id), { force: true });
     },
     attachArgv: (_slot, id) => dockerArgv(['exec', '-it', container(id), 'tmux', 'attach', '-t', 'main']),
     // Parked workers (PRD "Parking"): the vendor session transcript, copied between a slot and ~/.hauptling/sessions/<agent>/.
