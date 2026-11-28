@@ -73,7 +73,7 @@ function world(on: On, b: Board): World {
   on('ui.toast', () => ({ value: undefined }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('ui.panes', () => ({ value: w.paneOpen ? [{ id: 'hauptling', title: 'Hauptling', isShown: true, isFocused: true, isPlaced: true }] : [] }))
-  on('ui.focus', () => ({}))
+  on('ui.focus', { plugin: '*' }, () => ({ value: undefined }))
   return w
 }
 
