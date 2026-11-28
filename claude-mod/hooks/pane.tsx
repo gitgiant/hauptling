@@ -287,7 +287,7 @@ export function registerPane(on: On): void {
       choose: i => answerChoice($, i),
       reply: t => sendReply($, t),
       claude: t => sendClaude($, t),
-      host: h => setHost($, h),
+      host: name => setHost($, name),
       tier: t => setTier($, t),
     }
     switch (view) {

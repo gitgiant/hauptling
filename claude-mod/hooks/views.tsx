@@ -47,16 +47,16 @@ function keyButton(els: Els, acts: PaneActs, k: PaneKey, label: string = KEYS[k]
 
 function headerView(els: Els, acts: PaneActs, m: PaneModel) {
   const { Box, Text } = els
-  const h = m.header
+  const top = m.header
   return (
     <Box flexDirection="column">
-      <Text bold wrap="truncate-end">{h.title}</Text>
-      <Text dimColor wrap="truncate-end">{h.merge} · {h.tests}</Text>
+      <Text bold wrap="truncate-end">{top.title}</Text>
+      <Text dimColor wrap="truncate-end">{top.merge} · {top.tests}</Text>
       <Box flexDirection="row" flexWrap="wrap" columnGap={2}>
-        <Text dimColor>{h.gpu}</Text>
-        {h.gpuKey && keyButton(els, acts, 'gpu', `${h.gpuKey} GPU`)}
+        <Text dimColor>{top.gpu}</Text>
+        {top.gpuKey && keyButton(els, acts, 'gpu', `${top.gpuKey} GPU`)}
       </Box>
-      <Text dimColor wrap="truncate-end">{h.usage.join(' · ')}</Text>
+      <Text dimColor wrap="truncate-end">{top.usage.join(' · ')}</Text>
     </Box>
   )
 }
@@ -222,7 +222,7 @@ export function optionsView(els: Els, acts: PaneActs, m: PaneModel) {
         {keyButton(els, acts, 'gate', `merge gate: ${m.d.gate ? 'on (turn off)' : 'off (turn on)'}`)}
         {keyButton(els, acts, 'automerge', `auto-merge: ${m.d.automerge ? 'on (turn off)' : 'off (turn on)'}`)}
       </Box>
-      <Select key="host" label="host for new agents: " options={m.hosts.map(h => ({ value: h }))}
+      <Select key="host" label="host for new agents: " options={m.hosts.map(name => ({ value: name }))}
         {...(m.host ? { value: m.host } : {})} onSelect={v => acts.host(v)} />
       <Select key="tier" label="model tier for new workers: " options={TIERS.map(t => ({ value: t }))}
         {...(m.prefer ? { value: m.prefer } : {})} onSelect={v => acts.tier(v)} />

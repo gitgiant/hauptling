@@ -68,17 +68,17 @@ describe('header line', () => {
   test('tests, GPU, merge settings and usage', async () => {
     const inGate = agent({ id: 'g', title: 'Gated', state: 'done', test: { id: 't', state: 'running', gpu: false, purpose: 'gate', status: null, passed: null, failed: null, at: iso(0), position: null, retry: null } })
     const b = { ...board([inGate], [d]), tests: { running: [], queued: 0, limit: 3, auto: true }, gpu: { available: true, paused: true, running: [], queued: [] } } as Board
-    const h = headerOf(b, d, { vendors: [{ vendor: 'agy', limits: [{ window: '3p-5h', used_pct: 9.6 }, { window: 'week', used_pct: 3 }, { window: '5h', used_pct: 50 }] }], prefer: 'best' })
-    expect(h.merge).toBe('gate off (1 in the gate) · auto-merge on')
-    expect(h.tests).toBe('tests 0 running')
-    expect(h.gpu).toBe('GPU paused')
-    expect(h.gpuKey).toBe('resume')
-    expect(h.usage).toEqual(['agy 5h 50% wk 3% c/g 5h 10%'])
+    const top = headerOf(b, d, { vendors: [{ vendor: 'agy', limits: [{ window: '3p-5h', used_pct: 9.6 }, { window: 'week', used_pct: 3 }, { window: '5h', used_pct: 50 }] }], prefer: 'best' })
+    expect(top.merge).toBe('gate off (1 in the gate) · auto-merge on')
+    expect(top.tests).toBe('tests 0 running')
+    expect(top.gpu).toBe('GPU paused')
+    expect(top.gpuKey).toBe('resume')
+    expect(top.usage).toEqual(['agy 5h 50% wk 3% c/g 5h 10%'])
   })
   test('no GPU, no tests on the board, no usage yet', async () => {
     const b = { ...board([], [d]), gpu: { available: false } } as Board
-    const h = headerOf(b, d, null)
-    expect([h.tests, h.gpu, h.gpuKey, h.usage]).toEqual(['tests ?', 'GPU none', null, ['usage …']])
+    const top = headerOf(b, d, null)
+    expect([top.tests, top.gpu, top.gpuKey, top.usage]).toEqual(['tests ?', 'GPU none', null, ['usage …']])
     expect(headerOf(board([], [d]), d, null).gpu).toBe('GPU ?')
   })
   test('usage windows and the usage answer, defensively', async () => {
