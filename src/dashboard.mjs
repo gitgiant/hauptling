@@ -15,6 +15,7 @@ import { buildBody, checkImage, brokerFacts, fileIssue, issueRepo, originUrl, sc
  * Dashboard (phase 4a), served by the broker:
  *   GET  /?k=<token>        swaps the dashboard token for an HttpOnly SameSite=Strict cookie
  *   GET  /, /web/*          the static page (web/dashboard)
+ *   GET  /favicon.ico       public alias for the SVG favicon
  *   GET  /dash/stream       Server-Sent Events: a board snapshot whenever it changes
  *   GET  /dash/agent/<id>/diff|events, /dash/history, /dash/db/tables, /dash/db/table
  *   POST /dash/db/query     ad-hoc read-only SQL
@@ -100,7 +101,7 @@ export function headline(a) {
 
 const ACTIONS = new Set(['answer', 'reply', 'pause', 'unpause', 'restart', 'kill', 'merge', 'delegator.set', 'gpu.pause', 'gpu.resume', 'test.run', 'models.prefer', 'satellite.revoke']);
 const COOKIE = 'hl_dash';
-const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml' };
+const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png' };
 
 /** The dashboard token (created on first use); `rotate` replaces it, logging every browser out. */
 export function dashToken(db, { rotate = false } = {}) {
@@ -652,7 +653,7 @@ export function createDashboard({ db, dbPath, core, host, hub = null, updater = 
     res.end(readFileSync(p));
   }
 
-  const SIGN_IN = `<!doctype html><meta charset="utf-8"><title>Hauptling</title><style>body{font:16px system-ui;max-width:36rem;margin:4rem auto;padding:0 1rem}</style>
+  const SIGN_IN = `<!doctype html><meta charset="utf-8"><title>Hauptling</title><link rel="icon" type="image/svg+xml" href="/web/favicon.svg"><style>body{font:16px system-ui;max-width:36rem;margin:4rem auto;padding:0 1rem}</style>
 <h1>Hauptling dashboard</h1><p>Not signed in. Run <code>hauptling dashboard</code> in a terminal on this machine: it opens this page with a sign-in link.</p>`;
 
   async function readBody(req, max = 64e3) {
@@ -664,8 +665,12 @@ export function createDashboard({ db, dbPath, core, host, hub = null, updater = 
   /** Handles dashboard routes; returns false for anything else. */
   async function handle(req, res, url) {
     const p = url.pathname;
-    if (!(p === '/' || p.startsWith('/web/') || p.startsWith('/dash/'))) return false;
+    if (!(p === '/' || p === '/favicon.ico' || p.startsWith('/web/') || p.startsWith('/dash/'))) return false;
     if (!isLoopback(req)) { json(res, 403, { error: 'The dashboard is only served on 127.0.0.1' }); return true; }
+    if (req.method === 'GET' && (p === '/favicon.ico' || p === '/web/favicon.svg')) {
+      serveFile(res, 'favicon.svg');
+      return true;
+    }
     const tok = dashToken(db);
     if (p === '/' && url.searchParams.get('k')) {
       if (!same(url.searchParams.get('k'), tok)) { res.writeHead(401, { 'content-type': 'text/html; charset=utf-8' }); res.end(SIGN_IN.replace('Not signed in.', 'That sign-in link is old or wrong.')); return true; }

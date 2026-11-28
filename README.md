@@ -1,5 +1,7 @@
 # hauptling
 
+![Hauptling pixel-art captain](web/dashboard/hauptling-256.png)
+
 Delegates coding tasks to Claude, Codex and agy (Antigravity CLI) workers. Design: [PRD.md](PRD.md). Phase 1 (local first, workers in WSL) is implemented.
 
 ## Install
