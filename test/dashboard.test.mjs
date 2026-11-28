@@ -73,6 +73,28 @@ test('dashboard auth: token → cookie, no cookie → 401, docker0 → 403, othe
   s.done();
 });
 
+test('dashboard links to a public SVG favicon and serves it at the default URL', async (t) => {
+  const s = await setup();
+  t.after(s.done);
+
+  const page = await s.req('/');
+  assert.equal(page.code, 200);
+  const iconPath = /<link rel="icon" type="image\/svg\+xml" href="([^"]+)">/.exec(page.body)?.[1];
+  assert.ok(iconPath, 'dashboard declares an SVG favicon');
+
+  const icon = await s.req(iconPath, { cookie: null });
+  assert.equal(icon.code, 200);
+  assert.equal(icon.headers['content-type'], 'image/svg+xml');
+  assert.match(icon.body, /^<svg\b/);
+  assert.equal((await s.req(iconPath, { cookie: null, addr: '172.17.0.1' })).code, 403);
+  assert.equal((await s.req('/web/app.js', { cookie: null })).code, 401);
+
+  const fallback = await s.req('/favicon.ico', { cookie: null });
+  assert.equal(fallback.code, 200);
+  assert.equal(fallback.headers['content-type'], 'image/svg+xml');
+  assert.equal(fallback.body, icon.body);
+});
+
 test('dashboard lifecycle actions require POST and show the paused headline', async () => {
   const s = await setup();
   s.host.pauseWorker = async () => {};
