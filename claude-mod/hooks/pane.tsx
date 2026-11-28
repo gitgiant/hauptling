@@ -18,6 +18,7 @@ import {
 } from './pane-model'
 import type { PaneKey } from './pane-model'
 import { shortNames } from './board'
+import { closeTerminal, followAgent, openTerminal, renderTerminal, terminalAgent } from './terminal'
 import { answerView, detailView, optionsView, suggestView, tableView } from './views'
 import type { Els, PaneActs, PaneModel } from './views'
 
@@ -47,6 +48,7 @@ export const USAGE_MS = 30e3
 /** Opens the pane on one agent (Enter or a digit on the band, `/h`): the table, no question up. */
 export async function openAgent($: $, agent: string | null): Promise<void> {
   if (agent) await update($, openedState, () => agent)
+  if (await terminalAgent($)) await closeTerminal($)
   await update($, viewState, () => 'table' as const)
   await update($, pendingState, () => null)
   await $.ui.open({ id: PANE, title: 'Hauptling', focus: true })
@@ -91,7 +93,9 @@ async function say($: $, text: string, isError = false): Promise<void> {
   await update($, statusState, () => ({ text, isError }))
 }
 
+/** Every view change goes through here: leaving the terminal stops its stream and releases its lease. */
 async function setView($: $, v: PaneView): Promise<void> {
+  if (v !== 'terminal' && (await terminalAgent($))) await closeTerminal($)
   await update($, viewState, () => v)
 }
 
@@ -172,7 +176,11 @@ export async function pressKey($: $, key: PaneKey): Promise<void> {
       await setView($, a.ask && (await read($, viewState)) !== 'answer' ? 'answer' : 'suggest')
       return
     case 'claude': await setView($, 'claude'); return
-    case 'terminal': await say($, 'terminal: not built yet'); return
+    case 'terminal':
+      await update($, statusState, () => null)
+      await openTerminal($, a.id, name)
+      await setView($, 'terminal')
+      return
     case 'diff':
     case 'events': await showDetail($, key, a.id); return
     case 'up':
@@ -205,6 +213,10 @@ async function showDetail($: $, kind: 'diff' | 'events', agent: string): Promise
 /** A row's Button, or the band's focus ring: the agent the pane acts on. */
 async function selectAgent($: $, agent: string): Promise<void> {
   await update($, openedState, () => agent)
+  // The terminal follows the selection: the old stream stops, the new agent's starts.
+  if ((await read($, viewState)) !== 'terminal') return
+  const s = await scene($)
+  if (s?.a?.id === agent) await followAgent($, agent, s.name)
 }
 
 /** Picks one of an open ask's choices. */
@@ -291,6 +303,7 @@ export function registerPane(on: On): void {
       tier: t => setTier($, t),
     }
     switch (view) {
+      case 'terminal': return renderTerminal($, e, () => pressKey($, 'back'))
       case 'diff':
       case 'events': return detailView(els, acts, m)
       case 'answer': return answerView(els, acts, m)
