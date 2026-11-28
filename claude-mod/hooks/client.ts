@@ -158,3 +158,10 @@ export async function* stream($: $, path: string, signal?: AbortSignal): AsyncGe
     if (piece.stream === 'stdout') yield* parse(piece.text)
   }
 }
+
+// ---------------------------------------------------------------- usage (the pane header)
+
+/** Each vendor's usage windows, spend and the model tier preference (`usage()` in src/dashboard.mjs). */
+export function usage($: $) {
+  return request<unknown>($, 'GET', '/dash/usage')
+}
